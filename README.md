@@ -1,6 +1,6 @@
 # filesystem-mcp-rs
 
-Rust port of the JavaScript filesystem MCP server (`../index.ts`). Same MCP tool surface, rebuilt in Rust for speed and safety, while preserving protocol compatibility and path protections.
+Rust port of the [official JavaScript filesystem MCP server](https://github.com/modelcontextprotocol/servers/tree/main/src/filesystem). Same MCP tool surface, rebuilt in Rust for speed and safety, while preserving protocol compatibility and path protections.
 
 ## Capabilities
 - Read: `read_text_file` (head/tail), `read_media_file`, `read_multiple_files`
@@ -97,8 +97,6 @@ args = ["C:/projects", "C:/temp", "D:/work"]
 
 Note: On Windows, use forward slashes (`C:/path`) or double backslashes (`C:\\path`) in TOML strings.
 
-For the original JavaScript version, see: https://github.com/modelcontextprotocol/servers/tree/main/src/filesystem
-
 ## Symlink policy
 - Default: paths are canonicalized; symlinks escaping the allowlist are rejected.
 - `--allow_symlink_escape`: if a symlink itself is inside the allowlist, operations may follow it even if the target is outside.
@@ -113,4 +111,10 @@ For the original JavaScript version, see: https://github.com/modelcontextprotoco
 - `tests/integration.rs` — per-tool integration coverage
 
 Open to extensions (non-follow symlink mode, extra tools).
+
+## Original Project
+
+This is a Rust port of the official [Model Context Protocol filesystem server](https://github.com/modelcontextprotocol/servers).
+
+For the JavaScript version, see: https://github.com/modelcontextprotocol/servers/tree/main/src/filesystem
 
