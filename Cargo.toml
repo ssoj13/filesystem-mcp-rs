@@ -6,7 +6,7 @@ description = "Rust port of the official MCP filesystem server - fast, safe, pro
 license = "MIT"
 repository = "https://github.com/ssoj13/filesystem-mcp-rs"
 homepage = "https://github.com/ssoj13/filesystem-mcp-rs"
-keywords = ["mcp", "filesystem", "server", "protocol", "model-context-protocol"]
+keywords = ["mcp", "filesystem", "server", "protocol", "llm"]
 categories = ["command-line-utilities", "filesystem"]
 readme = "README.md"
 
