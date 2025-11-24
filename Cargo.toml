@@ -2,6 +2,13 @@
 name = "filesystem-mcp-rs"
 version = "0.1.0"
 edition = "2024"
+description = "Rust port of the official MCP filesystem server - fast, safe, protocol-compatible file operations with path validation"
+license = "MIT"
+repository = "https://github.com/ssoj13/filesystem-mcp-rs"
+homepage = "https://github.com/ssoj13/filesystem-mcp-rs"
+keywords = ["mcp", "filesystem", "server", "protocol", "model-context-protocol"]
+categories = ["command-line-utilities", "filesystem"]
+readme = "README.md"
 
 [dependencies]
 anyhow = "1.0.100"
