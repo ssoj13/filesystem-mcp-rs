@@ -17,7 +17,7 @@ cargo build
 ```
 
 ### Run the server (stdio MCP)
-- Allow directories via CLI when the client doesn’t send roots:
+- Allow directories via CLI when the client doesn't send roots:
   ```bash
   cargo run -- <DIR1> <DIR2>
   ```
@@ -39,10 +39,48 @@ cargo test   # integration + unit
 
 ## Configure for Claude Code
 
-Install the binary:
+### Prerequisites (Windows only)
+
+**Important:** Claude Code on Windows requires git-bash. If git is installed but bash is not in PATH, set the environment variable:
+
+```powershell
+# PowerShell (run as user, not admin)
+[Environment]::SetEnvironmentVariable('CLAUDE_CODE_GIT_BASH_PATH', 'C:\Program Files\Git\bin\bash.exe', 'User')
+```
+
+Or if git is installed elsewhere, find it with:
+```powershell
+where git.exe
+# Example output: C:\Programs\Git\bin\git.exe
+# Then set: C:\Programs\Git\bin\bash.exe
+```
+
+Restart your terminal after setting the variable.
+
+### Installation
+
+Build and install the binary:
 ```bash
+cargo build --release
+# Or install globally:
 cargo install --path .
 ```
+
+### Add MCP Server via CLI (Recommended)
+
+**Unix/Linux:**
+```bash
+claude mcp add filesystem -- filesystem-mcp-rs /projects /tmp /home/user/work
+```
+
+**Windows (using full path):**
+```bash
+claude mcp add filesystem -- "C:/path/to/filesystem-mcp-rs/target/release/filesystem-mcp-rs.exe" "C:/projects"
+```
+
+**Important:** Do NOT use `--log-level` or other flags when adding via `claude mcp add` - they are not supported by the executable. Only pass directory paths.
+
+### Manual Configuration (Alternative)
 
 Edit `~/.config/claude-code/config.json` (Unix/Linux) or `C:\Users\<username>\.config\claude-code\config.json` (Windows):
 
@@ -63,11 +101,19 @@ Edit `~/.config/claude-code/config.json` (Unix/Linux) or `C:\Users\<username>\.c
 {
   "mcpServers": {
     "filesystem": {
-      "command": "filesystem-mcp-rs",
+      "command": "C:/path/to/filesystem-mcp-rs.exe",
       "args": ["C:/projects", "C:/temp", "D:/work"]
     }
   }
 }
+```
+
+### Verify Connection
+
+Check that the server is connected:
+```bash
+claude mcp list
+# Should show: filesystem: ... - ✓ Connected
 ```
 
 For Claude Desktop, use the same format in `claude_desktop_config.json`.
@@ -95,12 +141,12 @@ command = "filesystem-mcp-rs"
 args = ["C:/projects", "C:/temp", "D:/work"]
 ```
 
-Note: On Windows, use forward slashes (`C:/path`) or double backslashes (`C:\\path`) in TOML strings.
+Note: On Windows, use forward slashes (`C:/path`) or double backslashes (`C:\path`) in TOML strings.
 
 ## Symlink policy
 - Default: paths are canonicalized; symlinks escaping the allowlist are rejected.
 - `--allow_symlink_escape`: if a symlink itself is inside the allowlist, operations may follow it even if the target is outside.
-- Tools always validate paths; no raw “operate on the link itself” mode yet. If you need non-follow (operate on the link inode), we can add an opt-in flag per tool.
+- Tools always validate paths; no raw "operate on the link itself" mode yet. If you need non-follow (operate on the link inode), we can add an opt-in flag per tool.
 
 ## Structure
 - `src/main.rs` — MCP server + tools
@@ -117,4 +163,3 @@ Open to extensions (non-follow symlink mode, extra tools).
 This is a Rust port of the official [Model Context Protocol filesystem server](https://github.com/modelcontextprotocol/servers).
 
 For the JavaScript version, see: https://github.com/modelcontextprotocol/servers/tree/main/src/filesystem
-
