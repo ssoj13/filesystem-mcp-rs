@@ -39,58 +39,60 @@ cargo test   # integration + unit
 
 ## Configure for Claude Code
 
-Point the MCP server command to this crate (cwd must be `rust/filesystem-mcp-rs`).
+Install the binary:
+```bash
+cargo install --path .
+```
 
-Configuration for Claude Code: Edit the file `~/.config/claude-code/config.json` (on Unix/Linux) or `C:\Users\joss1\.config\claude-code\config.json` (on Windows).
+Edit `~/.config/claude-code/config.json` (Unix/Linux) or `C:\Users\<username>\.config\claude-code\config.json` (Windows):
 
-Add the following configuration:
-
+**Unix/Linux:**
 ```json
 {
   "mcpServers": {
     "filesystem": {
-      "command": "cargo",
-      "args": ["run", "--release", "--", "/path/you/allow"],
-      "cwd": "/path/to/repo/rust/filesystem-mcp-rs"
+      "command": "filesystem-mcp-rs",
+      "args": ["/projects", "/tmp", "/home/user/work"]
     }
   }
 }
 ```
 
-To allow multiple directories, add them to the args array:
-
+**Windows:**
 ```json
 {
   "mcpServers": {
     "filesystem": {
-      "command": "cargo",
-      "args": ["run", "--release", "--", "/path/one", "/path/two", "/path/three"],
-      "cwd": "/path/to/repo/rust/filesystem-mcp-rs"
+      "command": "filesystem-mcp-rs",
+      "args": ["C:/projects", "C:/temp", "D:/work"]
     }
   }
 }
 ```
 
-For Claude Desktop, use the same format in your `claude_desktop_config.json` file.
+For Claude Desktop, use the same format in `claude_desktop_config.json`.
 
 ## Configure for Codex
 
-Edit the Codex config file: `~/.codex/config.toml` (on Unix/Linux) or `C:\Users\<username>\.codex\config.toml` (on Windows).
-
-Add the following MCP server configuration:
-
-```toml
-[mcp_servers.filesystem]
-command = "cargo"
-args = ["run", "--release", "--", "C:/projects"]
+Install the binary:
+```bash
+cargo install --path .
 ```
 
-To allow multiple directories:
+Edit `~/.codex/config.toml` (Unix/Linux) or `C:\Users\<username>\.codex\config.toml` (Windows):
 
+**Unix/Linux:**
 ```toml
 [mcp_servers.filesystem]
-command = "cargo"
-args = ["run", "--release", "--", "C:/projects", "C:/temp", "D:/work"]
+command = "filesystem-mcp-rs"
+args = ["/projects", "/tmp", "/home/user/work"]
+```
+
+**Windows:**
+```toml
+[mcp_servers.filesystem]
+command = "filesystem-mcp-rs"
+args = ["C:/projects", "C:/temp", "D:/work"]
 ```
 
 Note: On Windows, use forward slashes (`C:/path`) or double backslashes (`C:\\path`) in TOML strings.
