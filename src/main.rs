@@ -10,19 +10,18 @@ use rmcp::{
     handler::server::{router::tool::ToolRouter, wrapper::Parameters},
     model::AnnotateAble,
     model::{
-        CallToolResult, Content, Implementation, InitializeRequestParam, InitializeResult,
+        CallToolResult, Content, Implementation,
         ListRootsRequest, ServerCapabilities, ServerInfo, ServerRequest,
     },
     serde::{Deserialize, Serialize},
-    service::{RequestContext, ServiceError},
+    service::ServiceError,
     tool, tool_handler, tool_router,
     transport::stdio,
 };
 use schemars::JsonSchema;
 use serde_json::json;
 use tokio::fs;
-use tracing::{info, warn};
-use tracing_subscriber::EnvFilter;
+use tracing::warn;
 
 use crate::allowed::AllowedDirs;
 use crate::edit::{FileEdit, apply_edits};
@@ -51,9 +50,6 @@ struct Args {
     /// Allowed directories (fallback if client does not support roots).
     #[arg(value_name = "DIR", num_args = 0..)]
     allowed_dirs: Vec<PathBuf>,
-    /// Log level (error|warn|info|debug|trace).
-    #[arg(long, default_value = "info")]
-    log_level: String,
     /// Allow symlinks to point outside the allowed directories (operations will follow them).
     #[arg(long, default_value_t = false)]
     allow_symlink_escape: bool,
@@ -884,34 +880,9 @@ impl ServerHandler for FileSystemServer {
         self.server_info()
     }
 
-    fn initialize(
-        &self,
-        request: InitializeRequestParam,
-        context: RequestContext<rmcp::RoleServer>,
-    ) -> impl std::future::Future<Output = Result<InitializeResult, McpError>> + Send + '_ {
-        async move {
-            context.peer.set_peer_info(request.clone());
-            // TEMPORARY FIX: Skip roots refresh during initialize to avoid handshake hang
-            // if request.capabilities.roots.is_some() {
-            //     if let Err(err) = self.refresh_roots(&context.peer).await {
-            //         warn!("Failed to refresh roots during initialize: {}", err);
-            //     }
-            // } else
-            if self.allowed.is_empty().await {
-                return Err(McpError::invalid_params(
-                    "Client does not support roots and no allowed directories were provided",
-                    None,
-                ));
-            }
-
-            Ok(InitializeResult {
-                protocol_version: request.protocol_version,
-                capabilities: self.server_info().capabilities,
-                server_info: self.server_info().server_info,
-                instructions: self.server_info().instructions,
-            })
-        }
-    }
+    // NOTE: We don't override initialize() - let rmcp SDK handle the handshake protocol.
+    // The default implementation will use get_info() to build the response.
+    // Root fetching happens via on_roots_list_changed notification handler.
 
     fn on_roots_list_changed(
         &self,
@@ -928,28 +899,24 @@ impl ServerHandler for FileSystemServer {
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args = Args::parse();
-    init_tracing(&args.log_level)?;
+
+    // CRITICAL: Do NOT initialize tracing for stdio transport!
+    // Any stderr output before/during handshake causes "connection closed" in Codex.
+    // Codex's rmcp client blocks on stderr without timeout (issue #7155).
+    // If you need logging for debugging, set RUST_LOG and redirect stderr to file:
+    //   RUST_LOG=debug filesystem-mcp-rs.exe ... 2> debug.log
+
     let allowed = AllowedDirs::new(args.allowed_dirs);
     let mut server = FileSystemServer::new(allowed);
     server.allow_symlink_escape = args.allow_symlink_escape;
 
-    info!("Starting filesystem-mcp-rs server...");
     let transport = stdio();
     let svc = server.serve(transport).await?;
     svc.waiting().await?;
     Ok(())
 }
 
-fn init_tracing(level: &str) -> Result<(), Box<dyn std::error::Error>> {
-    let filter = EnvFilter::try_new(level).or_else(|_| EnvFilter::try_new("info"))?;
-    tracing_subscriber::fmt()
-        .with_env_filter(filter)
-        .with_target(false)
-        .with_level(true)
-        .compact()
-        .init();
-    Ok(())
-}
+// init_tracing removed - see main() comment about why we can't use stderr logging
 
 fn internal_err<T: ToString>(message: &'static str) -> impl FnOnce(T) -> McpError + Clone {
     move |err| McpError::internal_error(message, Some(json!({ "error": err.to_string() })))
