@@ -659,7 +659,7 @@ impl FileSystemServer {
             .map_err(internal_err("Failed to serialize tree"))?;
         Ok(CallToolResult {
             content: vec![Content::text(json_tree.clone())],
-            structured_content: Some(json!(entries)),
+            structured_content: Some(json!({ "tree": entries })),
             is_error: Some(false),
             meta: None,
         })
@@ -891,11 +891,13 @@ impl ServerHandler for FileSystemServer {
     ) -> impl std::future::Future<Output = Result<InitializeResult, McpError>> + Send + '_ {
         async move {
             context.peer.set_peer_info(request.clone());
-            if request.capabilities.roots.is_some() {
-                if let Err(err) = self.refresh_roots(&context.peer).await {
-                    warn!("Failed to refresh roots during initialize: {}", err);
-                }
-            } else if self.allowed.is_empty().await {
+            // TEMPORARY FIX: Skip roots refresh during initialize to avoid handshake hang
+            // if request.capabilities.roots.is_some() {
+            //     if let Err(err) = self.refresh_roots(&context.peer).await {
+            //         warn!("Failed to refresh roots during initialize: {}", err);
+            //     }
+            // } else
+            if self.allowed.is_empty().await {
                 return Err(McpError::invalid_params(
                     "Client does not support roots and no allowed directories were provided",
                     None,
