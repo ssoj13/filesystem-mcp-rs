@@ -2,12 +2,12 @@
 name = "filesystem-mcp-rs"
 version = "0.1.0"
 edition = "2024"
-description = "Rust port of the official MCP filesystem server - fast, safe, protocol-compatible file operations with path validation"
+description = "Rust port of the official MCP memory server - fast, safe, protocol-compatible file operations with knowledge graphs"
 license = "MIT"
-repository = "https://github.com/ssoj13/filesystem-mcp-rs"
-homepage = "https://github.com/ssoj13/filesystem-mcp-rs"
-keywords = ["mcp", "filesystem", "server", "protocol", "llm"]
-categories = ["command-line-utilities", "filesystem"]
+repository = "https://github.com/ssoj13/memory-mcp-rs"
+homepage = "https://github.com/ssoj13/memory-mcp-rs"
+keywords = ["mcp", "memory", "server", "protocol", "llm"]
+categories = ["command-line-utilities", "memory"]
 readme = "README.md"
 
 [dependencies]
