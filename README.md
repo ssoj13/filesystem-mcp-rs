@@ -10,6 +10,30 @@ Rust port of the [official JavaScript filesystem MCP server](https://github.com/
 - Search/roots: `search_files` (glob + exclude), `grep_files` (regex content search), `list_allowed_directories`
 - Safety: allowlist/roots validation, escape protection, optional `--allow_symlink_escape`
 
+## Advanced Editing Tools
+
+### `edit_lines` - Line-Based Surgical Edits
+Precise editing by line numbers (1-indexed). Perfect when you know exact locations:
+- **Operations**: `replace`, `insert_before`, `insert_after`, `delete`
+- **Supports**: Single lines or ranges (startLine-endLine)
+- **Use cases**: Fixing specific lines, adding imports at known positions, removing exact code blocks
+- **Features**: Returns unified diff, dry-run mode for preview
+
+### `bulk_edits` - Mass Search/Replace Across Files
+Apply the same edits to multiple files at once. More efficient than editing files individually:
+- **File selection**: Glob patterns (e.g., `*.rs`, `**/*.txt`, `src/**/*.js`)
+- **Operations**: Search/replace text across all matching files
+- **Error handling**: Continues on failure, reports errors per-file
+- **Use cases**: Renaming functions/variables across codebase, updating imports, fixing typos everywhere, refactoring patterns
+- **Features**: Returns summary with diffs, dry-run mode for preview
+
+### `grep_files` - Content Search
+Search for text/regex patterns **inside** file contents (not filenames):
+- **Supports**: Regex patterns, case-insensitive search, context lines
+- **File filtering**: Optional glob patterns to limit scope
+- **Returns**: Matching lines with file paths and line numbers
+- **Use cases**: Finding code patterns, locating function definitions, searching across codebase
+
 ## Quick start
 ```bash
 cd rust/filesystem-mcp-rs
@@ -152,8 +176,11 @@ Note: On Windows, use forward slashes (`C:/path`) or double backslashes (`C:\pat
 - `src/main.rs` — MCP server + tools
 - `src/path.rs` — path validation/escape protection
 - `src/fs_ops.rs` — read/head/tail
-- `src/edit.rs`, `src/diff.rs` — edits + unified diff
+- `src/edit.rs`, `src/diff.rs` — text-based edits + unified diff
+- `src/line_edit.rs` — line-based surgical edits
+- `src/bulk_edit.rs` — mass search/replace across files
 - `src/search.rs` — glob search with excludes
+- `src/grep.rs` — regex content search inside files
 - `tests/integration.rs` — per-tool integration coverage
 
 Open to extensions (non-follow symlink mode, extra tools).
