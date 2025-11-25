@@ -29,6 +29,7 @@ use crate::fs_ops::{head as head_lines, read_text, tail as tail_lines};
 use crate::media::read_media_base64;
 use crate::path::resolve_validated_path;
 use crate::search::search_paths;
+use crate::grep::{GrepParams, grep_files};
 
 mod allowed;
 mod diff;
@@ -40,6 +41,7 @@ mod mime;
 mod path;
 mod roots;
 mod search;
+mod grep;
 
 #[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
@@ -323,6 +325,34 @@ struct SearchArgs {
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 struct FileInfoArgs {
     path: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+struct GrepFilesArgs {
+    /// Root directory to search
+    path: String,
+    /// Regex pattern to search for in file contents
+    pattern: String,
+    /// Glob pattern for files to include (e.g., "*.rs", "**/*.txt")
+    #[serde(skip_serializing_if = "Option::is_none")]
+    file_pattern: Option<String>,
+    /// Case-insensitive search
+    #[serde(default)]
+    case_insensitive: bool,
+    /// Number of context lines before match
+    #[serde(default)]
+    context_before: usize,
+    /// Number of context lines after match
+    #[serde(default)]
+    context_after: usize,
+    /// Maximum number of matches to return (0 = unlimited, default 100)
+    #[serde(default = "default_max_matches")]
+    max_matches: usize,
+}
+
+fn default_max_matches() -> usize {
+    100
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
@@ -871,6 +901,88 @@ impl FileSystemServer {
         };
         Ok(CallToolResult::success(vec![Content::text(text.clone())])
             .with_structured(json!({ "directories": lines })))
+    }
+
+    #[tool(
+        name = "grep_files",
+        description = "Search for text/regex pattern INSIDE file contents (like grep/ripgrep). Use when you need to find specific code, text, or patterns within files. Recursively searches through file contents and returns matching lines with context. Supports regex patterns, file filtering (*.rs, **/*.txt), case-insensitive search, and context lines. Different from search_files which only matches file names/paths."
+    )]
+    async fn grep_files(
+        &self,
+        Parameters(args): Parameters<GrepFilesArgs>,
+    ) -> Result<CallToolResult, McpError> {
+        self.ensure_allowed().await?;
+
+        let params = GrepParams {
+            root: args.path.clone(),
+            pattern: args.pattern.clone(),
+            file_pattern: args.file_pattern.clone(),
+            case_insensitive: args.case_insensitive,
+            context_before: args.context_before,
+            context_after: args.context_after,
+            max_matches: args.max_matches,
+        };
+
+        let matches = grep_files(params, &self.allowed, self.allow_symlink_escape)
+            .await
+            .map_err(|e| McpError::internal_error(format!("Grep failed: {}", e), None))?;
+
+        // Format results
+        let mut lines = Vec::new();
+        for m in &matches {
+            let path_str = m.path.to_string_lossy();
+            
+            // Add before context
+            for (i, line) in m.before_context.iter().enumerate() {
+                let line_no = m.line_number - m.before_context.len() + i;
+                lines.push(format!("{}:{}:  {}", path_str, line_no, line));
+            }
+            
+            // Add match line
+            lines.push(format!("{}:{}:> {}", path_str, m.line_number, m.line));
+            
+            // Add after context
+            for (i, line) in m.after_context.iter().enumerate() {
+                let line_no = m.line_number + i + 1;
+                lines.push(format!("{}:{}:  {}", path_str, line_no, line));
+            }
+            
+            if !m.after_context.is_empty() {
+                lines.push("--".to_string());
+            }
+        }
+
+        let text = if matches.is_empty() {
+            format!("No matches found for pattern: {}", args.pattern)
+        } else {
+            format!(
+                "Found {} matches for pattern '{}' in {}:\n\n{}",
+                matches.len(),
+                args.pattern,
+                args.path,
+                lines.join("\n")
+            )
+        };
+
+        let structured = json!({
+            "matches": matches.iter().map(|m| json!({
+                "path": m.path.to_string_lossy(),
+                "lineNumber": m.line_number,
+                "line": m.line,
+                "beforeContext": m.before_context,
+                "afterContext": m.after_context,
+            })).collect::<Vec<_>>(),
+            "totalMatches": matches.len(),
+            "pattern": args.pattern,
+            "searchPath": args.path,
+        });
+
+        Ok(CallToolResult {
+            content: vec![Content::text(text)],
+            structured_content: Some(structured),
+            is_error: Some(false),
+            meta: None,
+        })
     }
 }
 

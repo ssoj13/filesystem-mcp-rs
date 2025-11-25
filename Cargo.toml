@@ -30,6 +30,7 @@ async-trait = "0.1.89"
 humantime = "2.3.0"
 futures = "0.3.31"
 schemars = { version = "1.1.0", features = ["derive"] }
+regex = "1.12.2"
 
 [dev-dependencies]
 tempfile = "3.23.0"

@@ -7,7 +7,7 @@ Rust port of the [official JavaScript filesystem MCP server](https://github.com/
 - Write/Edit: `write_file`, `edit_file` (diff + dry-run)
 - FS ops: `create_directory`, `move_file`, `copy_file` (files/dirs, overwrite), `delete_path` (recursive)
 - Introspection: `list_directory`, `list_directory_with_sizes`, `get_file_info`, `directory_tree`
-- Search/roots: `search_files` (glob + exclude), `list_allowed_directories`
+- Search/roots: `search_files` (glob + exclude), `grep_files` (regex content search), `list_allowed_directories`
 - Safety: allowlist/roots validation, escape protection, optional `--allow_symlink_escape`
 
 ## Quick start
