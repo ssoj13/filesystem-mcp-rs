@@ -4,7 +4,7 @@ Rust port of the [official JavaScript filesystem MCP server](https://github.com/
 
 ## Capabilities
 - Read: `read_text_file` (head/tail), `read_media_file`, `read_multiple_files`
-- Write/Edit: `write_file`, `edit_file` (diff + dry-run)
+- Write/Edit: `write_file`, `edit_file` (diff + dry-run), `edit_lines` (line-based edits), `bulk_edits` (mass search/replace)
 - FS ops: `create_directory`, `move_file`, `copy_file` (files/dirs, overwrite), `delete_path` (recursive)
 - Introspection: `list_directory`, `list_directory_with_sizes`, `get_file_info`, `directory_tree`
 - Search/roots: `search_files` (glob + exclude), `grep_files` (regex content search), `list_allowed_directories`

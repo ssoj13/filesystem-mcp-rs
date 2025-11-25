@@ -30,6 +30,8 @@ use crate::media::read_media_base64;
 use crate::path::resolve_validated_path;
 use crate::search::search_paths;
 use crate::grep::{GrepParams, grep_files};
+use crate::line_edit::{LineEdit, LineOperation, apply_line_edits};
+use crate::bulk_edit::bulk_edit_files;
 
 mod allowed;
 mod diff;
@@ -42,6 +44,8 @@ mod path;
 mod roots;
 mod search;
 mod grep;
+mod line_edit;
+mod bulk_edit;
 
 #[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
@@ -353,6 +357,61 @@ struct GrepFilesArgs {
 
 fn default_max_matches() -> usize {
     100
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "lowercase")]
+enum LineEditOperation {
+    Replace,
+    #[serde(rename = "insert_before")]
+    InsertBefore,
+    #[serde(rename = "insert_after")]
+    InsertAfter,
+    Delete,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+struct LineEditInstruction {
+    /// Line number to edit (1-indexed)
+    line: usize,
+    /// End line for range operations (1-indexed, inclusive). If omitted, operates on single line
+    #[serde(skip_serializing_if = "Option::is_none")]
+    end_line: Option<usize>,
+    /// Operation: "replace", "insert_before", "insert_after", "delete"
+    operation: LineEditOperation,
+    /// Text content for replace/insert operations
+    #[serde(skip_serializing_if = "Option::is_none")]
+    text: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+struct EditLinesArgs {
+    /// Path to file
+    path: String,
+    /// List of line-based edit operations
+    edits: Vec<LineEditInstruction>,
+    /// Dry run mode - return diff without applying changes
+    #[serde(default)]
+    dry_run: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+struct BulkEditsArgs {
+    /// Root directory to search for files
+    path: String,
+    /// Glob pattern for files to edit (e.g., "**/*.rs", "src/**/*.txt")
+    file_pattern: String,
+    /// Glob patterns to exclude (optional)
+    #[serde(default)]
+    exclude_patterns: Vec<String>,
+    /// List of search/replace operations to apply to all matching files
+    edits: Vec<EditOperation>,
+    /// Dry run mode - return diffs without applying changes
+    #[serde(default)]
+    dry_run: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
@@ -975,6 +1034,153 @@ impl FileSystemServer {
             "totalMatches": matches.len(),
             "pattern": args.pattern,
             "searchPath": args.path,
+        });
+
+        Ok(CallToolResult {
+            content: vec![Content::text(text)],
+            structured_content: Some(structured),
+            is_error: Some(false),
+            meta: None,
+        })
+    }
+
+    #[tool(
+        name = "edit_lines",
+        description = "Edit file by LINE NUMBERS (precise, surgical edits). Use when you know EXACT line numbers to modify. Operations: replace (change line(s)), insert_before/insert_after (add new lines), delete (remove line(s)). Supports single lines or ranges (startLine-endLine). Returns unified diff. Use this for: fixing specific lines, adding imports at known positions, removing exact lines. Different from edit_file which uses search/replace text matching. Line numbers are 1-indexed."
+    )]
+    async fn edit_lines(
+        &self,
+        Parameters(args): Parameters<EditLinesArgs>,
+    ) -> Result<CallToolResult, McpError> {
+        let path = self.resolve(&args.path).await?;
+        let original = read_text(&path)
+            .await
+            .map_err(internal_err("Failed to read file"))?;
+
+        // Convert JSON operations to internal LineEdit format
+        let edits: Vec<LineEdit> = args
+            .edits
+            .into_iter()
+            .map(|e| {
+                let operation = match e.operation {
+                    LineEditOperation::Replace => LineOperation::Replace,
+                    LineEditOperation::InsertBefore => LineOperation::InsertBefore,
+                    LineEditOperation::InsertAfter => LineOperation::InsertAfter,
+                    LineEditOperation::Delete => LineOperation::Delete,
+                };
+                LineEdit {
+                    start_line: e.line,
+                    end_line: e.end_line,
+                    operation,
+                    text: e.text,
+                }
+            })
+            .collect();
+
+        let (modified, diff) = apply_line_edits(&original, &edits)
+            .map_err(|e| McpError::internal_error(format!("Line edit failed: {}", e), None))?;
+
+        if !args.dry_run {
+            fs::write(&path, &modified)
+                .await
+                .map_err(internal_err("Failed to write file"))?;
+        }
+
+        let message = if args.dry_run {
+            format!("Dry run - changes NOT applied to {}", args.path)
+        } else {
+            format!("Successfully edited {} lines in {}", edits.len(), args.path)
+        };
+
+        Ok(CallToolResult {
+            content: vec![Content::text(format!("{}\n\nDiff:\n{}", message, diff))],
+            structured_content: Some(json!({
+                "message": message,
+                "diff": diff,
+                "editsApplied": edits.len(),
+                "dryRun": args.dry_run,
+            })),
+            is_error: Some(false),
+            meta: None,
+        })
+    }
+
+    #[tool(
+        name = "bulk_edits",
+        description = "Apply SAME edits to MULTIPLE files at once (mass search/replace). Use when you need to change the same code/text across many files. Select files by glob pattern (*.rs, **/*.txt), then apply search/replace operations to all matches. Returns summary of modified files with diffs. Perfect for: renaming functions/variables across codebase, updating imports, fixing typos everywhere, refactoring patterns. More efficient than editing files one by one. Supports dry-run to preview changes."
+    )]
+    async fn bulk_edits(
+        &self,
+        Parameters(args): Parameters<BulkEditsArgs>,
+    ) -> Result<CallToolResult, McpError> {
+        self.ensure_allowed().await?;
+
+        // Convert to FileEdit format
+        let edits: Vec<FileEdit> = args
+            .edits
+            .into_iter()
+            .map(|e| FileEdit {
+                old_text: e.old_text,
+                new_text: e.new_text,
+            })
+            .collect();
+
+        let results = bulk_edit_files(
+            &args.path,
+            &args.file_pattern,
+            &args.exclude_patterns,
+            &edits,
+            args.dry_run,
+            &self.allowed,
+            self.allow_symlink_escape,
+        )
+        .await
+        .map_err(|e| McpError::internal_error(format!("Bulk edit failed: {}", e), None))?;
+
+        // Count results
+        let total_files = results.len();
+        let modified_count = results.iter().filter(|r| r.modified).count();
+        let error_count = results.iter().filter(|r| r.error.is_some()).count();
+
+        // Format output
+        let mut lines = Vec::new();
+        if args.dry_run {
+            lines.push(format!("DRY RUN - Changes NOT applied"));
+        }
+        lines.push(format!(
+            "Processed {} files: {} modified, {} errors",
+            total_files, modified_count, error_count
+        ));
+        lines.push(String::new());
+
+        for result in &results {
+            let path_str = result.path.to_string_lossy();
+            if let Some(err) = &result.error {
+                lines.push(format!("❌ {}: {}", path_str, err));
+            } else if result.modified {
+                lines.push(format!("✓ {} - MODIFIED", path_str));
+                if let Some(diff) = &result.diff {
+                    lines.push(diff.clone());
+                    lines.push(String::new());
+                }
+            } else {
+                lines.push(format!("  {} - no changes", path_str));
+            }
+        }
+
+        let text = lines.join("\n");
+
+        let structured = json!({
+            "totalFiles": total_files,
+            "modified": modified_count,
+            "errors": error_count,
+            "dryRun": args.dry_run,
+            "results": results.iter().map(|r| json!({
+                "path": r.path.to_string_lossy(),
+                "modified": r.modified,
+                "error": r.error,
+                "diff": r.diff,
+            })).collect::<Vec<_>>(),
         });
 
         Ok(CallToolResult {
