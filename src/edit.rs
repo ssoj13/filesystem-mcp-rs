@@ -39,7 +39,25 @@ pub fn apply_edits(content: &str, edits: &[FileEdit]) -> Result<(String, String)
         }
 
         if !matched {
-            bail!("Could not find exact match for edit:\n{}", edit.old_text);
+            let preview = if edit.old_text.len() > 200 {
+                format!("{}... ({} chars total)", &edit.old_text[..200], edit.old_text.len())
+            } else {
+                edit.old_text.clone()
+            };
+
+            bail!(
+                "Text not found in file. The 'oldText' parameter does not match any content.\n\
+                \n\
+                Searched for:\n{}\n\
+                \n\
+                This usually means:\n\
+                1. The file was modified by a previous edit in this operation\n\
+                2. Whitespace/indentation doesn't match exactly\n\
+                3. The text has been changed since you last read the file\n\
+                \n\
+                Solution: Re-read the file to get current content, then retry the edit with exact text.",
+                preview
+            );
         }
     }
 
