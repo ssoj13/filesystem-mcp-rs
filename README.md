@@ -41,79 +41,137 @@ cargo build --release
 
 ## Transport Modes
 
-filesystem-mcp-rs supports two transport modes:
+filesystem-mcp-rs supports dual-mode transport:
 
 ### stdio Mode (Default)
-For local MCP clients like Claude Desktop, Cursor, Codex, etc.
-- Uses standard input/output for communication
-- **No stderr output by default** (prevents connection issues)
-- Enable file logging with `-l` flag
+Local MCP clients (Claude Desktop, Cursor, Codex):
+- stdin/stdout communication
+- **No stderr by default** (prevents client connection errors)
+- File logging with `-l`
 
+### HTTP Stream Mode
+Remote access, web integrations, cloud deployments:
+- HTTP server with SSE streaming
+- MCP endpoint: `/mcp`
+- Health check: `/health`
+- Console logging enabled (optional file with `-l`)
+
+## Usage Examples
+
+### Get Help
 ```bash
-# Basic usage
-filesystem-mcp-rs /path/to/allowed/dir
-
-# With file logging (creates filesystem-mcp-rs.log)
-filesystem-mcp-rs -l /path/to/allowed/dir
-
-# Custom log file
-filesystem-mcp-rs -l custom.log /path/to/allowed/dir
-
-# Allow symlink escape
-filesystem-mcp-rs --allow-symlink-escape /projects
+filesystem-mcp-rs --help
+filesystem-mcp-rs -V  # version
 ```
 
-### Streamable HTTP Mode
-For remote access, web integrations, and cloud deployments.
-- Starts HTTP server with MCP endpoint at `/mcp`
-- Console logging enabled by default
-- Optional file logging with `-l` flag
-- Health check endpoint at `/health`
-
+### stdio Mode
 ```bash
-# Start HTTP server on default port (localhost:8000)
+# Basic
+filesystem-mcp-rs /projects /tmp
+
+# With logging (writes to filesystem-mcp-rs.log)
+filesystem-mcp-rs -l /projects
+
+# Custom log file
+filesystem-mcp-rs -l /var/log/mcp.log /projects
+```
+
+**Log location**: Current working directory or specified path
+
+### HTTP Stream Mode
+```bash
+# Local (http://127.0.0.1:8000)
 filesystem-mcp-rs -s
 
 # Custom port
 filesystem-mcp-rs -s -p 9000
 
-# Accessible from network
+# Network accessible
 filesystem-mcp-rs -s -b 0.0.0.0 -p 8000
 
 # With file logging
-filesystem-mcp-rs -s -l
+filesystem-mcp-rs -s -l server.log
 
-# Custom log file
-filesystem-mcp-rs -s -l myserver.log
-
-# Full example with all options
-filesystem-mcp-rs -s -b 0.0.0.0 -p 8000 -l server.log --allow-symlink-escape
+# Production setup
+filesystem-mcp-rs -s -b 0.0.0.0 -p 8000 -l /var/log/mcp-server.log
 ```
 
-Default HTTP endpoint: `http://127.0.0.1:8000/mcp`
+**Check health**:
+```bash
+curl http://localhost:8000/health
+# Returns: OK
+```
 
-### Command-line Flags
+**Logs**: Console by default, file with `-l` flag
 
+### All Options
 ```
 Usage: filesystem-mcp-rs [OPTIONS] [DIRS...]
 
 Arguments:
-  [DIRS...]  Allowed directories (fallback if client doesn't support roots)
+  [DIRS...]  Allowed directories
 
 Options:
-      --allow-symlink-escape  Allow symlinks outside allowed dirs
-  -s, --stream                Enable streamable HTTP mode (default: stdio)
-  -p, --port <PORT>           HTTP port for stream mode [default: 8000]
-  -b, --bind <ADDR>           Bind address for stream mode [default: 127.0.0.1]
-  -l, --log [<FILE>]          Enable file logging. Optionally specify log file name [default: filesystem-mcp-rs.log]
+      --allow-symlink-escape  Follow symlinks outside allowed dirs
+  -s, --stream                HTTP mode (default: stdio)
+  -p, --port <PORT>           HTTP port [default: 8000]
+  -b, --bind <ADDR>           Bind address [default: 127.0.0.1]
+  -l, --log [<FILE>]          Log to file [default: filesystem-mcp-rs.log]
   -h, --help                  Print help
   -V, --version               Print version
 ```
 
 ## Tests
 ```bash
-cargo test   # integration + unit
+cargo test              # All tests (unit + integration + HTTP transport)
+cargo test --test http_transport  # HTTP transport only
 ```
+
+Tests:
+- **10 unit tests**: line_edit, bulk_edit, roots parsing
+- **19 integration tests**: file operations, search, grep
+- **4 HTTP transport tests**: server startup, health, MCP endpoint
+
+## Development
+
+### Project Structure
+```
+src/
+├── main.rs         - Entry point, CLI args, transport modes
+├── logging.rs      - Transport-aware logging (stdio/stream)
+├── allowed.rs      - Directory allowlist/validation
+├── path.rs         - Path resolution, escape protection
+├── fs_ops.rs       - File read/head/tail
+├── edit.rs         - Text-based edits + unified diff
+├── line_edit.rs    - Line-based surgical edits
+├── bulk_edit.rs    - Mass search/replace
+├── search.rs       - Glob search with excludes
+└── grep.rs         - Regex content search
+
+tests/
+├── integration.rs     - MCP tool integration tests
+└── http_transport.rs  - HTTP server tests
+```
+
+### Adding HTTP Transport Tests
+HTTP tests spawn server subprocess and verify endpoints:
+```rust
+#[tokio::test]
+async fn test_http_server_health_check() {
+    // Start server on random port
+    // Poll /health until ready
+    // Assert response
+}
+```
+
+### Transport Modes Implementation
+- **stdio**: `rmcp::transport::stdio()` - no stderr logging by default
+- **HTTP**: `StreamableHttpService` + `LocalSessionManager` - SSE streaming
+
+### Key Dependencies
+- `rmcp 0.9.0` - MCP SDK (features: `transport-io`, `server`, `transport-streamable-http-server`)
+- `axum 0.8` - HTTP server framework
+- `tokio` - Async runtime
 
 ## Configure for Claude Code
 
@@ -162,25 +220,49 @@ claude mcp add filesystem -- "C:/path/to/filesystem-mcp-rs/target/release/filesy
 
 Edit `~/.config/claude-code/config.json` (Unix/Linux) or `C:\Users\<username>\.config\claude-code\config.json` (Windows):
 
-**Unix/Linux:**
+**stdio mode (default):**
 ```json
 {
   "mcpServers": {
     "filesystem": {
       "command": "filesystem-mcp-rs",
-      "args": ["/projects", "/tmp", "/home/user/work"]
+      "args": ["/projects", "/tmp"]
     }
   }
 }
 ```
 
-**Windows:**
+**stdio with logging:**
 ```json
 {
   "mcpServers": {
     "filesystem": {
-      "command": "C:/path/to/filesystem-mcp-rs.exe",
-      "args": ["C:/projects", "C:/temp", "D:/work"]
+      "command": "filesystem-mcp-rs",
+      "args": ["-l", "mcp-server.log", "/projects"]
+    }
+  }
+}
+```
+
+**HTTP stream mode:**
+```json
+{
+  "mcpServers": {
+    "filesystem-http": {
+      "command": "filesystem-mcp-rs",
+      "args": ["-s", "-p", "8000", "-b", "127.0.0.1"]
+    }
+  }
+}
+```
+
+**HTTP with custom port and logging:**
+```json
+{
+  "mcpServers": {
+    "filesystem-http": {
+      "command": "filesystem-mcp-rs",
+      "args": ["-s", "-p", "9000", "-l", "http-server.log"]
     }
   }
 }
@@ -205,21 +287,35 @@ cargo install --path .
 
 Edit `~/.codex/config.toml` (Unix/Linux) or `C:\Users\<username>\.codex\config.toml` (Windows):
 
-**Unix/Linux:**
+**stdio mode (default):**
 ```toml
 [mcp_servers.filesystem]
 command = "filesystem-mcp-rs"
-args = ["/projects", "/tmp", "/home/user/work"]
+args = ["/projects", "/tmp"]
 ```
 
-**Windows:**
+**stdio with logging:**
 ```toml
 [mcp_servers.filesystem]
 command = "filesystem-mcp-rs"
-args = ["C:/projects", "C:/temp", "D:/work"]
+args = ["-l", "codex-mcp.log", "/projects"]
 ```
 
-Note: On Windows, use forward slashes (`C:/path`) or double backslashes (`C:\path`) in TOML strings.
+**HTTP stream mode:**
+```toml
+[mcp_servers.filesystem_http]
+command = "filesystem-mcp-rs"
+args = ["-s", "-p", "8000"]
+```
+
+**HTTP with custom settings:**
+```toml
+[mcp_servers.filesystem_http]
+command = "filesystem-mcp-rs"
+args = ["-s", "-b", "0.0.0.0", "-p", "9000", "-l", "http-codex.log"]
+```
+
+Note: Use forward slashes (`C:/path`) or double backslashes (`C:\\path`) in TOML strings on Windows.
 
 ## Symlink policy
 - Default: paths are canonicalized; symlinks escaping the allowlist are rejected.
