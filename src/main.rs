@@ -38,6 +38,7 @@ mod diff;
 mod edit;
 mod format;
 mod fs_ops;
+mod logging;
 mod media;
 mod mime;
 mod path;
@@ -46,6 +47,8 @@ mod search;
 mod grep;
 mod line_edit;
 mod bulk_edit;
+
+use logging::{init_logging, TransportMode};
 
 #[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
@@ -59,6 +62,22 @@ struct Args {
     /// Allow symlinks to point outside the allowed directories (operations will follow them).
     #[arg(long, default_value_t = false)]
     allow_symlink_escape: bool,
+
+    /// Enable streamable HTTP mode (default: stdio)
+    #[arg(short = 's', long = "stream")]
+    stream_mode: bool,
+
+    /// HTTP port for stream mode
+    #[arg(short = 'p', long, default_value = "8000")]
+    port: u16,
+
+    /// Bind address for stream mode
+    #[arg(short = 'b', long, default_value = "127.0.0.1")]
+    bind: String,
+
+    /// Enable file logging. Optionally specify log file name (default: filesystem-mcp-rs.log)
+    #[arg(short = 'l', long, value_name = "FILE", num_args = 0..=1, default_missing_value = "filesystem-mcp-rs.log")]
+    log: Option<String>,
 }
 
 #[derive(Clone)]
@@ -1214,24 +1233,76 @@ impl ServerHandler for FileSystemServer {
     }
 }
 
-#[tokio::main]
-async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let args = Args::parse();
-
-    // CRITICAL: Do NOT initialize tracing for stdio transport!
-    // Any stderr output before/during handshake causes "connection closed" in Codex.
-    // Codex's rmcp client blocks on stderr without timeout (issue #7155).
-    // If you need logging for debugging, set RUST_LOG and redirect stderr to file:
-    //   RUST_LOG=debug filesystem-mcp-rs.exe ... 2> debug.log
-
-    let allowed = AllowedDirs::new(args.allowed_dirs);
-    let mut server = FileSystemServer::new(allowed);
-    server.allow_symlink_escape = args.allow_symlink_escape;
-
+/// Run server in stdio mode (default)
+async fn run_stdio_mode(server: FileSystemServer) -> Result<(), Box<dyn std::error::Error>> {
     let transport = stdio();
     let svc = server.serve(transport).await?;
     svc.waiting().await?;
     Ok(())
+}
+
+/// Run server in streamable HTTP mode
+async fn run_stream_mode(
+    server: FileSystemServer,
+    bind: &str,
+    port: u16,
+) -> Result<(), Box<dyn std::error::Error>> {
+    use rmcp::transport::StreamableHttpService;
+    use rmcp::transport::streamable_http_server::session::local::LocalSessionManager;
+
+    let addr = format!("{}:{}", bind, port);
+    tracing::info!("Starting MCP HTTP server on http://{}/mcp", addr);
+
+    // Create service with session management
+    let service = StreamableHttpService::new(
+        move || Ok(server.clone()),
+        LocalSessionManager::default().into(),
+        Default::default(),
+    );
+
+    // Build router with MCP endpoint and health check
+    let router = axum::Router::new()
+        .nest_service("/mcp", service)
+        .route("/health", axum::routing::get(|| async { "OK" }));
+
+    let tcp_listener = tokio::net::TcpListener::bind(&addr).await?;
+
+    // Start server with graceful shutdown
+    axum::serve(tcp_listener, router)
+        .with_graceful_shutdown(async {
+            tokio::signal::ctrl_c().await.ok();
+        })
+        .await?;
+
+    Ok(())
+}
+
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let args = Args::parse();
+
+    // Determine transport mode
+    let mode = if args.stream_mode {
+        TransportMode::Stream
+    } else {
+        TransportMode::Stdio
+    };
+
+    // Initialize logging based on mode
+    // CRITICAL: stdio mode MUST NOT log to stderr by default!
+    // Any stderr output during handshake causes "connection closed" in MCP clients
+    init_logging(mode, args.log)?;
+
+    // Create server instance
+    let allowed = AllowedDirs::new(args.allowed_dirs);
+    let mut server = FileSystemServer::new(allowed);
+    server.allow_symlink_escape = args.allow_symlink_escape;
+
+    // Run in selected mode
+    match mode {
+        TransportMode::Stdio => run_stdio_mode(server).await,
+        TransportMode::Stream => run_stream_mode(server, &args.bind, args.port).await,
+    }
 }
 
 // init_tracing removed - see main() comment about why we can't use stderr logging

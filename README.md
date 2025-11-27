@@ -36,25 +36,79 @@ Search for text/regex patterns **inside** file contents (not filenames):
 
 ## Quick start
 ```bash
-cd rust/filesystem-mcp-rs
-cargo build
+cargo build --release
 ```
 
-### Run the server (stdio MCP)
-- Allow directories via CLI when the client doesn't send roots:
-  ```bash
-  cargo run -- <DIR1> <DIR2>
-  ```
-- Flags:
-  - `--log-level info|debug|trace`
-  - `--allow_symlink_escape` (default off; enables following symlinks that point outside allowlist)
+## Transport Modes
 
-Example:
+filesystem-mcp-rs supports two transport modes:
+
+### stdio Mode (Default)
+For local MCP clients like Claude Desktop, Cursor, Codex, etc.
+- Uses standard input/output for communication
+- **No stderr output by default** (prevents connection issues)
+- Enable file logging with `-l` flag
+
 ```bash
-cargo run -- --log-level debug --allow_symlink_escape /projects /tmp
+# Basic usage
+filesystem-mcp-rs /path/to/allowed/dir
+
+# With file logging (creates filesystem-mcp-rs.log)
+filesystem-mcp-rs -l /path/to/allowed/dir
+
+# Custom log file
+filesystem-mcp-rs -l custom.log /path/to/allowed/dir
+
+# Allow symlink escape
+filesystem-mcp-rs --allow-symlink-escape /projects
 ```
 
-If the client supports `roots/list`, you can omit dirs; otherwise pass allowed roots on the CLI.
+### Streamable HTTP Mode
+For remote access, web integrations, and cloud deployments.
+- Starts HTTP server with MCP endpoint at `/mcp`
+- Console logging enabled by default
+- Optional file logging with `-l` flag
+- Health check endpoint at `/health`
+
+```bash
+# Start HTTP server on default port (localhost:8000)
+filesystem-mcp-rs -s
+
+# Custom port
+filesystem-mcp-rs -s -p 9000
+
+# Accessible from network
+filesystem-mcp-rs -s -b 0.0.0.0 -p 8000
+
+# With file logging
+filesystem-mcp-rs -s -l
+
+# Custom log file
+filesystem-mcp-rs -s -l myserver.log
+
+# Full example with all options
+filesystem-mcp-rs -s -b 0.0.0.0 -p 8000 -l server.log --allow-symlink-escape
+```
+
+Default HTTP endpoint: `http://127.0.0.1:8000/mcp`
+
+### Command-line Flags
+
+```
+Usage: filesystem-mcp-rs [OPTIONS] [DIRS...]
+
+Arguments:
+  [DIRS...]  Allowed directories (fallback if client doesn't support roots)
+
+Options:
+      --allow-symlink-escape  Allow symlinks outside allowed dirs
+  -s, --stream                Enable streamable HTTP mode (default: stdio)
+  -p, --port <PORT>           HTTP port for stream mode [default: 8000]
+  -b, --bind <ADDR>           Bind address for stream mode [default: 127.0.0.1]
+  -l, --log [<FILE>]          Enable file logging. Optionally specify log file name [default: filesystem-mcp-rs.log]
+  -h, --help                  Print help
+  -V, --version               Print version
+```
 
 ## Tests
 ```bash

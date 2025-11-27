@@ -8,6 +8,7 @@
 *.svg
 cdx.cmd
 temp_log.txt
+*.log
 
 # IDE
 .vscode/
