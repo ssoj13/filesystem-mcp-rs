@@ -5,6 +5,8 @@ Rust port of the [official JavaScript filesystem MCP server](https://github.com/
 ## Capabilities
 - Read: `read_text_file` (head/tail), `read_media_file`, `read_multiple_files`
 - Write/Edit: `write_file`, `edit_file` (diff + dry-run), `edit_lines` (line-based edits), `bulk_edits` (mass search/replace)
+- Extract: `extract_lines` (cut lines), `extract_symbols` (cut characters)
+- Binary: `read_binary`, `write_binary`, `extract_binary`, `patch_binary` (all base64)
 - FS ops: `create_directory`, `move_file`, `copy_file` (files/dirs, overwrite), `delete_path` (recursive)
 - Introspection: `list_directory`, `list_directory_with_sizes`, `get_file_info`, `directory_tree`
 - Search/roots: `search_files` (glob + exclude), `grep_files` (regex content search), `list_allowed_directories`
@@ -33,6 +35,47 @@ Search for text/regex patterns **inside** file contents (not filenames):
 - **File filtering**: Optional glob patterns to limit scope
 - **Returns**: Matching lines with file paths and line numbers
 - **Use cases**: Finding code patterns, locating function definitions, searching across codebase
+
+## Extract Tools
+
+### `extract_lines` - Cut Lines by Number
+Remove lines from a file and optionally return extracted content:
+- **Parameters**: `path`, `line` (1-indexed), `endLine` (optional), `dryRun`, `returnExtracted`
+- **Examples**: Delete line 5, remove lines 10-20, preview deletion
+- **Use cases**: Remove imports, delete code blocks, cut sections to paste elsewhere
+
+### `extract_symbols` - Cut Characters by Position
+Remove characters from a file by Unicode position:
+- **Parameters**: `path`, `start` (0-indexed), `end` or `length`, `dryRun`, `returnExtracted`
+- **Note**: Uses Unicode chars (safe for multibyte), not raw bytes
+- **Use cases**: Remove headers, cut text blocks, extract specific ranges
+
+## Binary Tools
+
+All binary tools use base64 encoding for data transfer.
+
+### `read_binary` - Read Bytes
+Read bytes from a binary file at specified offset:
+- **Parameters**: `path`, `offset`, `length`
+- **Returns**: Base64-encoded data
+- **Use cases**: Read binary headers, extract sections of images/executables
+
+### `write_binary` - Write Bytes
+Write bytes to a binary file:
+- **Parameters**: `path`, `offset`, `data` (base64), `mode` (replace/insert)
+- **Creates file if missing**
+- **Use cases**: Patch executables, inject data, modify headers
+
+### `extract_binary` - Cut Bytes
+Remove bytes from a binary file and return them:
+- **Parameters**: `path`, `offset`, `length`, `dryRun`
+- **Returns**: Base64-encoded extracted data
+- **Use cases**: Remove binary sections, cut data to relocate
+
+### `patch_binary` - Find/Replace Binary Patterns
+Search and replace binary patterns in a file:
+- **Parameters**: `path`, `find` (base64), `replace` (base64), `all`
+- **Use cases**: Patch executables, fix binary data, search-replace in non-text files
 
 ## Quick start
 ```bash
@@ -128,8 +171,8 @@ cargo test --test http_transport  # HTTP transport only
 ```
 
 Tests:
-- **10 unit tests**: line_edit, bulk_edit, roots parsing
-- **19 integration tests**: file operations, search, grep
+- **17 unit tests**: line_edit, bulk_edit, binary, roots parsing
+- **34 integration tests**: file operations, search, grep, extract, binary
 - **4 HTTP transport tests**: server startup, health, MCP endpoint
 
 ## Development
@@ -137,7 +180,7 @@ Tests:
 ### Project Structure
 ```
 src/
-├── main.rs         - Entry point, CLI args, transport modes
+├── main.rs         - Entry point, CLI args, transport modes, 27 MCP tools
 ├── logging.rs      - Transport-aware logging (stdio/stream)
 ├── allowed.rs      - Directory allowlist/validation
 ├── path.rs         - Path resolution, escape protection
@@ -146,7 +189,8 @@ src/
 ├── line_edit.rs    - Line-based surgical edits
 ├── bulk_edit.rs    - Mass search/replace
 ├── search.rs       - Glob search with excludes
-└── grep.rs         - Regex content search
+├── grep.rs         - Regex content search
+└── binary.rs       - Binary file operations (read/write/extract/patch)
 
 tests/
 ├── integration.rs     - MCP tool integration tests
@@ -323,7 +367,7 @@ Note: Use forward slashes (`C:/path`) or double backslashes (`C:\\path`) in TOML
 - Tools always validate paths; no raw "operate on the link itself" mode yet. If you need non-follow (operate on the link inode), we can add an opt-in flag per tool.
 
 ## Structure
-- `src/main.rs` — MCP server + tools
+- `src/main.rs` — MCP server + 27 tools
 - `src/path.rs` — path validation/escape protection
 - `src/fs_ops.rs` — read/head/tail
 - `src/edit.rs`, `src/diff.rs` — text-based edits + unified diff
@@ -331,6 +375,7 @@ Note: Use forward slashes (`C:/path`) or double backslashes (`C:\\path`) in TOML
 - `src/bulk_edit.rs` — mass search/replace across files
 - `src/search.rs` — glob search with excludes
 - `src/grep.rs` — regex content search inside files
+- `src/binary.rs` — binary file operations (read/write/extract/patch)
 - `tests/integration.rs` — per-tool integration coverage
 
 Open to extensions (non-follow symlink mode, extra tools).

@@ -674,3 +674,412 @@ async fn list_allowed_directories_includes_root() -> Result<()> {
     srv.kill().await;
     Ok(())
 }
+
+// ============================================================================
+// Extract tools tests
+// ============================================================================
+
+#[tokio::test]
+async fn extract_lines_removes_and_returns_lines() -> Result<()> {
+    let tmp = TempDir::new()?;
+    let srv = start_server(tmp.path()).await?;
+    let file = tmp.path().join("lines.txt");
+    std::fs::write(&file, "line1\nline2\nline3\nline4\nline5")?;
+
+    // Extract lines 2-3 with returnExtracted to get content
+    let res = srv
+        .call_tool(
+            "extract_lines",
+            json!({ "path": &file, "line": 2, "endLine": 3, "returnExtracted": true }),
+        )
+        .await?;
+    assert_ok(&res);
+
+    // Check extracted content
+    let extracted = res["result"]["structuredContent"]["extracted"]
+        .as_str()
+        .unwrap_or("");
+    assert_eq!(extracted, "line2\nline3");
+
+    // Check file was modified
+    let remaining = std::fs::read_to_string(&file)?;
+    assert_eq!(remaining, "line1\nline4\nline5");
+
+    srv.kill().await;
+    Ok(())
+}
+
+#[tokio::test]
+async fn extract_lines_dry_run_does_not_modify() -> Result<()> {
+    let tmp = TempDir::new()?;
+    let srv = start_server(tmp.path()).await?;
+    let file = tmp.path().join("lines.txt");
+    std::fs::write(&file, "line1\nline2\nline3")?;
+
+    let res = srv
+        .call_tool(
+            "extract_lines",
+            json!({ "path": &file, "line": 2, "dryRun": true }),
+        )
+        .await?;
+    assert_ok(&res);
+
+    // File should be unchanged
+    let content = std::fs::read_to_string(&file)?;
+    assert_eq!(content, "line1\nline2\nline3");
+
+    srv.kill().await;
+    Ok(())
+}
+
+#[tokio::test]
+async fn extract_lines_single_line() -> Result<()> {
+    let tmp = TempDir::new()?;
+    let srv = start_server(tmp.path()).await?;
+    let file = tmp.path().join("lines.txt");
+    std::fs::write(&file, "a\nb\nc")?;
+
+    let res = srv
+        .call_tool("extract_lines", json!({ "path": &file, "line": 2, "returnExtracted": true }))
+        .await?;
+    assert_ok(&res);
+
+    let extracted = res["result"]["structuredContent"]["extracted"]
+        .as_str()
+        .unwrap_or("");
+    assert_eq!(extracted, "b");
+
+    let remaining = std::fs::read_to_string(&file)?;
+    assert_eq!(remaining, "a\nc");
+
+    srv.kill().await;
+    Ok(())
+}
+
+#[tokio::test]
+async fn extract_symbols_with_length() -> Result<()> {
+    let tmp = TempDir::new()?;
+    let srv = start_server(tmp.path()).await?;
+    let file = tmp.path().join("text.txt");
+    std::fs::write(&file, "Hello, World!")?;
+
+    // Extract "Hello" (first 5 chars) with returnExtracted
+    let res = srv
+        .call_tool(
+            "extract_symbols",
+            json!({ "path": &file, "start": 0, "length": 5, "returnExtracted": true }),
+        )
+        .await?;
+    assert_ok(&res);
+
+    let extracted = res["result"]["structuredContent"]["extracted"]
+        .as_str()
+        .unwrap_or("");
+    assert_eq!(extracted, "Hello");
+
+    let remaining = std::fs::read_to_string(&file)?;
+    assert_eq!(remaining, ", World!");
+
+    srv.kill().await;
+    Ok(())
+}
+
+#[tokio::test]
+async fn extract_symbols_with_end() -> Result<()> {
+    let tmp = TempDir::new()?;
+    let srv = start_server(tmp.path()).await?;
+    let file = tmp.path().join("text.txt");
+    std::fs::write(&file, "Hello, World!")?;
+
+    // Extract ", World" (positions 5-12) with returnExtracted
+    let res = srv
+        .call_tool(
+            "extract_symbols",
+            json!({ "path": &file, "start": 5, "end": 12, "returnExtracted": true }),
+        )
+        .await?;
+    assert_ok(&res);
+
+    let extracted = res["result"]["structuredContent"]["extracted"]
+        .as_str()
+        .unwrap_or("");
+    assert_eq!(extracted, ", World");
+
+    let remaining = std::fs::read_to_string(&file)?;
+    assert_eq!(remaining, "Hello!");
+
+    srv.kill().await;
+    Ok(())
+}
+
+#[tokio::test]
+async fn extract_symbols_unicode() -> Result<()> {
+    let tmp = TempDir::new()?;
+    let srv = start_server(tmp.path()).await?;
+    let file = tmp.path().join("unicode.txt");
+    std::fs::write(&file, "Hello")?;
+
+    // Extract first 2 chars with returnExtracted
+    let res = srv
+        .call_tool(
+            "extract_symbols",
+            json!({ "path": &file, "start": 0, "length": 2, "returnExtracted": true }),
+        )
+        .await?;
+    assert_ok(&res);
+
+    let extracted = res["result"]["structuredContent"]["extracted"]
+        .as_str()
+        .unwrap_or("");
+    assert_eq!(extracted, "He");
+
+    let remaining = std::fs::read_to_string(&file)?;
+    assert_eq!(remaining, "llo");
+
+    srv.kill().await;
+    Ok(())
+}
+
+#[tokio::test]
+async fn extract_symbols_dry_run() -> Result<()> {
+    let tmp = TempDir::new()?;
+    let srv = start_server(tmp.path()).await?;
+    let file = tmp.path().join("text.txt");
+    std::fs::write(&file, "Hello")?;
+
+    let res = srv
+        .call_tool(
+            "extract_symbols",
+            json!({ "path": &file, "start": 0, "length": 3, "dryRun": true }),
+        )
+        .await?;
+    assert_ok(&res);
+
+    // File unchanged
+    let content = std::fs::read_to_string(&file)?;
+    assert_eq!(content, "Hello");
+
+    srv.kill().await;
+    Ok(())
+}
+
+// ============================================================================
+// Binary tools tests
+// ============================================================================
+
+#[tokio::test]
+async fn read_binary_returns_base64() -> Result<()> {
+    let tmp = TempDir::new()?;
+    let srv = start_server(tmp.path()).await?;
+    let file = tmp.path().join("data.bin");
+    std::fs::write(&file, b"Hello, World!")?;
+
+    let res = srv
+        .call_tool(
+            "read_binary",
+            json!({ "path": &file, "offset": 7, "length": 5 }),
+        )
+        .await?;
+    assert_ok(&res);
+
+    let data = res["result"]["structuredContent"]["data"]
+        .as_str()
+        .unwrap_or("");
+    // "World" in base64
+    let decoded = STANDARD.decode(data)?;
+    assert_eq!(decoded, b"World");
+
+    srv.kill().await;
+    Ok(())
+}
+
+#[tokio::test]
+async fn write_binary_replace_mode() -> Result<()> {
+    let tmp = TempDir::new()?;
+    let srv = start_server(tmp.path()).await?;
+    let file = tmp.path().join("data.bin");
+    std::fs::write(&file, b"Hello, World!")?;
+
+    // Replace "World" with "Rust!"
+    let data = STANDARD.encode(b"Rust!");
+    let res = srv
+        .call_tool(
+            "write_binary",
+            json!({ "path": &file, "offset": 7, "data": data, "mode": "replace" }),
+        )
+        .await?;
+    assert_ok(&res);
+
+    let content = std::fs::read(&file)?;
+    assert_eq!(content, b"Hello, Rust!!");
+
+    srv.kill().await;
+    Ok(())
+}
+
+#[tokio::test]
+async fn write_binary_insert_mode() -> Result<()> {
+    let tmp = TempDir::new()?;
+    let srv = start_server(tmp.path()).await?;
+    let file = tmp.path().join("data.bin");
+    std::fs::write(&file, b"Hello World!")?;
+
+    // Insert "," at position 5
+    let data = STANDARD.encode(b",");
+    let res = srv
+        .call_tool(
+            "write_binary",
+            json!({ "path": &file, "offset": 5, "data": data, "mode": "insert" }),
+        )
+        .await?;
+    assert_ok(&res);
+
+    let content = std::fs::read(&file)?;
+    assert_eq!(content, b"Hello, World!");
+
+    srv.kill().await;
+    Ok(())
+}
+
+#[tokio::test]
+async fn extract_binary_removes_and_returns() -> Result<()> {
+    let tmp = TempDir::new()?;
+    let srv = start_server(tmp.path()).await?;
+    let file = tmp.path().join("data.bin");
+    std::fs::write(&file, b"Hello, World!")?;
+
+    // Extract ", " (2 bytes at offset 5)
+    let res = srv
+        .call_tool(
+            "extract_binary",
+            json!({ "path": &file, "offset": 5, "length": 2 }),
+        )
+        .await?;
+    assert_ok(&res);
+
+    let data = res["result"]["structuredContent"]["data"]
+        .as_str()
+        .unwrap_or("");
+    let decoded = STANDARD.decode(data)?;
+    assert_eq!(decoded, b", ");
+
+    let remaining = std::fs::read(&file)?;
+    assert_eq!(remaining, b"HelloWorld!");
+
+    srv.kill().await;
+    Ok(())
+}
+
+#[tokio::test]
+async fn extract_binary_dry_run() -> Result<()> {
+    let tmp = TempDir::new()?;
+    let srv = start_server(tmp.path()).await?;
+    let file = tmp.path().join("data.bin");
+    std::fs::write(&file, b"Hello")?;
+
+    let res = srv
+        .call_tool(
+            "extract_binary",
+            json!({ "path": &file, "offset": 0, "length": 2, "dryRun": true }),
+        )
+        .await?;
+    assert_ok(&res);
+
+    // File unchanged
+    let content = std::fs::read(&file)?;
+    assert_eq!(content, b"Hello");
+
+    srv.kill().await;
+    Ok(())
+}
+
+#[tokio::test]
+async fn patch_binary_single_replacement() -> Result<()> {
+    let tmp = TempDir::new()?;
+    let srv = start_server(tmp.path()).await?;
+    let file = tmp.path().join("data.bin");
+    std::fs::write(&file, b"foo bar foo baz")?;
+
+    let find = STANDARD.encode(b"foo");
+    let replace = STANDARD.encode(b"qux");
+
+    let res = srv
+        .call_tool(
+            "patch_binary",
+            json!({ "path": &file, "find": find, "replace": replace, "all": false }),
+        )
+        .await?;
+    assert_ok(&res);
+
+    let count = res["result"]["structuredContent"]["replacements"]
+        .as_i64()
+        .unwrap_or(0);
+    assert_eq!(count, 1);
+
+    let content = std::fs::read(&file)?;
+    assert_eq!(content, b"qux bar foo baz");
+
+    srv.kill().await;
+    Ok(())
+}
+
+#[tokio::test]
+async fn patch_binary_all_replacements() -> Result<()> {
+    let tmp = TempDir::new()?;
+    let srv = start_server(tmp.path()).await?;
+    let file = tmp.path().join("data.bin");
+    std::fs::write(&file, b"foo bar foo baz foo")?;
+
+    let find = STANDARD.encode(b"foo");
+    let replace = STANDARD.encode(b"X");
+
+    let res = srv
+        .call_tool(
+            "patch_binary",
+            json!({ "path": &file, "find": find, "replace": replace, "all": true }),
+        )
+        .await?;
+    assert_ok(&res);
+
+    let count = res["result"]["structuredContent"]["replacements"]
+        .as_i64()
+        .unwrap_or(0);
+    assert_eq!(count, 3);
+
+    let content = std::fs::read(&file)?;
+    assert_eq!(content, b"X bar X baz X");
+
+    srv.kill().await;
+    Ok(())
+}
+
+#[tokio::test]
+async fn patch_binary_not_found() -> Result<()> {
+    let tmp = TempDir::new()?;
+    let srv = start_server(tmp.path()).await?;
+    let file = tmp.path().join("data.bin");
+    std::fs::write(&file, b"hello world")?;
+
+    let find = STANDARD.encode(b"notfound");
+    let replace = STANDARD.encode(b"x");
+
+    let res = srv
+        .call_tool(
+            "patch_binary",
+            json!({ "path": &file, "find": find, "replace": replace }),
+        )
+        .await?;
+    assert_ok(&res);
+
+    let count = res["result"]["structuredContent"]["replacements"]
+        .as_i64()
+        .unwrap_or(-1);
+    assert_eq!(count, 0);
+
+    // File unchanged
+    let content = std::fs::read(&file)?;
+    assert_eq!(content, b"hello world");
+
+    srv.kill().await;
+    Ok(())
+}

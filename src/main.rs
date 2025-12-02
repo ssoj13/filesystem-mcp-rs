@@ -32,6 +32,7 @@ use crate::search::search_paths;
 use crate::grep::{GrepParams, grep_files};
 use crate::line_edit::{LineEdit, LineOperation, apply_line_edits};
 use crate::bulk_edit::bulk_edit_files;
+use crate::binary::{read_bytes, write_bytes, extract_bytes, patch_bytes, to_base64, from_base64};
 
 mod allowed;
 mod diff;
@@ -47,6 +48,7 @@ mod search;
 mod grep;
 mod line_edit;
 mod bulk_edit;
+mod binary;
 
 use logging::{init_logging, TransportMode};
 
@@ -440,6 +442,121 @@ struct TreeEntry {
     kind: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     children: Option<Vec<TreeEntry>>,
+}
+
+// ============================================================================
+// Extract tools - cut content from files and return it
+// ============================================================================
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+struct ExtractLinesArgs {
+    /// Path to file
+    path: String,
+    /// Start line number (1-indexed)
+    line: usize,
+    /// End line number (1-indexed, inclusive). If omitted, extracts single line
+    #[serde(skip_serializing_if = "Option::is_none")]
+    end_line: Option<usize>,
+    /// Dry run mode - return content without removing from file
+    #[serde(default)]
+    dry_run: bool,
+    /// Return extracted content in response (default: false to save tokens)
+    #[serde(default)]
+    return_extracted: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+struct ExtractSymbolsArgs {
+    /// Path to file
+    path: String,
+    /// Start position (0-indexed, in Unicode characters, not bytes).
+    /// Example: in "Hello" start=0 is 'H', start=4 is 'o'
+    start: usize,
+    /// End position (exclusive, 0-indexed). Use either 'end' or 'length', not both.
+    /// Example: start=0, end=5 extracts "Hello" from "Hello World"
+    #[serde(skip_serializing_if = "Option::is_none")]
+    end: Option<usize>,
+    /// Number of characters to extract. Use either 'length' or 'end', not both.
+    /// Example: start=0, length=5 extracts "Hello" from "Hello World"
+    #[serde(skip_serializing_if = "Option::is_none")]
+    length: Option<usize>,
+    /// Dry run mode - return content without removing from file
+    #[serde(default)]
+    dry_run: bool,
+    /// Return extracted content in response (default: false to save tokens)
+    #[serde(default)]
+    return_extracted: bool,
+}
+
+// ============================================================================
+// Binary tools - read/write/edit binary files
+// ============================================================================
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+struct ReadBinaryArgs {
+    /// Path to binary file
+    path: String,
+    /// Byte offset to start reading from (0-indexed)
+    offset: u64,
+    /// Number of bytes to read
+    length: usize,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+struct WriteBinaryArgs {
+    /// Path to binary file
+    path: String,
+    /// Byte offset to write at (0-indexed)
+    offset: u64,
+    /// Base64-encoded data to write
+    data: String,
+    /// Write mode: "replace" overwrites bytes, "insert" shifts existing content
+    #[serde(default = "default_write_mode")]
+    mode: WriteBinaryMode,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, Default)]
+#[serde(rename_all = "lowercase")]
+enum WriteBinaryMode {
+    #[default]
+    Replace,
+    Insert,
+}
+
+fn default_write_mode() -> WriteBinaryMode {
+    WriteBinaryMode::Replace
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+struct ExtractBinaryArgs {
+    /// Path to binary file
+    path: String,
+    /// Byte offset to start extraction (0-indexed)
+    offset: u64,
+    /// Number of bytes to extract
+    length: usize,
+    /// Dry run mode - return content without removing from file
+    #[serde(default)]
+    dry_run: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+struct PatchBinaryArgs {
+    /// Path to binary file
+    path: String,
+    /// Base64-encoded pattern to find
+    find: String,
+    /// Base64-encoded replacement data
+    replace: String,
+    /// Replace all occurrences (default: false, replaces only first)
+    #[serde(default)]
+    all: bool,
 }
 
 #[tool_router]
@@ -1205,6 +1322,436 @@ impl FileSystemServer {
         Ok(CallToolResult {
             content: vec![Content::text(text)],
             structured_content: Some(structured),
+            is_error: Some(false),
+            meta: None,
+        })
+    }
+
+    // ========================================================================
+    // Extract tools - cut content and return it
+    // ========================================================================
+
+    #[tool(
+        name = "extract_lines",
+        description = "Extract (cut) lines from a text file by line numbers. Removes lines from file unless dryRun=true.
+
+PARAMETERS:
+- path: File path
+- line: Start line (1-indexed, so first line is 1)
+- endLine: End line inclusive (optional, defaults to same as 'line' for single line)
+- dryRun: If true, only preview - don't modify file
+- returnExtracted: If true, include extracted text in response (default: false to save tokens)
+
+EXAMPLES:
+- Delete line 5: {path: 'file.txt', line: 5}
+- Delete lines 10-20: {path: 'file.txt', line: 10, endLine: 20}
+- Preview deletion: {path: 'file.txt', line: 5, dryRun: true}
+- Get deleted content: {path: 'file.txt', line: 5, returnExtracted: true}
+
+USE CASES: Remove imports, delete code blocks, cut sections to paste elsewhere."
+    )]
+    async fn extract_lines(
+        &self,
+        Parameters(args): Parameters<ExtractLinesArgs>,
+    ) -> Result<CallToolResult, McpError> {
+        let path = self.resolve(&args.path).await?;
+        let content = read_text(&path)
+            .await
+            .map_err(internal_err("Failed to read file"))?;
+
+        let lines: Vec<&str> = content.lines().collect();
+        let start_idx = args.line.saturating_sub(1);
+        let end_idx = args.end_line.unwrap_or(args.line).saturating_sub(1);
+
+        // Validate line numbers
+        if start_idx >= lines.len() {
+            return Err(McpError::invalid_params(
+                format!("Line {} is out of range (file has {} lines)", args.line, lines.len()),
+                None,
+            ));
+        }
+        // Clamp end to file length - return what's available
+        let end_idx = end_idx.min(lines.len() - 1);
+        if start_idx > end_idx {
+            return Err(McpError::invalid_params(
+                format!("Invalid range: start line {} is after end line {}", args.line, end_idx + 1),
+                None,
+            ));
+        }
+
+        // Extract the lines
+        let extracted: Vec<&str> = lines[start_idx..=end_idx].to_vec();
+        let extracted_text = extracted.join("\n");
+        let line_count = extracted.len();
+
+        if !args.dry_run {
+            // Build new content without extracted lines
+            let mut remaining: Vec<&str> = Vec::with_capacity(lines.len() - line_count);
+            remaining.extend_from_slice(&lines[..start_idx]);
+            if end_idx + 1 < lines.len() {
+                remaining.extend_from_slice(&lines[end_idx + 1..]);
+            }
+            let new_content = remaining.join("\n");
+
+            fs::write(&path, &new_content)
+                .await
+                .map_err(internal_err("Failed to write file"))?;
+        }
+
+        let message = if args.dry_run {
+            format!("Dry run - would extract {} line(s) {}-{} from {}", line_count, args.line, end_idx + 1, args.path)
+        } else {
+            format!("Extracted {} line(s) {}-{} from {}", line_count, args.line, end_idx + 1, args.path)
+        };
+
+        // Build response - only include extracted content if requested
+        let text_response = if args.return_extracted {
+            format!("{}\n\nExtracted content:\n{}", message, extracted_text)
+        } else {
+            message.clone()
+        };
+
+        let mut structured = json!({
+            "message": message,
+            "lineCount": line_count,
+            "startLine": args.line,
+            "endLine": end_idx + 1,
+            "dryRun": args.dry_run,
+        });
+        if args.return_extracted {
+            structured["extracted"] = json!(extracted_text);
+        }
+
+        Ok(CallToolResult {
+            content: vec![Content::text(text_response)],
+            structured_content: Some(structured),
+            is_error: Some(false),
+            meta: None,
+        })
+    }
+
+    #[tool(
+        name = "extract_symbols",
+        description = "Extract (cut) characters from a file by position. Removes chars from file unless dryRun=true.
+
+PARAMETERS:
+- path: File path
+- start: Start position (0-indexed Unicode chars, not bytes)
+- end: End position exclusive (optional) - use EITHER end OR length
+- length: Number of chars to extract (optional) - use EITHER end OR length
+- dryRun: If true, only preview - don't modify file
+- returnExtracted: If true, include extracted text in response (default: false to save tokens)
+
+EXAMPLES:
+- First 10 chars: {path: 'file.txt', start: 0, length: 10}
+- Chars 100-199: {path: 'file.txt', start: 100, end: 200}
+- Preview cut: {path: 'file.txt', start: 50, length: 25, dryRun: true}
+- Get cut content: {path: 'file.txt', start: 0, length: 100, returnExtracted: true}
+
+USE CASES: Remove headers, cut text blocks, extract specific character ranges.
+Note: Uses Unicode chars (safe for multibyte), not raw bytes. If range exceeds file, returns available content."
+    )]
+    async fn extract_symbols(
+        &self,
+        Parameters(args): Parameters<ExtractSymbolsArgs>,
+    ) -> Result<CallToolResult, McpError> {
+        // Validate args
+        if args.end.is_some() && args.length.is_some() {
+            return Err(McpError::invalid_params(
+                "Specify either 'end' or 'length', not both",
+                None,
+            ));
+        }
+        if args.end.is_none() && args.length.is_none() {
+            return Err(McpError::invalid_params(
+                "Must specify either 'end' or 'length'",
+                None,
+            ));
+        }
+
+        let path = self.resolve(&args.path).await?;
+        let content = read_text(&path)
+            .await
+            .map_err(internal_err("Failed to read file"))?;
+
+        // Work with Unicode characters
+        let chars: Vec<char> = content.chars().collect();
+        let char_count = chars.len();
+
+        // Clamp start to content length
+        let start = args.start.min(char_count);
+
+        // Calculate end position
+        let end = if let Some(e) = args.end {
+            e.min(char_count)
+        } else if let Some(len) = args.length {
+            (start + len).min(char_count)
+        } else {
+            unreachable!()
+        };
+
+        if start >= end {
+            // Nothing to extract
+            return Ok(CallToolResult {
+                content: vec![Content::text("Nothing to extract (empty range)")],
+                structured_content: Some(json!({
+                    "charCount": 0,
+                    "start": start,
+                    "end": end,
+                    "dryRun": args.dry_run,
+                })),
+                is_error: Some(false),
+                meta: None,
+            });
+        }
+
+        // Extract characters
+        let extracted: String = chars[start..end].iter().collect();
+
+        if !args.dry_run {
+            // Build new content without extracted chars
+            let mut remaining = String::with_capacity(content.len() - extracted.len());
+            remaining.extend(chars[..start].iter());
+            remaining.extend(chars[end..].iter());
+
+            fs::write(&path, &remaining)
+                .await
+                .map_err(internal_err("Failed to write file"))?;
+        }
+
+        let message = if args.dry_run {
+            format!("Dry run - would extract {} characters (positions {}-{}) from {}",
+                    end - start, start, end, args.path)
+        } else {
+            format!("Extracted {} characters (positions {}-{}) from {}",
+                    end - start, start, end, args.path)
+        };
+
+        // Build response - only include extracted content if requested
+        let text_response = if args.return_extracted {
+            format!("{}\n\nExtracted content:\n{}", message, extracted)
+        } else {
+            message.clone()
+        };
+
+        let mut structured = json!({
+            "message": message,
+            "charCount": end - start,
+            "start": start,
+            "end": end,
+            "dryRun": args.dry_run,
+        });
+        if args.return_extracted {
+            structured["extracted"] = json!(extracted);
+        }
+
+        Ok(CallToolResult {
+            content: vec![Content::text(text_response)],
+            structured_content: Some(structured),
+            is_error: Some(false),
+            meta: None,
+        })
+    }
+
+    // ========================================================================
+    // Binary tools - read/write/edit binary files
+    // ========================================================================
+
+    #[tool(
+        name = "read_binary",
+        description = "Read bytes from a binary file. Returns base64-encoded data.
+
+PARAMETERS:
+- path: File path
+- offset: Start position in bytes (0-indexed)
+- length: Number of bytes to read
+
+EXAMPLES:
+- Read 100 bytes from start: {path: 'file.bin', offset: 0, length: 100}
+- Read 1KB at position 512: {path: 'file.bin', offset: 512, length: 1024}
+
+USE CASES: Read binary headers, extract sections of images/executables, inspect binary data."
+    )]
+    async fn read_binary(
+        &self,
+        Parameters(args): Parameters<ReadBinaryArgs>,
+    ) -> Result<CallToolResult, McpError> {
+        let path = self.resolve(&args.path).await?;
+
+        let data = read_bytes(&path, args.offset, args.length)
+            .await
+            .map_err(|e| McpError::internal_error(format!("Failed to read binary: {}", e), None))?;
+
+        let base64_data = to_base64(&data);
+
+        Ok(CallToolResult {
+            content: vec![Content::text(format!(
+                "Read {} bytes from {} at offset {}\n\nBase64:\n{}",
+                data.len(), args.path, args.offset, base64_data
+            ))],
+            structured_content: Some(json!({
+                "data": base64_data,
+                "bytesRead": data.len(),
+                "offset": args.offset,
+                "path": args.path,
+            })),
+            is_error: Some(false),
+            meta: None,
+        })
+    }
+
+    #[tool(
+        name = "write_binary",
+        description = "Write bytes to a binary file. Data must be base64-encoded.
+
+PARAMETERS:
+- path: File path
+- offset: Position to write at (0-indexed)
+- data: Base64-encoded bytes to write
+- mode: 'replace' (overwrite) or 'insert' (shift existing bytes)
+
+EXAMPLES:
+- Overwrite at pos 0: {path: 'file.bin', offset: 0, data: 'SGVsbG8=', mode: 'replace'}
+- Insert at pos 100: {path: 'file.bin', offset: 100, data: 'V29ybGQ=', mode: 'insert'}
+
+USE CASES: Patch executables, inject data into files, modify binary headers. Creates file if missing."
+    )]
+    async fn write_binary(
+        &self,
+        Parameters(args): Parameters<WriteBinaryArgs>,
+    ) -> Result<CallToolResult, McpError> {
+        let path = self.resolve(&args.path).await?;
+
+        let data = from_base64(&args.data)
+            .map_err(|e| McpError::invalid_params(format!("Invalid base64: {}", e), None))?;
+
+        let insert = matches!(args.mode, WriteBinaryMode::Insert);
+
+        write_bytes(&path, args.offset, &data, insert)
+            .await
+            .map_err(|e| McpError::internal_error(format!("Failed to write binary: {}", e), None))?;
+
+        let mode_str = if insert { "inserted" } else { "replaced" };
+        let message = format!("Successfully {} {} bytes at offset {} in {}",
+                              mode_str, data.len(), args.offset, args.path);
+
+        Ok(CallToolResult {
+            content: vec![Content::text(&message)],
+            structured_content: Some(json!({
+                "message": message,
+                "bytesWritten": data.len(),
+                "offset": args.offset,
+                "mode": if insert { "insert" } else { "replace" },
+                "path": args.path,
+            })),
+            is_error: Some(false),
+            meta: None,
+        })
+    }
+
+    #[tool(
+        name = "extract_binary",
+        description = "Extract (cut) bytes from a binary file. Removes bytes and returns base64-encoded data.
+
+PARAMETERS:
+- path: File path
+- offset: Start position in bytes (0-indexed)
+- length: Number of bytes to extract
+- dryRun: If true, only preview - don't modify file
+
+EXAMPLES:
+- Cut first 256 bytes: {path: 'file.bin', offset: 0, length: 256}
+- Preview cut: {path: 'file.bin', offset: 1024, length: 512, dryRun: true}
+
+USE CASES: Remove binary sections, cut data to relocate, strip headers from files."
+    )]
+    async fn extract_binary(
+        &self,
+        Parameters(args): Parameters<ExtractBinaryArgs>,
+    ) -> Result<CallToolResult, McpError> {
+        let path = self.resolve(&args.path).await?;
+
+        let data = if args.dry_run {
+            // Just read without removing
+            read_bytes(&path, args.offset, args.length)
+                .await
+                .map_err(|e| McpError::internal_error(format!("Failed to read binary: {}", e), None))?
+        } else {
+            extract_bytes(&path, args.offset, args.length)
+                .await
+                .map_err(|e| McpError::internal_error(format!("Failed to extract binary: {}", e), None))?
+        };
+
+        let base64_data = to_base64(&data);
+
+        let message = if args.dry_run {
+            format!("Dry run - would extract {} bytes at offset {} from {}",
+                    data.len(), args.offset, args.path)
+        } else {
+            format!("Extracted {} bytes at offset {} from {}",
+                    data.len(), args.offset, args.path)
+        };
+
+        Ok(CallToolResult {
+            content: vec![Content::text(format!("{}\n\nBase64:\n{}", message, base64_data))],
+            structured_content: Some(json!({
+                "message": message,
+                "data": base64_data,
+                "bytesExtracted": data.len(),
+                "offset": args.offset,
+                "dryRun": args.dry_run,
+                "path": args.path,
+            })),
+            is_error: Some(false),
+            meta: None,
+        })
+    }
+
+    #[tool(
+        name = "patch_binary",
+        description = "Find and replace binary patterns in a file. Both patterns must be base64-encoded.
+
+PARAMETERS:
+- path: File path
+- find: Base64-encoded pattern to find
+- replace: Base64-encoded replacement pattern
+- all: If true, replace all occurrences (default: first only)
+
+EXAMPLES:
+- Replace first match: {path: 'file.bin', find: 'SGVsbG8=', replace: 'V29ybGQ='}
+- Replace all matches: {path: 'file.bin', find: 'AAA=', replace: 'QkJC', all: true}
+
+USE CASES: Patch executables, fix binary data, search-replace in non-text files."
+    )]
+    async fn patch_binary(
+        &self,
+        Parameters(args): Parameters<PatchBinaryArgs>,
+    ) -> Result<CallToolResult, McpError> {
+        let path = self.resolve(&args.path).await?;
+
+        let find_data = from_base64(&args.find)
+            .map_err(|e| McpError::invalid_params(format!("Invalid base64 in 'find': {}", e), None))?;
+        let replace_data = from_base64(&args.replace)
+            .map_err(|e| McpError::invalid_params(format!("Invalid base64 in 'replace': {}", e), None))?;
+
+        let count = patch_bytes(&path, &find_data, &replace_data, args.all)
+            .await
+            .map_err(|e| McpError::internal_error(format!("Failed to patch binary: {}", e), None))?;
+
+        let message = if count == 0 {
+            format!("Pattern not found in {}", args.path)
+        } else {
+            format!("Replaced {} occurrence(s) in {}", count, args.path)
+        };
+
+        Ok(CallToolResult {
+            content: vec![Content::text(&message)],
+            structured_content: Some(json!({
+                "message": message,
+                "replacements": count,
+                "replaceAll": args.all,
+                "path": args.path,
+            })),
             is_error: Some(false),
             meta: None,
         })
