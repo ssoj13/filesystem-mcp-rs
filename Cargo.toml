@@ -19,7 +19,7 @@ anyhow = "1.0.100"
 base64 = "0.22.1"
 clap = { version = "4.5.53", features = ["derive"] }
 globset = "0.4.18"
-rmcp = { version = "0.9.1", features = ["transport-io", "server", "macros", "transport-streamable-http-server"] }
+rmcp = { version = "0.10.0", features = ["transport-io", "server", "macros", "transport-streamable-http-server"] }
 axum = "0.8"
 once_cell = "1.21.3"
 serde = { version = "1.0.228", features = ["derive"] }
