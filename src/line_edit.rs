@@ -31,6 +31,10 @@ pub struct LineEdit {
 /// Apply line-based edits to file content
 pub fn apply_line_edits(content: &str, edits: &[LineEdit]) -> Result<(String, String)> {
     let original = normalize_newlines(content);
+
+    // Track if original content ends with newline
+    let had_trailing_newline = original.ends_with('\n');
+
     let mut lines: Vec<String> = original.lines().map(|s| s.to_string()).collect();
     let original_lines = lines.clone();
 
@@ -90,8 +94,18 @@ pub fn apply_line_edits(content: &str, edits: &[LineEdit]) -> Result<(String, St
         }
     }
 
-    let modified = lines.join("\n");
-    let original_text = original_lines.join("\n");
+    let mut modified = lines.join("\n");
+
+    // Preserve trailing newline if original had one
+    if had_trailing_newline && !modified.is_empty() {
+        modified.push('\n');
+    }
+
+    let mut original_text = original_lines.join("\n");
+    if had_trailing_newline && !original_text.is_empty() {
+        original_text.push('\n');
+    }
+
     let diff = unified_diff(&original_text, &modified, "file")?;
 
     Ok((modified, diff))
@@ -107,6 +121,7 @@ mod tests {
 
     #[test]
     fn test_replace_single_line() {
+        // Input has trailing newline, output should preserve it
         let content = "line 1\nline 2\nline 3\n";
         let edits = vec![LineEdit {
             start_line: 2,
@@ -115,11 +130,12 @@ mod tests {
             text: Some("NEW LINE 2".to_string()),
         }];
         let (result, _) = apply_line_edits(content, &edits).unwrap();
-        assert_eq!(result, "line 1\nNEW LINE 2\nline 3");
+        assert_eq!(result, "line 1\nNEW LINE 2\nline 3\n");
     }
 
     #[test]
     fn test_delete_range() {
+        // Input has trailing newline, output should preserve it
         let content = "line 1\nline 2\nline 3\nline 4\n";
         let edits = vec![LineEdit {
             start_line: 2,
@@ -128,11 +144,12 @@ mod tests {
             text: None,
         }];
         let (result, _) = apply_line_edits(content, &edits).unwrap();
-        assert_eq!(result, "line 1\nline 4");
+        assert_eq!(result, "line 1\nline 4\n");
     }
 
     #[test]
     fn test_insert_before() {
+        // Input has trailing newline, output should preserve it
         let content = "line 1\nline 2\n";
         let edits = vec![LineEdit {
             start_line: 2,
@@ -141,11 +158,12 @@ mod tests {
             text: Some("inserted".to_string()),
         }];
         let (result, _) = apply_line_edits(content, &edits).unwrap();
-        assert_eq!(result, "line 1\ninserted\nline 2");
+        assert_eq!(result, "line 1\ninserted\nline 2\n");
     }
 
     #[test]
     fn test_insert_after() {
+        // Input has trailing newline, output should preserve it
         let content = "line 1\nline 2\n";
         let edits = vec![LineEdit {
             start_line: 1,
@@ -154,11 +172,12 @@ mod tests {
             text: Some("inserted".to_string()),
         }];
         let (result, _) = apply_line_edits(content, &edits).unwrap();
-        assert_eq!(result, "line 1\ninserted\nline 2");
+        assert_eq!(result, "line 1\ninserted\nline 2\n");
     }
 
     #[test]
     fn test_multiple_edits() {
+        // Input has trailing newline, output should preserve it
         let content = "line 1\nline 2\nline 3\nline 4\n";
         let edits = vec![
             LineEdit {
@@ -175,6 +194,93 @@ mod tests {
             },
         ];
         let (result, _) = apply_line_edits(content, &edits).unwrap();
-        assert_eq!(result, "line 1\nREPLACED 2\nline 3");
+        assert_eq!(result, "line 1\nREPLACED 2\nline 3\n");
+    }
+
+    // ==========================================================================
+    // BUG TEST: Trailing newline is lost after edit
+    // Expected: If file ends with \n, result should also end with \n
+    // Current: Trailing newline is stripped
+    // ==========================================================================
+
+    #[test]
+    fn test_trailing_newline_preserved_on_replace() {
+        // File with trailing newline
+        let content = "line 1\nline 2\nline 3\n";
+        let edits = vec![LineEdit {
+            start_line: 2,
+            end_line: None,
+            operation: LineOperation::Replace,
+            text: Some("NEW LINE 2".to_string()),
+        }];
+
+        let (result, _) = apply_line_edits(content, &edits).unwrap();
+
+        // BUG: Currently returns "line 1\nNEW LINE 2\nline 3" (no trailing \n)
+        assert!(
+            result.ends_with('\n'),
+            "Trailing newline should be preserved. Got: {:?}",
+            result
+        );
+        assert_eq!(result, "line 1\nNEW LINE 2\nline 3\n");
+    }
+
+    #[test]
+    fn test_no_trailing_newline_stays_without() {
+        // File WITHOUT trailing newline should stay that way
+        let content = "line 1\nline 2\nline 3";
+        let edits = vec![LineEdit {
+            start_line: 2,
+            end_line: None,
+            operation: LineOperation::Replace,
+            text: Some("NEW LINE 2".to_string()),
+        }];
+
+        let (result, _) = apply_line_edits(content, &edits).unwrap();
+
+        assert!(
+            !result.ends_with('\n'),
+            "No trailing newline should remain absent. Got: {:?}",
+            result
+        );
+        assert_eq!(result, "line 1\nNEW LINE 2\nline 3");
+    }
+
+    #[test]
+    fn test_trailing_newline_preserved_on_delete() {
+        let content = "line 1\nline 2\nline 3\n";
+        let edits = vec![LineEdit {
+            start_line: 2,
+            end_line: None,
+            operation: LineOperation::Delete,
+            text: None,
+        }];
+
+        let (result, _) = apply_line_edits(content, &edits).unwrap();
+
+        assert!(
+            result.ends_with('\n'),
+            "Trailing newline should be preserved after delete"
+        );
+        assert_eq!(result, "line 1\nline 3\n");
+    }
+
+    #[test]
+    fn test_trailing_newline_preserved_on_insert() {
+        let content = "line 1\nline 2\n";
+        let edits = vec![LineEdit {
+            start_line: 1,
+            end_line: None,
+            operation: LineOperation::InsertAfter,
+            text: Some("inserted".to_string()),
+        }];
+
+        let (result, _) = apply_line_edits(content, &edits).unwrap();
+
+        assert!(
+            result.ends_with('\n'),
+            "Trailing newline should be preserved after insert"
+        );
+        assert_eq!(result, "line 1\ninserted\nline 2\n");
     }
 }

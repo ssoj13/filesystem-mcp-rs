@@ -218,11 +218,85 @@ mod tests {
         let dir = tempdir().unwrap();
         let path = dir.path().join("test.bin");
         fs::write(&path, b"foo bar foo baz foo").await.unwrap();
-        
+
         let count = patch_bytes(&path, b"foo", b"X", true).await.unwrap();
         assert_eq!(count, 3);
-        
+
         let content = fs::read(&path).await.unwrap();
         assert_eq!(content, b"X bar X baz X");
+    }
+
+    // ==========================================================================
+    // Edge case tests for empty files and boundary conditions
+    // ==========================================================================
+
+    #[tokio::test]
+    async fn test_read_bytes_empty_file() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("empty.bin");
+        fs::write(&path, b"").await.unwrap();
+
+        let data = read_bytes(&path, 0, 100).await.unwrap();
+        assert!(data.is_empty(), "Empty file should return empty vec");
+    }
+
+    #[tokio::test]
+    async fn test_read_bytes_offset_beyond_file() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("small.bin");
+        fs::write(&path, b"abc").await.unwrap();
+
+        let data = read_bytes(&path, 100, 50).await.unwrap();
+        assert!(data.is_empty(), "Offset beyond file should return empty vec");
+    }
+
+    #[tokio::test]
+    async fn test_write_bytes_to_empty_file() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("new.bin");
+        // File doesn't exist yet
+
+        write_bytes(&path, 0, b"hello", false).await.unwrap();
+
+        let content = fs::read(&path).await.unwrap();
+        assert_eq!(content, b"hello");
+    }
+
+    #[tokio::test]
+    async fn test_write_bytes_with_gap() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("gap.bin");
+        // File doesn't exist, write at offset 5 should create padding
+
+        write_bytes(&path, 5, b"X", false).await.unwrap();
+
+        let content = fs::read(&path).await.unwrap();
+        assert_eq!(content.len(), 6);
+        assert_eq!(&content[0..5], &[0, 0, 0, 0, 0]); // Padding
+        assert_eq!(content[5], b'X');
+    }
+
+    #[tokio::test]
+    async fn test_extract_bytes_empty_file() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("empty.bin");
+        fs::write(&path, b"").await.unwrap();
+
+        let extracted = extract_bytes(&path, 0, 100).await.unwrap();
+        assert!(extracted.is_empty());
+
+        // File should still exist and be empty
+        let content = fs::read(&path).await.unwrap();
+        assert!(content.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_patch_bytes_empty_file() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("empty.bin");
+        fs::write(&path, b"").await.unwrap();
+
+        let count = patch_bytes(&path, b"x", b"y", true).await.unwrap();
+        assert_eq!(count, 0, "Empty file should have no matches");
     }
 }

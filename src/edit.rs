@@ -26,9 +26,20 @@ pub fn apply_edits(content: &str, edits: &[FileEdit]) -> Result<(String, String)
                 .map_err(|e| anyhow::anyhow!("Invalid regex pattern '{}': {}", old, e))?;
 
             if !re.is_match(&modified) {
-                // No match found - skip silently for bulk operations
-                // (individual file edits will still show 0 modifications)
-                continue;
+                // No match found - error out like literal mode does
+                let preview = if edit.old_text.len() > 200 {
+                    format!("{}... ({} chars total)", &edit.old_text[..200], edit.old_text.len())
+                } else {
+                    edit.old_text.clone()
+                };
+                bail!(
+                    "Regex pattern not found in file.\n\
+                    \n\
+                    Pattern: {}\n\
+                    \n\
+                    This usually means the pattern doesn't match any content in the file.",
+                    preview
+                );
             }
 
             if edit.replace_all {
@@ -105,4 +116,81 @@ pub fn apply_edits(content: &str, edits: &[FileEdit]) -> Result<(String, String)
 
 fn normalize_newlines(s: &str) -> String {
     s.replace("\r\n", "\n")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ==========================================================================
+    // BUG TEST: Regex mode silently skips non-matching patterns
+    // Expected: Should return error when regex doesn't match (like literal mode)
+    // Current: Silently continues, returns unchanged content with empty diff
+    // ==========================================================================
+
+    #[test]
+    fn test_regex_no_match_should_error() {
+        let content = "hello world";
+        let edits = vec![FileEdit {
+            old_text: "nonexistent_pattern".to_string(),
+            new_text: "replacement".to_string(),
+            is_regex: true,
+            replace_all: false,
+        }];
+
+        // BUG: Currently this succeeds with no changes instead of erroring
+        let result = apply_edits(content, &edits);
+
+        // This test will FAIL until bug is fixed
+        // Regex mode should error on no match, just like literal mode does
+        assert!(result.is_err(), "Regex with no match should return error, not silently succeed");
+    }
+
+    #[test]
+    fn test_regex_no_match_replace_all_should_error() {
+        let content = "hello world";
+        let edits = vec![FileEdit {
+            old_text: r"\d+".to_string(), // No digits in content
+            new_text: "NUMBER".to_string(),
+            is_regex: true,
+            replace_all: true,
+        }];
+
+        let result = apply_edits(content, &edits);
+
+        // Should error, not silently skip
+        assert!(result.is_err(), "Regex replace_all with no match should return error");
+    }
+
+    #[test]
+    fn test_literal_no_match_errors() {
+        // Verify literal mode DOES error (this should pass - it's the correct behavior)
+        let content = "hello world";
+        let edits = vec![FileEdit {
+            old_text: "nonexistent".to_string(),
+            new_text: "replacement".to_string(),
+            is_regex: false,
+            replace_all: false,
+        }];
+
+        let result = apply_edits(content, &edits);
+        assert!(result.is_err(), "Literal mode with no match should error");
+    }
+
+    #[test]
+    fn test_regex_match_succeeds() {
+        // Verify regex works when it DOES match
+        let content = "hello 123 world";
+        let edits = vec![FileEdit {
+            old_text: r"\d+".to_string(),
+            new_text: "NUMBER".to_string(),
+            is_regex: true,
+            replace_all: false,
+        }];
+
+        let result = apply_edits(content, &edits);
+        assert!(result.is_ok());
+        let (modified, _) = result.unwrap();
+        assert_eq!(modified, "hello NUMBER world");
+    }
 }

@@ -43,7 +43,6 @@ mod logging;
 mod media;
 mod mime;
 mod path;
-mod roots;
 mod search;
 mod grep;
 mod line_edit;

@@ -72,3 +72,120 @@ pub async fn tail(path: &Path, lines: usize) -> Result<String> {
     let start = lines_vec.len().saturating_sub(lines);
     Ok(lines_vec[start..].join("\n"))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tempfile::tempdir;
+    use tokio::fs as async_fs;
+
+    #[tokio::test]
+    async fn test_read_text_normal() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("test.txt");
+        async_fs::write(&path, "hello\nworld").await.unwrap();
+
+        let content = read_text(&path).await.unwrap();
+        assert_eq!(content, "hello\nworld");
+    }
+
+    #[tokio::test]
+    async fn test_read_text_empty() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("empty.txt");
+        async_fs::write(&path, "").await.unwrap();
+
+        let content = read_text(&path).await.unwrap();
+        assert_eq!(content, "");
+    }
+
+    #[tokio::test]
+    async fn test_head_normal() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("test.txt");
+        async_fs::write(&path, "line1\nline2\nline3\nline4\n").await.unwrap();
+
+        let result = head(&path, 2).await.unwrap();
+        assert_eq!(result, "line1\nline2");
+    }
+
+    #[tokio::test]
+    async fn test_head_empty_file() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("empty.txt");
+        async_fs::write(&path, "").await.unwrap();
+
+        let result = head(&path, 5).await.unwrap();
+        assert_eq!(result, "");
+    }
+
+    #[tokio::test]
+    async fn test_head_zero_lines() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("test.txt");
+        async_fs::write(&path, "line1\nline2\n").await.unwrap();
+
+        let result = head(&path, 0).await.unwrap();
+        assert_eq!(result, "");
+    }
+
+    #[tokio::test]
+    async fn test_head_more_than_file() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("test.txt");
+        async_fs::write(&path, "line1\nline2").await.unwrap();
+
+        let result = head(&path, 100).await.unwrap();
+        assert_eq!(result, "line1\nline2");
+    }
+
+    #[tokio::test]
+    async fn test_tail_normal() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("test.txt");
+        async_fs::write(&path, "line1\nline2\nline3\nline4\n").await.unwrap();
+
+        let result = tail(&path, 2).await.unwrap();
+        assert_eq!(result, "line3\nline4");
+    }
+
+    #[tokio::test]
+    async fn test_tail_empty_file() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("empty.txt");
+        async_fs::write(&path, "").await.unwrap();
+
+        let result = tail(&path, 5).await.unwrap();
+        assert_eq!(result, "");
+    }
+
+    #[tokio::test]
+    async fn test_tail_zero_lines() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("test.txt");
+        async_fs::write(&path, "line1\nline2\n").await.unwrap();
+
+        let result = tail(&path, 0).await.unwrap();
+        assert_eq!(result, "");
+    }
+
+    #[tokio::test]
+    async fn test_tail_more_than_file() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("test.txt");
+        async_fs::write(&path, "line1\nline2").await.unwrap();
+
+        let result = tail(&path, 100).await.unwrap();
+        assert_eq!(result, "line1\nline2");
+    }
+
+    #[tokio::test]
+    async fn test_head_strips_crlf() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("crlf.txt");
+        async_fs::write(&path, "line1\r\nline2\r\n").await.unwrap();
+
+        let result = head(&path, 2).await.unwrap();
+        assert_eq!(result, "line1\nline2");
+    }
+}

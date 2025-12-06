@@ -116,12 +116,18 @@ pub async fn grep_files(
                 }
 
                 // Search file content
+                // Use saturating_sub to prevent underflow when total_matches >= max_matches
+                let remaining = params.max_matches.saturating_sub(total_matches);
+                if remaining == 0 && params.max_matches > 0 {
+                    break; // Already at limit
+                }
+
                 if let Ok(file_matches) = search_file(
                     &path,
                     &regex,
                     params.context_before,
                     params.context_after,
-                    params.max_matches - total_matches,
+                    remaining,
                 )
                 .await
                 {
@@ -193,4 +199,106 @@ fn build_glob(pattern: &str) -> Result<GlobSet> {
     let mut builder = GlobSetBuilder::new();
     builder.add(Glob::new(pattern)?);
     Ok(builder.build()?)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tempfile::TempDir;
+    use tokio::fs;
+
+    // ==========================================================================
+    // BUG TEST: max_matches underflow when total_matches >= max_matches
+    // Line 124: params.max_matches - total_matches can underflow
+    // ==========================================================================
+
+    #[tokio::test]
+    async fn test_max_matches_no_underflow() {
+        let temp = TempDir::new().unwrap();
+        let root = temp.path();
+
+        // Create files with many matches
+        fs::write(root.join("file1.txt"), "match\nmatch\nmatch\nmatch\nmatch\n")
+            .await
+            .unwrap();
+        fs::write(root.join("file2.txt"), "match\nmatch\nmatch\nmatch\nmatch\n")
+            .await
+            .unwrap();
+
+        let allowed = AllowedDirs::new(vec![root.to_path_buf()]);
+
+        let params = GrepParams {
+            root: root.to_string_lossy().to_string(),
+            pattern: "match".to_string(),
+            file_pattern: Some("*.txt".to_string()),
+            case_insensitive: false,
+            context_before: 0,
+            context_after: 0,
+            max_matches: 3, // Limit to 3, but there are 10 matches
+        };
+
+        // BUG: If first file returns 5 matches, then max_matches - total_matches
+        // becomes 3 - 5 = underflow (huge number in usize)
+        // This could cause search_file to return way more than expected
+        let result = grep_files(params, &allowed, false).await;
+
+        assert!(result.is_ok(), "Should not panic on underflow");
+        let matches = result.unwrap();
+
+        // Should have at most max_matches results
+        assert!(
+            matches.len() <= 3,
+            "Should respect max_matches limit. Got {} matches",
+            matches.len()
+        );
+    }
+
+    #[tokio::test]
+    async fn test_max_matches_exact_limit() {
+        let temp = TempDir::new().unwrap();
+        let root = temp.path();
+
+        // Create file with exactly max_matches
+        fs::write(root.join("file.txt"), "a\nb\nc\n")
+            .await
+            .unwrap();
+
+        let allowed = AllowedDirs::new(vec![root.to_path_buf()]);
+
+        let params = GrepParams {
+            root: root.to_string_lossy().to_string(),
+            pattern: "[abc]".to_string(),
+            file_pattern: None,
+            case_insensitive: false,
+            context_before: 0,
+            context_after: 0,
+            max_matches: 3,
+        };
+
+        let result = grep_files(params, &allowed, false).await.unwrap();
+        assert_eq!(result.len(), 3);
+    }
+
+    #[tokio::test]
+    async fn test_grep_empty_file() {
+        let temp = TempDir::new().unwrap();
+        let root = temp.path();
+
+        fs::write(root.join("empty.txt"), "").await.unwrap();
+
+        let allowed = AllowedDirs::new(vec![root.to_path_buf()]);
+
+        let params = GrepParams {
+            root: root.to_string_lossy().to_string(),
+            pattern: "anything".to_string(),
+            file_pattern: None,
+            case_insensitive: false,
+            context_before: 0,
+            context_after: 0,
+            max_matches: 100,
+        };
+
+        let result = grep_files(params, &allowed, false).await.unwrap();
+        assert_eq!(result.len(), 0, "Empty file should have no matches");
+    }
 }
