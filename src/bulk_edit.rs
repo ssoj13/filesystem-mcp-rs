@@ -115,9 +115,7 @@ mod tests {
             .await
             .unwrap();
 
-        let mut allowed = vec![];
-        allowed.push(root.to_path_buf());
-        let allowed_dirs = AllowedDirs::new(allowed);
+        let allowed_dirs = AllowedDirs::new(vec![root.to_path_buf()]);
 
         let edits = vec![FileEdit {
             old_text: "hello".to_string(),
@@ -163,9 +161,7 @@ mod tests {
             .await
             .unwrap();
 
-        let mut allowed = vec![];
-        allowed.push(root.to_path_buf());
-        let allowed_dirs = AllowedDirs::new(allowed);
+        let allowed_dirs = AllowedDirs::new(vec![root.to_path_buf()]);
 
         let edits = vec![FileEdit {
             old_text: "original".to_string(),
@@ -206,9 +202,7 @@ mod tests {
         fs::write(root.join("file2.txt"), "hello\n").await.unwrap();
         fs::write(root.join("skip.txt"), "hello\n").await.unwrap();
 
-        let mut allowed = vec![];
-        allowed.push(root.to_path_buf());
-        let allowed_dirs = AllowedDirs::new(allowed);
+        let allowed_dirs = AllowedDirs::new(vec![root.to_path_buf()]);
 
         let edits = vec![FileEdit {
             old_text: "hello".to_string(),
@@ -246,9 +240,7 @@ mod tests {
 
         fs::write(root.join("file.txt"), "content\n").await.unwrap();
 
-        let mut allowed = vec![];
-        allowed.push(root.to_path_buf());
-        let allowed_dirs = AllowedDirs::new(allowed);
+        let allowed_dirs = AllowedDirs::new(vec![root.to_path_buf()]);
 
         let edits = vec![FileEdit {
             old_text: "notfound".to_string(),
@@ -284,9 +276,7 @@ mod tests {
             .await
             .unwrap();
 
-        let mut allowed = vec![];
-        allowed.push(root.to_path_buf());
-        let allowed_dirs = AllowedDirs::new(allowed);
+        let allowed_dirs = AllowedDirs::new(vec![root.to_path_buf()]);
 
         let edits = vec![FileEdit {
             old_text: "foo".to_string(),
@@ -328,9 +318,7 @@ mod tests {
         .await
         .unwrap();
 
-        let mut allowed = vec![];
-        allowed.push(root.to_path_buf());
-        let allowed_dirs = AllowedDirs::new(allowed);
+        let allowed_dirs = AllowedDirs::new(vec![root.to_path_buf()]);
 
         let edits = vec![FileEdit {
             old_text: r"use crate::(cache_man|event_bus|workers)".to_string(),
@@ -371,9 +359,7 @@ mod tests {
             .await
             .unwrap();
 
-        let mut allowed = vec![];
-        allowed.push(root.to_path_buf());
-        let allowed_dirs = AllowedDirs::new(allowed);
+        let allowed_dirs = AllowedDirs::new(vec![root.to_path_buf()]);
 
         let edits = vec![FileEdit {
             old_text: "aaa".to_string(),
@@ -442,9 +428,7 @@ mod tests {
         .await
         .unwrap();
 
-        let mut allowed = vec![];
-        allowed.push(root.to_path_buf());
-        let allowed_dirs = AllowedDirs::new(allowed);
+        let allowed_dirs = AllowedDirs::new(vec![root.to_path_buf()]);
 
         let edits = vec![FileEdit {
             old_text: r"use crate::(cache_man|event_bus|workers)".to_string(),

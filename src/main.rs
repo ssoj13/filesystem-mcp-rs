@@ -1195,6 +1195,30 @@ impl FileSystemServer {
         &self,
         Parameters(args): Parameters<EditLinesArgs>,
     ) -> Result<CallToolResult, McpError> {
+        // Validate line numbers (1-indexed)
+        for (idx, edit) in args.edits.iter().enumerate() {
+            if edit.line == 0 {
+                return Err(McpError::invalid_params(
+                    format!("Edit {}: line number must be >= 1 (1-indexed)", idx),
+                    None,
+                ));
+            }
+            if let Some(end) = edit.end_line {
+                if end == 0 {
+                    return Err(McpError::invalid_params(
+                        format!("Edit {}: end_line must be >= 1 (1-indexed)", idx),
+                        None,
+                    ));
+                }
+                if end < edit.line {
+                    return Err(McpError::invalid_params(
+                        format!("Edit {}: invalid range - end_line {} is before line {}", idx, end, edit.line),
+                        None,
+                    ));
+                }
+            }
+        }
+
         let path = self.resolve(&args.path).await?;
         let original = read_text(&path)
             .await
@@ -1363,6 +1387,28 @@ USE CASES: Remove imports, delete code blocks, cut sections to paste elsewhere."
         &self,
         Parameters(args): Parameters<ExtractLinesArgs>,
     ) -> Result<CallToolResult, McpError> {
+        // Validate line numbers (1-indexed)
+        if args.line == 0 {
+            return Err(McpError::invalid_params(
+                "Line number must be >= 1 (1-indexed)",
+                None,
+            ));
+        }
+        if let Some(end) = args.end_line {
+            if end == 0 {
+                return Err(McpError::invalid_params(
+                    "End line number must be >= 1 (1-indexed)",
+                    None,
+                ));
+            }
+            if end < args.line {
+                return Err(McpError::invalid_params(
+                    format!("Invalid range: end line {} is before start line {}", end, args.line),
+                    None,
+                ));
+            }
+        }
+
         let path = self.resolve(&args.path).await?;
         let content = read_text(&path)
             .await
@@ -1372,8 +1418,8 @@ USE CASES: Remove imports, delete code blocks, cut sections to paste elsewhere."
         let had_trailing_newline = content.ends_with('\n');
 
         let lines: Vec<&str> = content.lines().collect();
-        let start_idx = args.line.saturating_sub(1);
-        let end_idx = args.end_line.unwrap_or(args.line).saturating_sub(1);
+        let start_idx = args.line - 1;
+        let end_idx = args.end_line.unwrap_or(args.line) - 1;
 
         // Validate line numbers
         if start_idx >= lines.len() {

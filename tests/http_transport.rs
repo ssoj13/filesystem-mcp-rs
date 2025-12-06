@@ -43,7 +43,7 @@ async fn test_http_server_health_check() {
     let bind = "127.0.0.1";
 
     let mut child = tokio::process::Command::new("cargo")
-        .args(&["run", "--", "-s", "-b", bind, "-p", &port.to_string()])
+        .args(["run", "--", "-s", "-b", bind, "-p", &port.to_string()])
         .current_dir(env!("CARGO_MANIFEST_DIR"))
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
@@ -79,7 +79,7 @@ async fn test_mcp_endpoint_accessible() {
     let bind = "127.0.0.1";
 
     let mut child = tokio::process::Command::new("cargo")
-        .args(&["run", "--", "-s", "-b", bind, "-p", &port.to_string()])
+        .args(["run", "--", "-s", "-b", bind, "-p", &port.to_string()])
         .current_dir(env!("CARGO_MANIFEST_DIR"))
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
@@ -115,7 +115,7 @@ async fn test_custom_port_and_bind() {
     let bind = "127.0.0.1";
 
     let mut child = tokio::process::Command::new("cargo")
-        .args(&["run", "--", "-s", "-b", bind, "-p", &port.to_string()])
+        .args(["run", "--", "-s", "-b", bind, "-p", &port.to_string()])
         .current_dir(env!("CARGO_MANIFEST_DIR"))
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
@@ -150,7 +150,7 @@ async fn test_server_with_logging() {
     let log_file = format!("test-http-{}.log", port);
 
     let mut child = tokio::process::Command::new("cargo")
-        .args(&["run", "--", "-s", "-b", bind, "-p", &port.to_string(), "-l", &log_file])
+        .args(["run", "--", "-s", "-b", bind, "-p", &port.to_string(), "-l", &log_file])
         .current_dir(env!("CARGO_MANIFEST_DIR"))
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())

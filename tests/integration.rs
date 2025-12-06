@@ -45,15 +45,13 @@ async fn spawn_server(args: &[&str]) -> Result<ServerHandle> {
         tokio::spawn(async move {
             let mut reader = BufReader::new(stdout).lines();
             while let Ok(Some(line)) = reader.next_line().await {
-                if let Ok(v) = serde_json::from_str::<serde_json::Value>(&line) {
-                    if let Some(id) = v.get("id").and_then(|x| x.as_str()) {
-                        if let Some(waiter) = pending.lock().await.remove(id) {
-                            let _ = waiter.send(v);
-                            continue;
-                        }
-                    }
-                    // Notifications are ignored for now
+                if let Ok(v) = serde_json::from_str::<serde_json::Value>(&line)
+                    && let Some(id) = v.get("id").and_then(|x| x.as_str())
+                    && let Some(waiter) = pending.lock().await.remove(id)
+                {
+                    let _ = waiter.send(v);
                 }
+                // Notifications without id are ignored
             }
         });
     }
@@ -147,7 +145,7 @@ async fn start_server(root: &Path) -> Result<ServerHandle> {
 }
 
 fn assert_ok(res: &serde_json::Value) {
-    assert_ne!(res["result"]["is_error"].as_bool().unwrap_or(false), true);
+    assert!(!res["result"]["is_error"].as_bool().unwrap_or(false));
 }
 
 fn assert_err(res: &serde_json::Value) {
@@ -155,7 +153,7 @@ fn assert_err(res: &serde_json::Value) {
         assert!(err.is_object());
         return;
     }
-    assert_eq!(res["result"]["is_error"].as_bool().unwrap_or(false), true);
+    assert!(res["result"]["is_error"].as_bool().unwrap_or(false));
 }
 
 #[tokio::test]

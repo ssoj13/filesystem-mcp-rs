@@ -43,8 +43,9 @@ pub fn apply_line_edits(content: &str, edits: &[LineEdit]) -> Result<(String, St
     sorted_edits.sort_by(|a, b| b.start_line.cmp(&a.start_line));
 
     for edit in sorted_edits {
-        let start_idx = edit.start_line.saturating_sub(1); // Convert to 0-indexed
-        let end_idx = edit.end_line.map(|e| e.saturating_sub(1)).unwrap_or(start_idx);
+        // Note: caller must validate that start_line >= 1 before calling
+        let start_idx = edit.start_line - 1; // Convert to 0-indexed
+        let end_idx = edit.end_line.map(|e| e - 1).unwrap_or(start_idx);
 
         // Validate line numbers
         if start_idx >= lines.len() {
