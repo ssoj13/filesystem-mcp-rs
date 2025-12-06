@@ -7,10 +7,9 @@ use crate::allowed::AllowedDirs;
 
 /// Normalize path separators and collapse `.`/`..` where possible.
 fn normalize_path(path: &Path) -> PathBuf {
-    let mut components = path.components().peekable();
     let mut out = PathBuf::new();
 
-    while let Some(comp) = components.next() {
+    for comp in path.components() {
         match comp {
             Component::CurDir => continue,
             Component::ParentDir => {

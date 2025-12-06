@@ -64,16 +64,14 @@ pub async fn bulk_edit_files(
                 let changed = content != modified;
 
                 // Write if modified and not dry run
-                if changed && !dry_run {
-                    if let Err(e) = fs::write(&path, &modified).await {
-                        results.push(BulkEditResult {
-                            path,
-                            modified: false,
-                            diff: None,
-                            error: Some(format!("Failed to write file: {}", e)),
-                        });
-                        continue;
-                    }
+                if changed && !dry_run && let Err(e) = fs::write(&path, &modified).await {
+                    results.push(BulkEditResult {
+                        path,
+                        modified: false,
+                        diff: None,
+                        error: Some(format!("Failed to write file: {}", e)),
+                    });
+                    continue;
                 }
 
                 results.push(BulkEditResult {

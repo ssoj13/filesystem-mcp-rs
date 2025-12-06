@@ -1076,7 +1076,7 @@ impl FileSystemServer {
                     .collect::<Vec<_>>()
                     .join("\n")
             })
-            .unwrap_or_else(String::new);
+            .unwrap_or_default();
 
         Ok(CallToolResult {
             content: vec![Content::text(text)],
@@ -1290,7 +1290,7 @@ impl FileSystemServer {
         // Format output
         let mut lines = Vec::new();
         if args.dry_run {
-            lines.push(format!("DRY RUN - Changes NOT applied"));
+            lines.push("DRY RUN - Changes NOT applied".to_string());
         }
         lines.push(format!(
             "Processed {} files: {} modified, {} errors",
@@ -1368,6 +1368,9 @@ USE CASES: Remove imports, delete code blocks, cut sections to paste elsewhere."
             .await
             .map_err(internal_err("Failed to read file"))?;
 
+        // Track if original content ends with newline
+        let had_trailing_newline = content.ends_with('\n');
+
         let lines: Vec<&str> = content.lines().collect();
         let start_idx = args.line.saturating_sub(1);
         let end_idx = args.end_line.unwrap_or(args.line).saturating_sub(1);
@@ -1400,7 +1403,12 @@ USE CASES: Remove imports, delete code blocks, cut sections to paste elsewhere."
             if end_idx + 1 < lines.len() {
                 remaining.extend_from_slice(&lines[end_idx + 1..]);
             }
-            let new_content = remaining.join("\n");
+            let mut new_content = remaining.join("\n");
+
+            // Preserve trailing newline if original had one
+            if had_trailing_newline && !new_content.is_empty() {
+                new_content.push('\n');
+            }
 
             fs::write(&path, &new_content)
                 .await
@@ -1777,14 +1785,12 @@ impl ServerHandler for FileSystemServer {
     // The default implementation will use get_info() to build the response.
     // Root fetching happens via on_roots_list_changed notification handler.
 
-    fn on_roots_list_changed(
+    async fn on_roots_list_changed(
         &self,
         context: rmcp::service::NotificationContext<rmcp::RoleServer>,
-    ) -> impl std::future::Future<Output = ()> + Send + '_ {
-        async move {
-            if let Err(err) = self.refresh_roots(&context.peer).await {
-                warn!("Failed to refresh roots on list_changed: {}", err);
-            }
+    ) {
+        if let Err(err) = self.refresh_roots(&context.peer).await {
+            warn!("Failed to refresh roots on list_changed: {}", err);
         }
     }
 }
@@ -1872,10 +1878,10 @@ fn service_error(message: &'static str, error: ServiceError) -> McpError {
 }
 
 fn parse_root_uri(uri: &str) -> Option<PathBuf> {
-    if let Ok(url) = url::Url::parse(uri) {
-        if url.scheme() == "file" {
-            return url.to_file_path().ok();
-        }
+    if let Ok(url) = url::Url::parse(uri)
+        && url.scheme() == "file"
+    {
+        return url.to_file_path().ok();
     }
     Some(PathBuf::from(uri))
 }
