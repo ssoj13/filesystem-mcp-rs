@@ -198,11 +198,7 @@ mod tests {
         assert_eq!(result, "line 1\nREPLACED 2\nline 3\n");
     }
 
-    // ==========================================================================
-    // BUG TEST: Trailing newline is lost after edit
-    // Expected: If file ends with \n, result should also end with \n
-    // Current: Trailing newline is stripped
-    // ==========================================================================
+    // Regression tests: trailing newline must be preserved (fixed in previous session)
 
     #[test]
     fn test_trailing_newline_preserved_on_replace() {

@@ -32,19 +32,28 @@ pub async fn search_paths(
                 continue;
             }
 
-            // Validate each path (symlink-safe)
-            let _ = resolve_validated_path(
+            // Validate each path (symlink-safe) - skip on error instead of failing entire search
+            if resolve_validated_path(
                 path.to_string_lossy().as_ref(),
                 allowed,
                 allow_symlink_escape,
             )
-            .await?;
+            .await
+            .is_err()
+            {
+                continue;
+            }
 
             if matcher.is_match(rel_str.as_ref()) {
                 results.push(path.clone());
             }
 
-            if entry.file_type().await?.is_dir() {
+            // Skip on file_type error too (e.g., broken symlinks)
+            let file_type = match entry.file_type().await {
+                Ok(ft) => ft,
+                Err(_) => continue,
+            };
+            if file_type.is_dir() {
                 stack.push(path);
             }
         }

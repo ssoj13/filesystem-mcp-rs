@@ -3,6 +3,17 @@ use regex::Regex;
 
 use crate::diff::unified_diff;
 
+/// Truncate string to max chars safely (Unicode-aware, no panic on multi-byte)
+fn truncate_preview(s: &str, max_chars: usize) -> String {
+    let char_count = s.chars().count();
+    if char_count > max_chars {
+        let truncated: String = s.chars().take(max_chars).collect();
+        format!("{}... ({} chars total)", truncated, char_count)
+    } else {
+        s.to_string()
+    }
+}
+
 #[derive(Clone)]
 pub struct FileEdit {
     pub old_text: String,
@@ -27,11 +38,7 @@ pub fn apply_edits(content: &str, edits: &[FileEdit]) -> Result<(String, String)
 
             if !re.is_match(&modified) {
                 // No match found - error out like literal mode does
-                let preview = if edit.old_text.len() > 200 {
-                    format!("{}... ({} chars total)", &edit.old_text[..200], edit.old_text.len())
-                } else {
-                    edit.old_text.clone()
-                };
+                let preview = truncate_preview(&edit.old_text, 200);
                 bail!(
                     "Regex pattern not found in file.\n\
                     \n\
@@ -89,12 +96,7 @@ pub fn apply_edits(content: &str, edits: &[FileEdit]) -> Result<(String, String)
         }
 
         // No match found
-        let preview = if edit.old_text.len() > 200 {
-            format!("{}... ({} chars total)", &edit.old_text[..200], edit.old_text.len())
-        } else {
-            edit.old_text.clone()
-        };
-
+        let preview = truncate_preview(&edit.old_text, 200);
         bail!(
             "Text not found in file. The 'oldText' parameter does not match any content.\n\
             \n\
@@ -122,11 +124,7 @@ fn normalize_newlines(s: &str) -> String {
 mod tests {
     use super::*;
 
-    // ==========================================================================
-    // BUG TEST: Regex mode silently skips non-matching patterns
-    // Expected: Should return error when regex doesn't match (like literal mode)
-    // Current: Silently continues, returns unchanged content with empty diff
-    // ==========================================================================
+    // Regression tests: regex no-match must return error (fixed in previous session)
 
     #[test]
     fn test_regex_no_match_should_error() {
@@ -138,12 +136,8 @@ mod tests {
             replace_all: false,
         }];
 
-        // BUG: Currently this succeeds with no changes instead of erroring
         let result = apply_edits(content, &edits);
-
-        // This test will FAIL until bug is fixed
-        // Regex mode should error on no match, just like literal mode does
-        assert!(result.is_err(), "Regex with no match should return error, not silently succeed");
+        assert!(result.is_err(), "Regex with no match should return error");
     }
 
     #[test]
@@ -157,8 +151,6 @@ mod tests {
         }];
 
         let result = apply_edits(content, &edits);
-
-        // Should error, not silently skip
         assert!(result.is_err(), "Regex replace_all with no match should return error");
     }
 

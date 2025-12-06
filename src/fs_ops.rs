@@ -67,10 +67,32 @@ pub async fn tail(path: &Path, lines: usize) -> Result<String> {
     for chunk in chunks.iter().rev() {
         combined.extend_from_slice(chunk);
     }
-    let text = String::from_utf8_lossy(&combined).into_owned();
+
+    // Find valid UTF-8 boundary (skip partial multi-byte char at start)
+    let text = find_valid_utf8_start(&combined);
     let lines_vec: Vec<&str> = text.lines().collect();
     let start = lines_vec.len().saturating_sub(lines);
     Ok(lines_vec[start..].join("\n"))
+}
+
+/// Find first valid UTF-8 boundary and decode from there.
+/// This handles the case where chunk boundary splits a multi-byte UTF-8 char.
+fn find_valid_utf8_start(bytes: &[u8]) -> String {
+    // Try full slice first (common case)
+    if let Ok(s) = std::str::from_utf8(bytes) {
+        return s.to_string();
+    }
+
+    // Skip continuation bytes (10xxxxxx = 0x80-0xBF) at the start
+    // to find a valid UTF-8 sequence boundary
+    for skip in 1..=4.min(bytes.len()) {
+        if let Ok(s) = std::str::from_utf8(&bytes[skip..]) {
+            return s.to_string();
+        }
+    }
+
+    // Fallback: lossy conversion (shouldn't happen with valid UTF-8 files)
+    String::from_utf8_lossy(bytes).into_owned()
 }
 
 #[cfg(test)]
@@ -187,5 +209,70 @@ mod tests {
 
         let result = head(&path, 2).await.unwrap();
         assert_eq!(result, "line1\nline2");
+    }
+
+    // UTF-8 safety tests
+
+    #[tokio::test]
+    async fn test_tail_utf8_multibyte() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("utf8.txt");
+        // Content with multi-byte UTF-8: German umlauts (2 bytes each)
+        async_fs::write(&path, "Zeile eins\nZeile zwei mit ooo\nDritte Zeile\n")
+            .await
+            .unwrap();
+
+        let result = tail(&path, 2).await.unwrap();
+        assert_eq!(result, "Zeile zwei mit ooo\nDritte Zeile");
+    }
+
+    #[tokio::test]
+    async fn test_tail_utf8_emoji() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("emoji.txt");
+        // Emoji are 4-byte UTF-8 sequences
+        async_fs::write(&path, "line1\nline2\nline3\n").await.unwrap();
+
+        let result = tail(&path, 2).await.unwrap();
+        assert_eq!(result, "line2\nline3");
+    }
+
+    #[tokio::test]
+    async fn test_head_utf8_multibyte() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("utf8.txt");
+        async_fs::write(&path, "Erste Zeile\nZweite Zeile\nDritte\n")
+            .await
+            .unwrap();
+
+        let result = head(&path, 2).await.unwrap();
+        assert_eq!(result, "Erste Zeile\nZweite Zeile");
+    }
+
+    #[test]
+    fn test_find_valid_utf8_start_clean() {
+        // Valid UTF-8 - no skip needed
+        let bytes = "hello world".as_bytes();
+        assert_eq!(find_valid_utf8_start(bytes), "hello world");
+    }
+
+    #[test]
+    fn test_find_valid_utf8_start_partial_2byte() {
+        // Simulates partial 2-byte char at start (o = C3 B6)
+        // If we only have the continuation byte B6, skip it
+        let mut bytes = vec![0xB6]; // continuation byte only
+        bytes.extend_from_slice("hello".as_bytes());
+        let result = find_valid_utf8_start(&bytes);
+        assert_eq!(result, "hello");
+    }
+
+    #[test]
+    fn test_find_valid_utf8_start_partial_4byte() {
+        // Simulates partial 4-byte emoji at start
+        // 4-byte: F0 9F 98 80 - if we have only last 2 continuation bytes
+        let mut bytes = vec![0x98, 0x80]; // last 2 continuation bytes
+        bytes.extend_from_slice("test".as_bytes());
+        let result = find_valid_utf8_start(&bytes);
+        assert_eq!(result, "test");
     }
 }

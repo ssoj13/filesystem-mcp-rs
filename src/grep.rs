@@ -207,10 +207,7 @@ mod tests {
     use tempfile::TempDir;
     use tokio::fs;
 
-    // ==========================================================================
-    // BUG TEST: max_matches underflow when total_matches >= max_matches
-    // Line 124: params.max_matches - total_matches can underflow
-    // ==========================================================================
+    // Regression test: max_matches underflow prevention (fixed with saturating_sub)
 
     #[tokio::test]
     async fn test_max_matches_no_underflow() {

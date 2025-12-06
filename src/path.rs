@@ -52,8 +52,8 @@ pub async fn resolve_validated_path(
         bail!("Access denied - no allowed directories configured");
     }
 
-    // First try canonicalization (handles symlinks).
-    match normalized.canonicalize() {
+    // First try canonicalization (handles symlinks) - use async version
+    match fs::canonicalize(&normalized).await {
         Ok(real) => {
             if !is_within_allowed(&real, &allowed_snapshot) {
                 if allow_symlink_escape {
@@ -75,7 +75,8 @@ pub async fn resolve_validated_path(
                 let mut cursor = normalized.as_path();
                 let mut existing_parent: Option<PathBuf> = None;
                 while let Some(parent) = cursor.parent() {
-                    if parent.exists() {
+                    // Use async metadata check instead of blocking exists()
+                    if fs::metadata(parent).await.is_ok() {
                         existing_parent = Some(parent.to_path_buf());
                         break;
                     }
@@ -88,8 +89,8 @@ pub async fn resolve_validated_path(
                         normalized.display()
                     )
                 })?;
-                let parent_real = parent
-                    .canonicalize()
+                let parent_real = fs::canonicalize(&parent)
+                    .await
                     .with_context(|| format!("Parent directory does not exist: {}", parent.display()))?;
                 if !is_within_allowed(&parent_real, &allowed_snapshot) {
                     bail!(
