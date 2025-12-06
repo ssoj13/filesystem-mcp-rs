@@ -25,9 +25,26 @@ Precise editing by line numbers (1-indexed). Perfect when you know exact locatio
 Apply the same edits to multiple files at once. More efficient than editing files individually:
 - **File selection**: Glob patterns (e.g., `*.rs`, `**/*.txt`, `src/**/*.js`)
 - **Operations**: Search/replace text across all matching files
+- **Regex support**: `isRegex: true` enables regex patterns with capture groups (`$1`, `$2`, etc.)
+- **Replace all**: `replaceAll: true` replaces ALL occurrences, not just the first one
 - **Error handling**: Continues on failure, reports errors per-file
 - **Use cases**: Renaming functions/variables across codebase, updating imports, fixing typos everywhere, refactoring patterns
 - **Features**: Returns summary with diffs, dry-run mode for preview
+
+**Examples:**
+```json
+// Literal replace all occurrences
+{"oldText": "use crate::foo", "newText": "use crate::bar::foo", "replaceAll": true}
+
+// Regex with capture groups (refactor imports)
+{"oldText": "use crate::(cache_man|event_bus|workers)", "newText": "use crate::core::$1", "isRegex": true, "replaceAll": true}
+
+// Rename function across codebase
+{"oldText": "old_function_name", "newText": "new_function_name", "replaceAll": true}
+
+// Update version in all Cargo.toml
+{"oldText": "version = \"0\\.1\\.\\d+\"", "newText": "version = \"0.2.0\"", "isRegex": true}
+```
 
 ### `grep_files` - Content Search
 Search for text/regex patterns **inside** file contents (not filenames):
@@ -171,7 +188,7 @@ cargo test --test http_transport  # HTTP transport only
 ```
 
 Tests:
-- **17 unit tests**: line_edit, bulk_edit, binary, roots parsing
+- **21 unit tests**: line_edit, bulk_edit (including regex/replace_all), binary, roots parsing
 - **34 integration tests**: file operations, search, grep, extract, binary
 - **4 HTTP transport tests**: server startup, health, MCP endpoint
 

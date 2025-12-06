@@ -267,6 +267,12 @@ struct EditOperation {
     old_text: String,
     #[serde(rename = "newText")]
     new_text: String,
+    /// Use regex pattern instead of literal text match (default: false)
+    #[serde(default, rename = "isRegex")]
+    is_regex: bool,
+    /// Replace all occurrences instead of just the first one (default: false)
+    #[serde(default, rename = "replaceAll")]
+    replace_all: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
@@ -709,6 +715,8 @@ impl FileSystemServer {
             .map(|e| FileEdit {
                 old_text: e.old_text,
                 new_text: e.new_text,
+                is_regex: e.is_regex,
+                replace_all: e.replace_all,
             })
             .collect();
         let (modified, diff) =
@@ -1243,7 +1251,7 @@ impl FileSystemServer {
 
     #[tool(
         name = "bulk_edits",
-        description = "Apply SAME edits to MULTIPLE files at once (mass search/replace). Use when you need to change the same code/text across many files. Select files by glob pattern (*.rs, **/*.txt), then apply search/replace operations to all matches. Returns summary of modified files with diffs. Perfect for: renaming functions/variables across codebase, updating imports, fixing typos everywhere, refactoring patterns. More efficient than editing files one by one. Supports dry-run to preview changes."
+        description = "Apply SAME edits to MULTIPLE files at once (mass search/replace). Use when you need to change the same code/text across many files. Select files by glob pattern (*.rs, **/*.txt), then apply search/replace operations to all matches. Returns summary of modified files with diffs. Perfect for: renaming functions/variables across codebase, updating imports, fixing typos everywhere, refactoring patterns. More efficient than editing files one by one. Supports dry-run to preview changes.\n\nEach edit supports:\n- isRegex (bool): Use regex pattern instead of literal match. Supports capture groups ($1, $2, etc.)\n- replaceAll (bool): Replace ALL occurrences, not just the first one\n\nEXAMPLES:\n\n1. Literal replace all occurrences:\n   {\"oldText\": \"use crate::foo\", \"newText\": \"use crate::bar::foo\", \"replaceAll\": true}\n\n2. Regex with capture groups (rename imports):\n   {\"oldText\": \"use crate::(cache_man|event_bus|workers)\", \"newText\": \"use crate::core::$1\", \"isRegex\": true, \"replaceAll\": true}\n\n3. Rename function across codebase:\n   {\"oldText\": \"old_function_name\", \"newText\": \"new_function_name\", \"replaceAll\": true}\n\n4. Update version in all Cargo.toml:\n   {\"oldText\": \"version = \\\"0\\\\.1\\\\.\\\\d+\\\"\", \"newText\": \"version = \\\"0.2.0\\\"\", \"isRegex\": true}"
     )]
     async fn bulk_edits(
         &self,
@@ -1258,6 +1266,8 @@ impl FileSystemServer {
             .map(|e| FileEdit {
                 old_text: e.old_text,
                 new_text: e.new_text,
+                is_regex: e.is_regex,
+                replace_all: e.replace_all,
             })
             .collect();
 

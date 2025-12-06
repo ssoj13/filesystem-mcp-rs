@@ -124,6 +124,8 @@ mod tests {
         let edits = vec![FileEdit {
             old_text: "hello".to_string(),
             new_text: "goodbye".to_string(),
+            is_regex: false,
+            replace_all: false,
         }];
 
         let results = bulk_edit_files(
@@ -170,6 +172,8 @@ mod tests {
         let edits = vec![FileEdit {
             old_text: "original".to_string(),
             new_text: "modified".to_string(),
+            is_regex: false,
+            replace_all: false,
         }];
 
         let results = bulk_edit_files(
@@ -211,6 +215,8 @@ mod tests {
         let edits = vec![FileEdit {
             old_text: "hello".to_string(),
             new_text: "bye".to_string(),
+            is_regex: false,
+            replace_all: false,
         }];
 
         let results = bulk_edit_files(
@@ -249,6 +255,8 @@ mod tests {
         let edits = vec![FileEdit {
             old_text: "notfound".to_string(),
             new_text: "replacement".to_string(),
+            is_regex: false,
+            replace_all: false,
         }];
 
         let results = bulk_edit_files(
@@ -266,5 +274,223 @@ mod tests {
         assert_eq!(results.len(), 1);
         assert!(!results[0].modified);
         assert!(results[0].diff.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_bulk_edit_replace_all() {
+        let temp = TempDir::new().unwrap();
+        let root = temp.path();
+
+        // File with multiple occurrences
+        fs::write(root.join("file.txt"), "foo bar foo baz foo\n")
+            .await
+            .unwrap();
+
+        let mut allowed = vec![];
+        allowed.push(root.to_path_buf());
+        let allowed_dirs = AllowedDirs::new(allowed);
+
+        let edits = vec![FileEdit {
+            old_text: "foo".to_string(),
+            new_text: "qux".to_string(),
+            is_regex: false,
+            replace_all: true,
+        }];
+
+        let results = bulk_edit_files(
+            root.to_str().unwrap(),
+            "*.txt",
+            &[],
+            &edits,
+            false,
+            &allowed_dirs,
+            false,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(results.len(), 1);
+        assert!(results[0].modified);
+
+        let content = fs::read_to_string(root.join("file.txt"))
+            .await
+            .unwrap();
+        assert_eq!(content, "qux bar qux baz qux\n");
+    }
+
+    #[tokio::test]
+    async fn test_bulk_edit_regex_with_capture_groups() {
+        let temp = TempDir::new().unwrap();
+        let root = temp.path();
+
+        fs::write(
+            root.join("imports.rs"),
+            "use crate::cache_man;\nuse crate::event_bus;\nuse crate::workers;\n",
+        )
+        .await
+        .unwrap();
+
+        let mut allowed = vec![];
+        allowed.push(root.to_path_buf());
+        let allowed_dirs = AllowedDirs::new(allowed);
+
+        let edits = vec![FileEdit {
+            old_text: r"use crate::(cache_man|event_bus|workers)".to_string(),
+            new_text: "use crate::core::$1".to_string(),
+            is_regex: true,
+            replace_all: true,
+        }];
+
+        let results = bulk_edit_files(
+            root.to_str().unwrap(),
+            "*.rs",
+            &[],
+            &edits,
+            false,
+            &allowed_dirs,
+            false,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(results.len(), 1);
+        assert!(results[0].modified);
+
+        let content = fs::read_to_string(root.join("imports.rs"))
+            .await
+            .unwrap();
+        assert!(content.contains("use crate::core::cache_man"));
+        assert!(content.contains("use crate::core::event_bus"));
+        assert!(content.contains("use crate::core::workers"));
+    }
+
+    #[tokio::test]
+    async fn test_bulk_edit_regex_first_only() {
+        let temp = TempDir::new().unwrap();
+        let root = temp.path();
+
+        fs::write(root.join("file.txt"), "aaa bbb aaa ccc aaa\n")
+            .await
+            .unwrap();
+
+        let mut allowed = vec![];
+        allowed.push(root.to_path_buf());
+        let allowed_dirs = AllowedDirs::new(allowed);
+
+        let edits = vec![FileEdit {
+            old_text: "aaa".to_string(),
+            new_text: "XXX".to_string(),
+            is_regex: true,
+            replace_all: false, // Only first match
+        }];
+
+        let results = bulk_edit_files(
+            root.to_str().unwrap(),
+            "*.txt",
+            &[],
+            &edits,
+            false,
+            &allowed_dirs,
+            false,
+        )
+        .await
+        .unwrap();
+
+        assert!(results[0].modified);
+
+        let content = fs::read_to_string(root.join("file.txt"))
+            .await
+            .unwrap();
+        // Only first aaa replaced
+        assert_eq!(content, "XXX bbb aaa ccc aaa\n");
+    }
+
+    #[tokio::test]
+    async fn test_bulk_edit_regex_multiple_files() {
+        let temp = TempDir::new().unwrap();
+        let root = temp.path();
+
+        // Create subdirectory structure in temp
+        let project = root.join("project");
+        fs::create_dir(&project).await.unwrap();
+
+        // Multiple files with imports to refactor
+        fs::write(
+            project.join("main.rs"),
+            "use crate::cache_man;\nuse crate::event_bus;\nfn main() {}\n",
+        )
+        .await
+        .unwrap();
+
+        fs::write(
+            project.join("lib.rs"),
+            "use crate::workers;\nuse crate::cache_man;\npub mod core;\n",
+        )
+        .await
+        .unwrap();
+
+        fs::write(
+            project.join("utils.rs"),
+            "use crate::event_bus;\nuse std::io;\n",
+        )
+        .await
+        .unwrap();
+
+        // File without matching imports (should not be modified)
+        fs::write(
+            project.join("other.rs"),
+            "use std::collections::HashMap;\nfn foo() {}\n",
+        )
+        .await
+        .unwrap();
+
+        let mut allowed = vec![];
+        allowed.push(root.to_path_buf());
+        let allowed_dirs = AllowedDirs::new(allowed);
+
+        let edits = vec![FileEdit {
+            old_text: r"use crate::(cache_man|event_bus|workers)".to_string(),
+            new_text: "use crate::core::$1".to_string(),
+            is_regex: true,
+            replace_all: true,
+        }];
+
+        let results = bulk_edit_files(
+            project.to_str().unwrap(),
+            "**/*.rs",
+            &[],
+            &edits,
+            false,
+            &allowed_dirs,
+            false,
+        )
+        .await
+        .unwrap();
+
+        // 4 files processed
+        assert_eq!(results.len(), 4);
+
+        // 3 files modified (main.rs, lib.rs, utils.rs)
+        let modified_count = results.iter().filter(|r| r.modified).count();
+        assert_eq!(modified_count, 3);
+
+        // Verify main.rs
+        let main_content = fs::read_to_string(project.join("main.rs")).await.unwrap();
+        assert!(main_content.contains("use crate::core::cache_man"));
+        assert!(main_content.contains("use crate::core::event_bus"));
+
+        // Verify lib.rs
+        let lib_content = fs::read_to_string(project.join("lib.rs")).await.unwrap();
+        assert!(lib_content.contains("use crate::core::workers"));
+        assert!(lib_content.contains("use crate::core::cache_man"));
+
+        // Verify utils.rs
+        let utils_content = fs::read_to_string(project.join("utils.rs")).await.unwrap();
+        assert!(utils_content.contains("use crate::core::event_bus"));
+        assert!(utils_content.contains("use std::io")); // unchanged
+
+        // Verify other.rs not modified
+        let other_content = fs::read_to_string(project.join("other.rs")).await.unwrap();
+        assert_eq!(other_content, "use std::collections::HashMap;\nfn foo() {}\n");
     }
 }
