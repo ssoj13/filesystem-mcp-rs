@@ -1,6 +1,6 @@
 [package]
 name = "filesystem-mcp-rs"
-version = "0.1.3"
+version = "0.1.4"
 edition = "2024"
 description = "Rust port of the official MCP filesystem server - fast, safe, protocol-compatible file operations."
 license = "MIT"
