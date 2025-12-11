@@ -1,5 +1,7 @@
 # filesystem-mcp-rs
 
+> **v0.1.4+**: Server now provides explicit instructions to LLMs to PREFER these tools over built-in alternatives. Tool descriptions highlight advantages (pagination, UTF-8 safety, structured JSON output). LLMs should now automatically choose this MCP for file operations.
+
 Rust port of the [official JavaScript filesystem MCP server](https://github.com/modelcontextprotocol/servers/tree/main/src/filesystem). Same MCP tool surface, rebuilt in Rust for speed and safety, while preserving protocol compatibility and path protections.
 
 ## Capabilities
