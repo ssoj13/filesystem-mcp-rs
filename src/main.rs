@@ -238,10 +238,21 @@ impl FileSystemServer {
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 struct ReadTextFileArgs {
     path: String,
+    /// Return first N lines only (like Unix head)
     #[serde(skip_serializing_if = "Option::is_none")]
     head: Option<u32>,
+    /// Return last N lines only (like Unix tail)
     #[serde(skip_serializing_if = "Option::is_none")]
     tail: Option<u32>,
+    /// Start reading from line N (1-indexed, for pagination)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    offset: Option<u32>,
+    /// Read at most N lines (use with offset for pagination)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    limit: Option<u32>,
+    /// Maximum characters to return (truncates with "[truncated]" marker)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    max_chars: Option<usize>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
@@ -568,35 +579,103 @@ struct PatchBinaryArgs {
 impl FileSystemServer {
     #[tool(
         name = "read_text_file",
-        description = "Read the complete contents of a file as text. Use head/tail to slice lines."
+        description = "Read the complete contents of a file as text. Use head/tail to slice lines.\n\n\
+            **Pagination options (for large files):**\n\
+            - `offset` + `limit`: Read N lines starting from line M (1-indexed)\n\
+            - `head`: First N lines only\n\
+            - `tail`: Last N lines only\n\
+            - `max_chars`: Truncate output to N characters\n\n\
+            **Examples:**\n\
+            - Read lines 100-200: `{offset: 100, limit: 100}`\n\
+            - Read first 50 lines: `{head: 50}`\n\
+            - Limit output size: `{max_chars: 50000}`"
     )]
     async fn read_text_file(
         &self,
-        Parameters(ReadTextFileArgs { path, head, tail }): Parameters<ReadTextFileArgs>,
+        Parameters(ReadTextFileArgs { path, head, tail, offset, limit, max_chars }): Parameters<ReadTextFileArgs>,
     ) -> Result<CallToolResult, McpError> {
-        if head.is_some() && tail.is_some() {
+        // Validate mutually exclusive options
+        let mode_count = [head.is_some(), tail.is_some(), offset.is_some()].iter().filter(|&&x| x).count();
+        if mode_count > 1 {
             return Err(McpError::invalid_params(
-                "Cannot specify both head and tail",
+                "Cannot combine head, tail, and offset - use only one mode",
                 None,
             ));
         }
 
         let path = self.resolve(&path).await?;
-        let content = match (head, tail) {
-            (Some(h), _) => head_lines(&path, h as usize)
+
+        // Read content based on mode
+        let (mut content, total_lines) = if let Some(h) = head {
+            let text = head_lines(&path, h as usize)
                 .await
-                .map_err(internal_err("Failed to read head"))?,
-            (_, Some(t)) => tail_lines(&path, t as usize)
+                .map_err(internal_err("Failed to read head"))?;
+            (text, None)
+        } else if let Some(t) = tail {
+            let text = tail_lines(&path, t as usize)
                 .await
-                .map_err(internal_err("Failed to read tail"))?,
-            _ => read_text(&path)
+                .map_err(internal_err("Failed to read tail"))?;
+            (text, None)
+        } else if offset.is_some() || limit.is_some() {
+            // Pagination mode: read full file then slice by lines
+            let full = read_text(&path)
                 .await
-                .map_err(internal_err("Failed to read file"))?,
+                .map_err(internal_err("Failed to read file"))?;
+            let lines: Vec<&str> = full.lines().collect();
+            let total = lines.len();
+
+            let start = offset.map(|o| (o as usize).saturating_sub(1)).unwrap_or(0);
+            let count = limit.map(|l| l as usize).unwrap_or(usize::MAX);
+            let end = start.saturating_add(count).min(total);
+
+            if start >= total {
+                (String::new(), Some(total))
+            } else {
+                (lines[start..end].join("\n"), Some(total))
+            }
+        } else {
+            let text = read_text(&path)
+                .await
+                .map_err(internal_err("Failed to read file"))?;
+            let total = text.lines().count();
+            (text, Some(total))
         };
+
+        // Apply max_chars truncation if specified
+        let truncated = if let Some(max) = max_chars {
+            if content.chars().count() > max {
+                let truncated_content: String = content.chars().take(max).collect();
+                content = format!("{}\n\n[truncated at {} chars, total {} chars]",
+                    truncated_content, max, content.chars().count());
+                true
+            } else {
+                false
+            }
+        } else {
+            false
+        };
+
+        // Build response with metadata
+        let mut meta = serde_json::Map::new();
+        if let Some(total) = total_lines {
+            meta.insert("totalLines".to_string(), json!(total));
+        }
+        if truncated {
+            meta.insert("truncated".to_string(), json!(true));
+        }
+        if let Some(off) = offset {
+            meta.insert("offset".to_string(), json!(off));
+        }
+        if let Some(lim) = limit {
+            meta.insert("limit".to_string(), json!(lim));
+        }
 
         Ok(CallToolResult {
             content: vec![Content::text(content.clone())],
-            structured_content: Some(json!({ "content": content })),
+            structured_content: Some(json!({
+                "content": content,
+                "meta": meta
+            })),
             is_error: Some(false),
             meta: None,
         })

@@ -228,6 +228,274 @@ async fn write_and_read_text_full_head_tail() -> Result<()> {
         .unwrap_or("")
         .contains("three"));
 
+    // Test offset/limit pagination
+    let offset_res = srv
+        .call_tool("read_text_file", json!({ "path": &file_path, "offset": 2, "limit": 1 }))
+        .await?;
+    assert_eq!(
+        offset_res["result"]["content"][0]["text"].as_str().unwrap_or(""),
+        "two"
+    );
+
+    // Test max_chars truncation
+    let truncated = srv
+        .call_tool("read_text_file", json!({ "path": &file_path, "max_chars": 5 }))
+        .await?;
+    let text = truncated["result"]["content"][0]["text"].as_str().unwrap_or("");
+    assert!(text.starts_with("one\nt"));
+    assert!(text.contains("[truncated"));
+
+    srv.kill().await;
+    Ok(())
+}
+
+#[tokio::test]
+async fn read_text_file_pagination_utf8() -> Result<()> {
+    let tmp = TempDir::new()?;
+    let srv = start_server(tmp.path()).await?;
+    let file_path = tmp.path().join("utf8.txt");
+
+    // Create file with UTF-8 content
+    srv.call_tool(
+        "write_file",
+        json!({ "path": &file_path, "content": "Erste\nZweite\nDritte" }),
+    )
+    .await?;
+
+    // Test that offset/limit work with UTF-8
+    let res = srv
+        .call_tool("read_text_file", json!({ "path": &file_path, "offset": 2, "limit": 1 }))
+        .await?;
+    assert_eq!(
+        res["result"]["content"][0]["text"].as_str().unwrap_or(""),
+        "Zweite"
+    );
+
+    // Test max_chars with UTF-8 (should not panic on multi-byte boundary)
+    let truncated = srv
+        .call_tool("read_text_file", json!({ "path": &file_path, "max_chars": 8 }))
+        .await?;
+    let text = truncated["result"]["content"][0]["text"].as_str().unwrap_or("");
+    // Should cleanly truncate at char boundary
+    assert!(text.starts_with("Erste\nZw"));
+
+    srv.kill().await;
+    Ok(())
+}
+
+#[tokio::test]
+async fn read_text_file_pagination_full_coverage() -> Result<()> {
+    let tmp = TempDir::new()?;
+    let srv = start_server(tmp.path()).await?;
+    let file_path = tmp.path().join("lines.txt");
+
+    // Create file with 10 lines
+    let content = (1..=10).map(|i| format!("line{}", i)).collect::<Vec<_>>().join("\n");
+    srv.call_tool(
+        "write_file",
+        json!({ "path": &file_path, "content": &content }),
+    )
+    .await?;
+
+    // Page 1: lines 1-3
+    let page1 = srv
+        .call_tool("read_text_file", json!({ "path": &file_path, "offset": 1, "limit": 3 }))
+        .await?;
+    assert_eq!(
+        page1["result"]["content"][0]["text"].as_str().unwrap_or(""),
+        "line1\nline2\nline3"
+    );
+
+    // Page 2: lines 4-6
+    let page2 = srv
+        .call_tool("read_text_file", json!({ "path": &file_path, "offset": 4, "limit": 3 }))
+        .await?;
+    assert_eq!(
+        page2["result"]["content"][0]["text"].as_str().unwrap_or(""),
+        "line4\nline5\nline6"
+    );
+
+    // Page 3: lines 7-9
+    let page3 = srv
+        .call_tool("read_text_file", json!({ "path": &file_path, "offset": 7, "limit": 3 }))
+        .await?;
+    assert_eq!(
+        page3["result"]["content"][0]["text"].as_str().unwrap_or(""),
+        "line7\nline8\nline9"
+    );
+
+    // Page 4: line 10 only (partial page)
+    let page4 = srv
+        .call_tool("read_text_file", json!({ "path": &file_path, "offset": 10, "limit": 3 }))
+        .await?;
+    assert_eq!(
+        page4["result"]["content"][0]["text"].as_str().unwrap_or(""),
+        "line10"
+    );
+
+    // Beyond file: empty result
+    let beyond = srv
+        .call_tool("read_text_file", json!({ "path": &file_path, "offset": 100, "limit": 3 }))
+        .await?;
+    assert_eq!(
+        beyond["result"]["content"][0]["text"].as_str().unwrap_or(""),
+        ""
+    );
+
+    // Only limit (no offset) - first N lines
+    let first5 = srv
+        .call_tool("read_text_file", json!({ "path": &file_path, "limit": 5 }))
+        .await?;
+    assert_eq!(
+        first5["result"]["content"][0]["text"].as_str().unwrap_or(""),
+        "line1\nline2\nline3\nline4\nline5"
+    );
+
+    // Only offset (no limit) - from line N to end
+    let from8 = srv
+        .call_tool("read_text_file", json!({ "path": &file_path, "offset": 8 }))
+        .await?;
+    assert_eq!(
+        from8["result"]["content"][0]["text"].as_str().unwrap_or(""),
+        "line8\nline9\nline10"
+    );
+
+    srv.kill().await;
+    Ok(())
+}
+
+#[tokio::test]
+async fn read_text_file_pagination_edge_cases() -> Result<()> {
+    let tmp = TempDir::new()?;
+    let srv = start_server(tmp.path()).await?;
+    let file_path = tmp.path().join("edge.txt");
+
+    // Single line file
+    srv.call_tool(
+        "write_file",
+        json!({ "path": &file_path, "content": "only one line" }),
+    )
+    .await?;
+
+    // offset=1 should return that line
+    let res = srv
+        .call_tool("read_text_file", json!({ "path": &file_path, "offset": 1, "limit": 10 }))
+        .await?;
+    assert_eq!(
+        res["result"]["content"][0]["text"].as_str().unwrap_or(""),
+        "only one line"
+    );
+
+    // offset=2 should return empty
+    let res2 = srv
+        .call_tool("read_text_file", json!({ "path": &file_path, "offset": 2, "limit": 10 }))
+        .await?;
+    assert_eq!(
+        res2["result"]["content"][0]["text"].as_str().unwrap_or(""),
+        ""
+    );
+
+    // Empty file
+    let empty_path = tmp.path().join("empty.txt");
+    srv.call_tool(
+        "write_file",
+        json!({ "path": &empty_path, "content": "" }),
+    )
+    .await?;
+
+    let empty_res = srv
+        .call_tool("read_text_file", json!({ "path": &empty_path, "offset": 1, "limit": 10 }))
+        .await?;
+    assert_eq!(
+        empty_res["result"]["content"][0]["text"].as_str().unwrap_or(""),
+        ""
+    );
+
+    // limit=0 should return empty
+    let zero_limit = srv
+        .call_tool("read_text_file", json!({ "path": &file_path, "limit": 0 }))
+        .await?;
+    assert_eq!(
+        zero_limit["result"]["content"][0]["text"].as_str().unwrap_or(""),
+        ""
+    );
+
+    srv.kill().await;
+    Ok(())
+}
+
+#[tokio::test]
+async fn read_text_file_max_chars_variations() -> Result<()> {
+    let tmp = TempDir::new()?;
+    let srv = start_server(tmp.path()).await?;
+    let file_path = tmp.path().join("chars.txt");
+
+    // 100 chars content
+    let content = "a".repeat(100);
+    srv.call_tool(
+        "write_file",
+        json!({ "path": &file_path, "content": &content }),
+    )
+    .await?;
+
+    // max_chars smaller than content
+    let truncated = srv
+        .call_tool("read_text_file", json!({ "path": &file_path, "max_chars": 50 }))
+        .await?;
+    let text = truncated["result"]["content"][0]["text"].as_str().unwrap_or("");
+    assert!(text.starts_with(&"a".repeat(50)));
+    assert!(text.contains("[truncated"));
+
+    // max_chars larger than content - no truncation
+    let not_truncated = srv
+        .call_tool("read_text_file", json!({ "path": &file_path, "max_chars": 200 }))
+        .await?;
+    let text2 = not_truncated["result"]["content"][0]["text"].as_str().unwrap_or("");
+    assert_eq!(text2, &content);
+    assert!(!text2.contains("[truncated"));
+
+    // max_chars with pagination combined
+    let combined = srv
+        .call_tool("read_text_file", json!({ "path": &file_path, "offset": 1, "limit": 1, "max_chars": 20 }))
+        .await?;
+    let text3 = combined["result"]["content"][0]["text"].as_str().unwrap_or("");
+    assert!(text3.starts_with(&"a".repeat(20)));
+    assert!(text3.contains("[truncated"));
+
+    srv.kill().await;
+    Ok(())
+}
+
+#[tokio::test]
+async fn read_text_file_mutually_exclusive_modes() -> Result<()> {
+    let tmp = TempDir::new()?;
+    let srv = start_server(tmp.path()).await?;
+    let file_path = tmp.path().join("modes.txt");
+
+    srv.call_tool(
+        "write_file",
+        json!({ "path": &file_path, "content": "line1\nline2\nline3" }),
+    )
+    .await?;
+
+    // head + tail = error
+    let res1 = srv
+        .call_tool("read_text_file", json!({ "path": &file_path, "head": 1, "tail": 1 }))
+        .await?;
+    assert_err(&res1);
+
+    // head + offset = error
+    let res2 = srv
+        .call_tool("read_text_file", json!({ "path": &file_path, "head": 1, "offset": 1 }))
+        .await?;
+    assert_err(&res2);
+
+    // tail + offset = error
+    let res3 = srv
+        .call_tool("read_text_file", json!({ "path": &file_path, "tail": 1, "offset": 1 }))
+        .await?;
+    assert_err(&res3);
+
     srv.kill().await;
     Ok(())
 }
