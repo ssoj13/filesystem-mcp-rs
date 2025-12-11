@@ -3,7 +3,7 @@
 Rust port of the [official JavaScript filesystem MCP server](https://github.com/modelcontextprotocol/servers/tree/main/src/filesystem). Same MCP tool surface, rebuilt in Rust for speed and safety, while preserving protocol compatibility and path protections.
 
 ## Capabilities
-- Read: `read_text_file` (head/tail), `read_media_file`, `read_multiple_files`
+- Read: `read_text_file` (head/tail/offset/limit/max_chars), `read_media_file`, `read_multiple_files`
 - Write/Edit: `write_file`, `edit_file` (diff + dry-run), `edit_lines` (line-based edits), `bulk_edits` (mass search/replace)
 - Extract: `extract_lines` (cut lines), `extract_symbols` (cut characters)
 - Binary: `read_binary`, `write_binary`, `extract_binary`, `patch_binary` (all base64)
@@ -52,6 +52,32 @@ Search for text/regex patterns **inside** file contents (not filenames):
 - **File filtering**: Optional glob patterns to limit scope
 - **Returns**: Matching lines with file paths and line numbers
 - **Use cases**: Finding code patterns, locating function definitions, searching across codebase
+
+### `read_text_file` - Pagination for Large Files
+Read files with flexible pagination options for handling large files:
+- **`head`**: First N lines (like Unix head)
+- **`tail`**: Last N lines (like Unix tail)
+- **`offset` + `limit`**: Read N lines starting from line M (1-indexed pagination)
+- **`max_chars`**: Truncate output to N characters (UTF-8 safe)
+- **Returns**: `totalLines` in metadata for pagination planning
+
+**Examples:**
+```json
+// Read lines 100-199 (page 2 with 100 lines per page)
+{"path": "large.txt", "offset": 100, "limit": 100}
+
+// First 50 lines
+{"path": "large.txt", "head": 50}
+
+// Last 20 lines
+{"path": "large.txt", "tail": 20}
+
+// Limit output size (useful for token limits)
+{"path": "large.txt", "max_chars": 50000}
+
+// Combine pagination with truncation
+{"path": "large.txt", "offset": 1, "limit": 100, "max_chars": 10000}
+```
 
 ## Extract Tools
 
@@ -188,8 +214,8 @@ cargo test --test http_transport  # HTTP transport only
 ```
 
 Tests:
-- **21 unit tests**: line_edit, bulk_edit (including regex/replace_all), binary, roots parsing
-- **34 integration tests**: file operations, search, grep, extract, binary
+- **54 unit tests**: line_edit, bulk_edit, binary, fs_ops (UTF-8 safety), edit, grep
+- **39 integration tests**: file operations, search, grep, extract, binary, pagination
 - **4 HTTP transport tests**: server startup, health, MCP endpoint
 
 ## Development
