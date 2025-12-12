@@ -144,9 +144,10 @@ impl FileSystemServer {
         resolve_validated_path(raw, &self.allowed, self.allow_symlink_escape)
             .await
             .map_err(|e| {
+                let details = e.to_string();
                 McpError::internal_error(
-                    "Path validation failed",
-                    Some(json!({ "error": e.to_string() })),
+                    format!("Path validation failed: {}", details),
+                    Some(json!({ "error": details })),
                 )
             })
     }
@@ -164,8 +165,8 @@ impl FileSystemServer {
             rmcp::model::ClientResult::ListRootsResult(result) => result,
             other => {
                 return Err(McpError::internal_error(
-                    "Unexpected response to roots/list",
-                    Some(json!({ "response": other })),
+                    format!("Unexpected response to roots/list: {:?}", other),
+                    None,
                 ));
             }
         };
@@ -2018,11 +2019,21 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 // init_tracing removed - see main() comment about why we can't use stderr logging
 
 fn internal_err<T: ToString>(message: &'static str) -> impl FnOnce(T) -> McpError + Clone {
-    move |err| McpError::internal_error(message, Some(json!({ "error": err.to_string() })))
+    move |err| {
+        let details = err.to_string();
+        McpError::internal_error(
+            format!("{}: {}", message, details),
+            Some(json!({ "error": details }))
+        )
+    }
 }
 
 fn service_error(message: &'static str, error: ServiceError) -> McpError {
-    McpError::internal_error(message, Some(json!({ "error": error.to_string() })))
+    let details = error.to_string();
+    McpError::internal_error(
+        format!("{}: {}", message, details),
+        Some(json!({ "error": details }))
+    )
 }
 
 fn parse_root_uri(uri: &str) -> Option<PathBuf> {
