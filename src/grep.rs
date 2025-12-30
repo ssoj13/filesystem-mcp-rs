@@ -68,6 +68,30 @@ pub async fn grep_files(
     let mut matches = Vec::new();
     let mut total_matches = 0;
 
+    // Check if root_path is a file (not a directory)
+    let metadata = fs::metadata(&root_path).await?;
+    if metadata.is_file() {
+        // Search single file directly
+        if let Some(matcher) = &file_matcher {
+            let filename = root_path.file_name().unwrap_or_default().to_string_lossy();
+            if !matcher.is_match(filename.as_ref()) {
+                return Ok(matches); // File doesn't match pattern
+            }
+        }
+        if let Ok(file_matches) = search_file(
+            &root_path,
+            &regex,
+            params.context_before,
+            params.context_after,
+            params.max_matches,
+        )
+        .await
+        {
+            return Ok(file_matches);
+        }
+        return Ok(matches);
+    }
+
     // Walk directory tree
     let mut stack = vec![root_path.clone()];
     while let Some(current) = stack.pop() {
@@ -297,5 +321,40 @@ mod tests {
 
         let result = grep_files(params, &allowed, false).await.unwrap();
         assert_eq!(result.len(), 0, "Empty file should have no matches");
+    }
+
+    // Regression test: grep on single file path (not directory)
+    #[tokio::test]
+    async fn test_grep_single_file_path() {
+        let temp = TempDir::new().unwrap();
+        let root = temp.path();
+
+        let file_path = root.join("target.txt");
+        fs::write(&file_path, "hello world\nfoo bar\nhello again\n")
+            .await
+            .unwrap();
+
+        let allowed = AllowedDirs::new(vec![root.to_path_buf()]);
+
+        // Pass file path directly, not directory
+        let params = GrepParams {
+            root: file_path.to_string_lossy().to_string(),
+            pattern: "hello".to_string(),
+            file_pattern: None,
+            case_insensitive: false,
+            context_before: 0,
+            context_after: 0,
+            max_matches: 100,
+        };
+
+        let result = grep_files(params, &allowed, false).await.unwrap();
+        assert_eq!(
+            result.len(),
+            2,
+            "Should find 2 matches in single file. Got: {:?}",
+            result
+        );
+        assert_eq!(result[0].line, "hello world");
+        assert_eq!(result[1].line, "hello again");
     }
 }
