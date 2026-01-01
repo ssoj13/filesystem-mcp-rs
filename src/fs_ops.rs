@@ -1,98 +1,56 @@
 use std::path::Path;
 
 use anyhow::Result;
+use chardetng::EncodingDetector;
 use tokio::fs;
-use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncSeekExt};
 
-/// Read full file as UTF-8 text.
-pub async fn read_text(path: &Path) -> Result<String> {
-    let content = fs::read_to_string(path).await?;
-    Ok(content)
-}
-
-/// Return first N lines.
-pub async fn head(path: &Path, lines: usize) -> Result<String> {
-    let mut file = fs::File::open(path).await?;
-    let mut reader = tokio::io::BufReader::new(&mut file);
-    let mut buf = String::new();
-    let mut out = Vec::new();
-
-    while out.len() < lines {
-        buf.clear();
-        let n = reader.read_line(&mut buf).await?;
-        if n == 0 {
-            break;
-        }
-        if buf.ends_with('\n') {
-            buf.pop();
-            if buf.ends_with('\r') {
-                buf.pop();
-            }
-        }
-        out.push(buf.clone());
-    }
-
-    Ok(out.join("\n"))
-}
-
-/// Return last N lines; reads from end in chunks.
-pub async fn tail(path: &Path, lines: usize) -> Result<String> {
-    const CHUNK: usize = 4096;
-    let mut file = fs::File::open(path).await?;
-    let metadata = file.metadata().await?;
-    let size = metadata.len();
-    if size == 0 || lines == 0 {
-        return Ok(String::new());
-    }
-
-    let mut pos: i64 = size as i64;
-    let mut chunks: Vec<Vec<u8>> = Vec::new();
-    let mut newline_count = 0usize;
-
-    while pos > 0 && newline_count <= lines {
-        let read_size = CHUNK.min(pos as usize);
-        pos -= read_size as i64;
-        let mut chunk = vec![0u8; read_size];
-        file.seek(std::io::SeekFrom::Start(pos as u64)).await?;
-        let n = file.read(&mut chunk).await?;
-        chunk.truncate(n);
-        newline_count += chunk.iter().filter(|b| **b == b'\n').count();
-        chunks.push(chunk);
-        if newline_count > lines {
-            break;
-        }
-    }
-
-    let mut combined = Vec::new();
-    for chunk in chunks.iter().rev() {
-        combined.extend_from_slice(chunk);
-    }
-
-    // Find valid UTF-8 boundary (skip partial multi-byte char at start)
-    let text = find_valid_utf8_start(&combined);
-    let lines_vec: Vec<&str> = text.lines().collect();
-    let start = lines_vec.len().saturating_sub(lines);
-    Ok(lines_vec[start..].join("\n"))
-}
-
-/// Find first valid UTF-8 boundary and decode from there.
-/// This handles the case where chunk boundary splits a multi-byte UTF-8 char.
-fn find_valid_utf8_start(bytes: &[u8]) -> String {
-    // Try full slice first (common case)
+/// Decode bytes to string with auto-detected encoding.
+/// Tries UTF-8 first (fast path), then uses chardetng for detection.
+pub fn decode_bytes(bytes: &[u8]) -> String {
+    // Fast path: valid UTF-8
     if let Ok(s) = std::str::from_utf8(bytes) {
         return s.to_string();
     }
 
-    // Skip continuation bytes (10xxxxxx = 0x80-0xBF) at the start
-    // to find a valid UTF-8 sequence boundary
-    for skip in 1..=4.min(bytes.len()) {
-        if let Ok(s) = std::str::from_utf8(&bytes[skip..]) {
-            return s.to_string();
-        }
-    }
+    // Detect encoding
+    let mut detector = EncodingDetector::new();
+    detector.feed(bytes, true);
+    let encoding = detector.guess(None, true);
 
-    // Fallback: lossy conversion (shouldn't happen with valid UTF-8 files)
-    String::from_utf8_lossy(bytes).into_owned()
+    // Decode with detected encoding
+    let (decoded, _, _) = encoding.decode(bytes);
+    decoded.into_owned()
+}
+
+/// Read full file with auto-detected encoding.
+pub async fn read_text(path: &Path) -> Result<String> {
+    let bytes = fs::read(path).await?;
+    Ok(decode_bytes(&bytes))
+}
+
+/// Return first N lines (encoding-safe).
+pub async fn head(path: &Path, lines: usize) -> Result<String> {
+    if lines == 0 {
+        return Ok(String::new());
+    }
+    // Read full file as bytes, decode, then take first N lines
+    let bytes = fs::read(path).await?;
+    let content = decode_bytes(&bytes);
+    let result: Vec<&str> = content.lines().take(lines).collect();
+    Ok(result.join("\n"))
+}
+
+/// Return last N lines (encoding-safe).
+pub async fn tail(path: &Path, lines: usize) -> Result<String> {
+    if lines == 0 {
+        return Ok(String::new());
+    }
+    // Read full file as bytes, decode, then take last N lines
+    let bytes = fs::read(path).await?;
+    let content = decode_bytes(&bytes);
+    let all_lines: Vec<&str> = content.lines().collect();
+    let start = all_lines.len().saturating_sub(lines);
+    Ok(all_lines[start..].join("\n"))
 }
 
 #[cfg(test)]
@@ -249,30 +207,76 @@ mod tests {
         assert_eq!(result, "Erste Zeile\nZweite Zeile");
     }
 
+    // Encoding detection tests
+
     #[test]
-    fn test_find_valid_utf8_start_clean() {
-        // Valid UTF-8 - no skip needed
+    fn test_decode_bytes_utf8() {
         let bytes = "hello world".as_bytes();
-        assert_eq!(find_valid_utf8_start(bytes), "hello world");
+        assert_eq!(decode_bytes(bytes), "hello world");
     }
 
     #[test]
-    fn test_find_valid_utf8_start_partial_2byte() {
-        // Simulates partial 2-byte char at start (o = C3 B6)
-        // If we only have the continuation byte B6, skip it
-        let mut bytes = vec![0xB6]; // continuation byte only
+    fn test_decode_bytes_utf8_with_bom() {
+        // UTF-8 with BOM
+        let mut bytes = vec![0xEF, 0xBB, 0xBF]; // UTF-8 BOM
         bytes.extend_from_slice("hello".as_bytes());
-        let result = find_valid_utf8_start(&bytes);
-        assert_eq!(result, "hello");
+        let result = decode_bytes(&bytes);
+        // chardetng should handle BOM correctly
+        assert!(result.contains("hello"));
     }
 
     #[test]
-    fn test_find_valid_utf8_start_partial_4byte() {
-        // Simulates partial 4-byte emoji at start
-        // 4-byte: F0 9F 98 80 - if we have only last 2 continuation bytes
-        let mut bytes = vec![0x98, 0x80]; // last 2 continuation bytes
-        bytes.extend_from_slice("test".as_bytes());
-        let result = find_valid_utf8_start(&bytes);
-        assert_eq!(result, "test");
+    fn test_decode_bytes_latin1() {
+        // Latin-1 encoded: "cafe" with e-acute (0xE9 in Latin-1)
+        let bytes: &[u8] = &[0x63, 0x61, 0x66, 0xE9]; // "cafe" with Latin-1 e-acute
+        let result = decode_bytes(bytes);
+        // Should decode without panicking, content may vary based on detection
+        assert!(!result.is_empty());
+    }
+
+    #[test]
+    fn test_decode_bytes_windows1252() {
+        // Windows-1252: smart quotes and other special chars
+        let bytes: &[u8] = &[0x93, 0x68, 0x65, 0x6C, 0x6C, 0x6F, 0x94]; // "hello" in smart quotes
+        let result = decode_bytes(bytes);
+        assert!(!result.is_empty());
+        assert!(result.contains("hello"));
+    }
+
+    #[tokio::test]
+    async fn test_read_text_non_utf8_file() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("latin1.txt");
+        // Write Latin-1 encoded content directly as bytes
+        let content: &[u8] = b"Caf\xe9 au lait\nR\xe9sum\xe9";
+        async_fs::write(&path, content).await.unwrap();
+
+        // Should not panic and should return decoded content
+        let result = read_text(&path).await.unwrap();
+        assert!(!result.is_empty());
+        // Content should be readable (may be decoded as Latin-1 or similar)
+        assert!(result.lines().count() >= 1);
+    }
+
+    #[tokio::test]
+    async fn test_head_non_utf8_file() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("latin1.txt");
+        let content: &[u8] = b"Line1 with \xe9\nLine2\nLine3";
+        async_fs::write(&path, content).await.unwrap();
+
+        let result = head(&path, 2).await.unwrap();
+        assert!(result.lines().count() == 2);
+    }
+
+    #[tokio::test]
+    async fn test_tail_non_utf8_file() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("latin1.txt");
+        let content: &[u8] = b"Line1\nLine2 with \xe9\nLine3";
+        async_fs::write(&path, content).await.unwrap();
+
+        let result = tail(&path, 2).await.unwrap();
+        assert!(result.lines().count() == 2);
     }
 }
