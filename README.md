@@ -128,6 +128,21 @@ Search and replace binary patterns in a file:
 cargo build --release
 ```
 
+## Troubleshooting
+
+### JSON Schema draft compatibility
+Some clients (qwen code, gemini-cli) validate tool schemas with Draft 7 only, while rmcp generates JSON Schema 2020-12 by default. This causes errors like:
+```
+no schema with key or ref "https://json-schema.org/draft/2020-12/schema"
+```
+
+Fix applied here: rewrite tool input schemas to Draft 7 at startup. This is done once when building the tool router (see `src/main.rs`) and includes:
+- Force `$schema` to `http://json-schema.org/draft-07/schema#`
+- Convert `$defs` -> `definitions`
+- Rewrite `$ref` paths `#/$defs/...` -> `#/definitions/...`
+
+This removes the Draft 2020-12 dependency from tool schemas so Draft 7 validators succeed. This is a per-server fix; other MCP servers will still need the same rewrite if they emit 2020-12.
+
 ## Transport Modes
 
 filesystem-mcp-rs supports dual-mode transport:

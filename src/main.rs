@@ -19,7 +19,7 @@ use rmcp::{
     transport::stdio,
 };
 use schemars::JsonSchema;
-use serde_json::json;
+use serde_json::{Value, json};
 use tokio::fs;
 use tracing::warn;
 
@@ -90,9 +90,11 @@ struct FileSystemServer {
 
 impl FileSystemServer {
     fn new(allowed: AllowedDirs) -> Self {
+        let mut tool_router = Self::tool_router();
+        normalize_tool_schemas(&mut tool_router);
         Self {
             allowed,
-            tool_router: Self::tool_router(),
+            tool_router,
             allow_symlink_escape: false,
         }
     }
@@ -2034,6 +2036,60 @@ fn service_error(message: &'static str, error: ServiceError) -> McpError {
         format!("{}: {}", message, details),
         Some(json!({ "error": details }))
     )
+}
+
+fn normalize_tool_schemas(tool_router: &mut ToolRouter<FileSystemServer>) {
+    for route in tool_router.map.values_mut() {
+        let schema_value = Value::Object((*route.attr.input_schema).clone());
+        let schema_value = to_draft07_schema(schema_value);
+        if let Value::Object(object) = schema_value {
+            route.attr.input_schema = object.into();
+        }
+    }
+}
+
+fn to_draft07_schema(mut schema: Value) -> Value {
+    if let Value::Object(ref mut root) = schema {
+        root.insert(
+            "$schema".to_string(),
+            Value::String("http://json-schema.org/draft-07/schema#".to_string()),
+        );
+    }
+    rewrite_schema_refs(&mut schema);
+    schema
+}
+
+fn rewrite_schema_refs(value: &mut Value) {
+    match value {
+        Value::Object(map) => {
+            if let Some(defs) = map.remove("$defs") {
+                let definitions = map.entry("definitions".to_string()).or_insert_with(|| Value::Object(Default::default()));
+                if let (Value::Object(target), Value::Object(src)) = (definitions, defs) {
+                    for (key, value) in src {
+                        target.entry(key).or_insert(value);
+                    }
+                }
+            }
+            for (key, value) in map.iter_mut() {
+                if key == "$ref" {
+                    if let Value::String(reference) = value {
+                        if let Some(rest) = reference.strip_prefix("#/$defs/") {
+                            *reference = format!("#/definitions/{}", rest);
+                        } else if reference == "#/$defs" {
+                            *reference = "#/definitions".to_string();
+                        }
+                    }
+                }
+                rewrite_schema_refs(value);
+            }
+        }
+        Value::Array(items) => {
+            for item in items {
+                rewrite_schema_refs(item);
+            }
+        }
+        _ => {}
+    }
 }
 
 fn parse_root_uri(uri: &str) -> Option<PathBuf> {
