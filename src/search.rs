@@ -223,43 +223,6 @@ pub fn build_exclude_set(patterns: &[String]) -> Result<GlobSet> {
     build_glob_set(patterns)
 }
 
-/// Parse time string like "2024-01-15" or "2024-01-15T10:30:00"
-pub fn parse_time(s: &str) -> Option<SystemTime> {
-    use std::time::Duration;
-    
-    // Try ISO 8601 formats
-    if let Ok(dt) = humantime::parse_rfc3339_weak(s) {
-        return Some(dt);
-    }
-    
-    // Try relative time like "1d", "2h", "30m"
-    if let Ok(dur) = humantime::parse_duration(s) {
-        return Some(SystemTime::now() - dur);
-    }
-    
-    // Try simple date format YYYY-MM-DD
-    let parts: Vec<&str> = s.split('-').collect();
-    if parts.len() == 3 {
-        if let (Ok(y), Ok(m), Ok(d)) = (
-            parts[0].parse::<i32>(),
-            parts[1].parse::<u32>(),
-            parts[2].parse::<u32>(),
-        ) {
-            // Approximate: days since Unix epoch
-            let days = (y - 1970) * 365 + (y - 1969) / 4 - (y - 1901) / 100 + (y - 1601) / 400;
-            let month_days = [0, 31, 59, 90, 120, 151, 181, 212, 243, 273, 304, 334];
-            let leap = if m > 2 && (y % 4 == 0 && (y % 100 != 0 || y % 400 == 0)) { 1 } else { 0 };
-            let total_days = days + month_days.get((m - 1) as usize).copied().unwrap_or(0) as i32 + d as i32 - 1 + leap;
-            
-            if total_days > 0 {
-                return Some(std::time::UNIX_EPOCH + Duration::from_secs(total_days as u64 * 86400));
-            }
-        }
-    }
-    
-    None
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;

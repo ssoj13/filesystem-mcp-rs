@@ -1,5 +1,30 @@
 # Changelog
 
+## [0.1.10] - 2026-01-17
+
+### Added
+- **Hash algorithms**: MurmurHash3 (128-bit) and SpookyHash V2 (128-bit) - fast non-cryptographic hashes
+- **Partial hashing**: `file_hash` now supports `offset` and `length` parameters for hashing file regions
+
+### Enhanced
+- **file_hash**: Extended algorithm list (md5, sha1, sha256, sha512, xxh64, murmur3, spooky)
+- **search_files**: Exposed `fileType`, `minSize`, `maxSize` parameters in MCP API
+- **JSON responses**: Added missing fields to structured output:
+  - `compare_files`: diffSamples, file1Empty, file2Empty
+  - `compare_directories`: errors
+  - `watch_file`: timedOut
+  - `hash_files`: error field per result
+  - `read_json`: totalKeys, arrayLength
+  - `read_pdf`: charCount
+
+### Fixed
+- Removed dead code: unused methods in grep.rs, hash.rs, watch.rs, process.rs, search.rs
+- Updated LLM tool descriptions with new capabilities and examples
+
+### Tests
+- Added 4 new hash tests for Murmur3/Spooky algorithms
+- Total: 168 unit tests
+
 ## [0.1.9] - 2026-01-17
 
 ### Added

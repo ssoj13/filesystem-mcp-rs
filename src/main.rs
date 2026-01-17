@@ -28,7 +28,7 @@ use crate::edit::{FileEdit, apply_edits};
 use crate::fs_ops::{head as head_lines, read_text, tail as tail_lines};
 use crate::media::read_media_base64;
 use crate::path::resolve_validated_path;
-use crate::search::search_paths;
+use crate::search::{search_files_extended, SearchParams, FileTypeFilter};
 use crate::grep::{GrepParams, grep_files};
 use crate::line_edit::{LineEdit, LineOperation, apply_line_edits};
 use crate::bulk_edit::bulk_edit_files;
@@ -51,9 +51,11 @@ mod line_edit;
 mod logging;
 mod media;
 mod mime;
+mod murmur3;
 mod path;
 mod pdf_reader;
 mod search;
+mod spooky;
 mod stats;
 mod watch;
 mod process;
@@ -398,6 +400,15 @@ struct SearchArgs {
     pattern: String,
     #[serde(default)]
     exclude_patterns: Vec<String>,
+    /// Filter by type: "file", "dir", "symlink", "any" (default)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    file_type: Option<String>,
+    /// Minimum file size in bytes
+    #[serde(skip_serializing_if = "Option::is_none")]
+    min_size: Option<u64>,
+    /// Maximum file size in bytes
+    #[serde(skip_serializing_if = "Option::is_none")]
+    max_size: Option<u64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
@@ -448,9 +459,15 @@ fn default_max_matches() -> usize {
 struct FileHashArgs {
     /// Path to file
     path: String,
-    /// Hash algorithm: md5, sha1, sha256 (default), sha512, xxh64
+    /// Hash algorithm: md5, sha1, sha256 (default), sha512, xxh64, murmur3, spooky
     #[serde(default)]
     algorithm: Option<String>,
+    /// Byte offset to start hashing from (0-indexed, default: 0)
+    #[serde(default)]
+    offset: Option<u64>,
+    /// Number of bytes to hash (default: entire file from offset)
+    #[serde(default)]
+    length: Option<u64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
@@ -458,7 +475,7 @@ struct FileHashArgs {
 struct FileHashMultipleArgs {
     /// Paths to files
     paths: Vec<String>,
-    /// Hash algorithm: md5, sha1, sha256 (default), sha512, xxh64
+    /// Hash algorithm: md5, sha1, sha256 (default), sha512, xxh64, murmur3, spooky
     #[serde(default)]
     algorithm: Option<String>,
 }
@@ -1399,7 +1416,8 @@ impl FileSystemServer {
         name = "search_files",
         description = "PREFERRED over built-in Glob/find. Search for files by glob pattern.\n\n\
             **Why use this:** Supports exclusion patterns, returns structured JSON, symlink-safe path validation.\n\n\
-            Recursively search for paths matching glob pattern (e.g., **/*.rs, src/**/*.txt) with optional exclusions."
+            Recursively search for paths matching glob pattern (e.g., **/*.rs, src/**/*.txt) with optional exclusions.\n\n\
+            **Filters:** fileType (file/dir/symlink/any), minSize, maxSize in bytes."
     )]
     async fn search_files(
         &self,
@@ -1407,30 +1425,59 @@ impl FileSystemServer {
             path,
             pattern,
             exclude_patterns,
+            file_type,
+            min_size,
+            max_size,
         }): Parameters<SearchArgs>,
     ) -> Result<CallToolResult, McpError> {
         let root = self.resolve(&path).await?;
-        let results = search_paths(
-            root.to_string_lossy().as_ref(),
-            &pattern,
-            &exclude_patterns,
-            &self.allowed,
-            self.allow_symlink_escape,
-        )
-        .await
-        .map_err(internal_err("Search failed"))?;
+        
+        // Parse file type filter
+        let ft = file_type
+            .as_deref()
+            .and_then(FileTypeFilter::from_str)
+            .unwrap_or_default();
+        
+        let params = SearchParams {
+            root: root.to_string_lossy().to_string(),
+            pattern,
+            exclude_patterns,
+            file_type: ft,
+            min_size,
+            max_size,
+            ..Default::default()
+        };
+        
+        let results = search_files_extended(&params, &self.allowed, self.allow_symlink_escape)
+            .await
+            .map_err(internal_err("Search failed"))?;
 
         let text = if results.is_empty() {
             "No matches found".to_string()
         } else {
             results
                 .iter()
-                .map(|p| p.to_string_lossy().to_string())
+                .map(|r| r.path.to_string_lossy().to_string())
                 .collect::<Vec<_>>()
                 .join("\n")
         };
-        Ok(CallToolResult::success(vec![Content::text(text.clone())])
-            .with_structured(json!({ "matches": results })))
+        
+        Ok(CallToolResult {
+            content: vec![Content::text(text)],
+            structured_content: Some(json!({
+                "matches": results.iter().map(|r| json!({
+                    "path": r.path,
+                    "isFile": r.is_file,
+                    "isDir": r.is_dir,
+                    "isSymlink": r.is_symlink,
+                    "size": r.size,
+                    "modified": r.modified.map(|t| t.duration_since(std::time::UNIX_EPOCH).ok().map(|d| d.as_secs())).flatten(),
+                })).collect::<Vec<_>>(),
+                "count": results.len(),
+            })),
+            is_error: Some(false),
+            meta: None,
+        })
     }
 
     #[tool(
@@ -2237,7 +2284,7 @@ USE CASES: Patch executables, fix binary data, search-replace in non-text files.
 
     #[tool(
         name = "file_hash",
-        description = "Compute hash of a file. Algorithms: md5, sha1, sha256 (default), sha512, xxh64."
+        description = "Compute hash of a file or file region.\n\nAlgorithms: md5, sha1, sha256 (default), sha512, xxh64, murmur3, spooky.\n\nOptional offset/length for partial hashing (e.g., hash first 1KB: offset=0, length=1024).\n\nEXAMPLES:\n- Hash entire file: {path: 'file.bin'}\n- Hash with MD5: {path: 'file.bin', algorithm: 'md5'}\n- Hash first 1KB: {path: 'file.bin', offset: 0, length: 1024}\n- Hash from position 512: {path: 'file.bin', offset: 512}"
     )]
     async fn file_hash(
         &self,
@@ -2247,7 +2294,7 @@ USE CASES: Patch executables, fix binary data, search-replace in non-text files.
         let algo = hash::HashAlgorithm::from_str(args.algorithm.as_deref().unwrap_or("sha256"))
             .map_err(|e| McpError::invalid_params(e.to_string(), None))?;
         
-        let result = hash::hash_file(&path, algo)
+        let result = hash::hash_file_range(&path, algo, args.offset, args.length)
             .await
             .map_err(|e| McpError::internal_error(e.to_string(), None))?;
         
@@ -2258,6 +2305,8 @@ USE CASES: Patch executables, fix binary data, search-replace in non-text files.
                 "algorithm": args.algorithm.as_deref().unwrap_or("sha256"),
                 "hash": result.hash,
                 "size": result.size,
+                "offset": args.offset.unwrap_or(0),
+                "length": args.length,
             })),
             is_error: Some(false),
             meta: None,
@@ -2266,7 +2315,7 @@ USE CASES: Patch executables, fix binary data, search-replace in non-text files.
 
     #[tool(
         name = "file_hash_multiple",
-        description = "Compute hashes of multiple files. Returns all_match=true if all hashes are identical."
+        description = "Compute hashes of multiple files.\n\nAlgorithms: md5, sha1, sha256 (default), sha512, xxh64, murmur3, spooky.\n\nReturns all_match=true if all hashes identical. Each result has error field for failures."
     )]
     async fn file_hash_multiple(
         &self,
@@ -2295,6 +2344,7 @@ USE CASES: Patch executables, fix binary data, search-replace in non-text files.
                     "path": r.path,
                     "hash": r.hash,
                     "size": r.size,
+                    "error": r.error,
                 })).collect::<Vec<_>>(),
                 "allMatch": result.all_match,
             })),
@@ -2305,7 +2355,7 @@ USE CASES: Patch executables, fix binary data, search-replace in non-text files.
 
     #[tool(
         name = "compare_files",
-        description = "Binary comparison of two files. Returns diff samples, match percentage, and summary."
+        description = "Binary comparison of two files. Returns diff samples (hex bytes), match percentage, hash values, and empty-range flags."
     )]
     async fn compare_files(
         &self,
@@ -2347,6 +2397,14 @@ USE CASES: Patch executables, fix binary data, search-replace in non-text files.
                 "totalDiffRegions": result.total_diff_regions,
                 "totalDiffBytes": result.total_diff_bytes,
                 "matchPercentage": result.match_percentage,
+                "file1Empty": result.file1_empty,
+                "file2Empty": result.file2_empty,
+                "diffSamples": result.diff_samples.iter().map(|s| json!({
+                    "offset": s.offset,
+                    "length": s.length,
+                    "bytes1Hex": s.bytes1_hex,
+                    "bytes2Hex": s.bytes2_hex,
+                })).collect::<Vec<_>>(),
             })),
             is_error: Some(false),
             meta: None,
@@ -2355,7 +2413,7 @@ USE CASES: Patch executables, fix binary data, search-replace in non-text files.
 
     #[tool(
         name = "compare_directories",
-        description = "Compare two directories. Returns files only in first, only in second, and different files."
+        description = "Compare two directories. Returns files only in first, only in second, different files, and any errors encountered."
     )]
     async fn compare_directories(
         &self,
@@ -2399,6 +2457,7 @@ USE CASES: Patch executables, fix binary data, search-replace in non-text files.
                 })).collect::<Vec<_>>(),
                 "sameCount": result.same_count,
                 "diffCount": result.diff_count,
+                "errors": result.errors,
             })),
             is_error: Some(false),
             meta: None,
@@ -2441,7 +2500,7 @@ USE CASES: Patch executables, fix binary data, search-replace in non-text files.
 
     #[tool(
         name = "watch_file",
-        description = "Wait for file changes (modify, create, delete). Returns when event occurs or timeout."
+        description = "Wait for file changes (modify, create, delete). Returns event type, elapsed time, new size, and timedOut flag."
     )]
     async fn watch_file(
         &self,
@@ -2471,6 +2530,7 @@ USE CASES: Patch executables, fix binary data, search-replace in non-text files.
                 "event": result.event,
                 "newSize": result.new_size,
                 "elapsedMs": result.elapsed_ms,
+                "timedOut": result.timed_out,
             })),
             is_error: Some(false),
             meta: None,
@@ -2479,7 +2539,7 @@ USE CASES: Patch executables, fix binary data, search-replace in non-text files.
 
     #[tool(
         name = "read_json",
-        description = "Read JSON file with optional JSONPath query. Handles broken JSON gracefully."
+        description = "Read JSON file with optional JSONPath query. Returns result, totalKeys (objects), arrayLength (arrays), and parse errors."
     )]
     async fn read_json(
         &self,
@@ -2508,6 +2568,8 @@ USE CASES: Patch executables, fix binary data, search-replace in non-text files.
                     "line": e.line,
                     "column": e.column,
                 })),
+                "totalKeys": result.total_keys,
+                "arrayLength": result.array_length,
             })),
             is_error: Some(result.parse_error.is_some()),
             meta: None,
@@ -2516,7 +2578,7 @@ USE CASES: Patch executables, fix binary data, search-replace in non-text files.
 
     #[tool(
         name = "read_pdf",
-        description = "Extract text from PDF file. Supports page ranges."
+        description = "Extract text from PDF file. Supports page ranges. Returns text, page count, charCount, and truncation info."
     )]
     async fn read_pdf(
         &self,
@@ -2535,6 +2597,7 @@ USE CASES: Patch executables, fix binary data, search-replace in non-text files.
                 "pagesCount": result.pages_count,
                 "pagesExtracted": result.pages_extracted,
                 "truncated": result.truncated,
+                "charCount": result.char_count,
             })),
             is_error: Some(false),
             meta: None,

@@ -1,0 +1,161 @@
+# Filesystem MCP - Codepaths & Architecture
+
+## Overview
+
+This is a Rust MCP (Model Context Protocol) server providing filesystem operations. It runs as a standalone binary communicating via stdin/stdout (stdio transport) or HTTP.
+
+## Entry Points
+
+```
+main.rs
+├── main() - Entry point
+│   ├── parse CLI args (clap)
+│   ├── setup logging (tracing)
+│   ├── AllowedDirs::new() - initialize allowed paths
+│   └── serve() / serve_http() - start MCP server
+│
+└── FileSystemServer struct
+    ├── #[tool_router] - 50+ MCP tools
+    ├── allowed: AllowedDirs - path whitelist
+    ├── allow_symlink_escape: bool - security flag
+    └── process_manager: ProcessManager - background tasks
+```
+
+## Path Security Model
+
+```
+User Path → resolve_path() → Validated Path
+                ↓
+    ┌─────────────────────────────┐
+    │ 1. Canonicalize path        │
+    │ 2. Check against AllowedDirs│
+    │ 3. Detect symlink escapes   │
+    │ 4. Return error if invalid  │
+    └─────────────────────────────┘
+```
+
+## Module Responsibilities
+
+### Core Path Handling
+- `allowed.rs` - Thread-safe AllowedDirs storage
+- `path.rs` - Path resolution, validation, symlink checks
+
+### File I/O
+- `fs_ops.rs` - read_text_file, head/tail, encoding detection
+- `binary.rs` - Binary read/write/extract/patch operations
+- `edit.rs` - Text replacement (literal & regex)
+- `line_edit.rs` - Line-based editing (insert/replace/delete)
+- `bulk_edit.rs` - Multi-file search/replace
+- `diff.rs` - Unified diff generation
+
+### Search & Analysis
+- `search.rs` - Glob-based file search with filters
+- `grep.rs` - Content search with regex
+- `hash.rs` - File hashing (MD5, SHA1, SHA256, SHA512, XXH64)
+- `compare.rs` - Binary file/directory comparison
+- `stats.rs` - Directory statistics
+- `duplicates.rs` - Duplicate file finder
+
+### Format Support
+- `archive.rs` - ZIP/TAR/TAR.GZ extract/create
+- `json_reader.rs` - JSON read with JSONPath query
+- `pdf_reader.rs` - PDF text extraction
+
+### Runtime
+- `process.rs` - Command execution, process management
+- `watch.rs` - File watching, tail -f functionality
+- `logging.rs` - Tracing setup
+- `format.rs` - JSON Schema draft conversion (2020-12 → Draft-07)
+
+## Tool Response Pattern
+
+All tools follow this pattern:
+
+```rust
+async fn tool_name(&self, args: Args) -> Result<CallToolResult, McpError> {
+    // 1. Validate & resolve paths
+    let path = self.resolve(&args.path).await?;
+    
+    // 2. Call module function
+    let result = module::function(&path, ...)
+        .await
+        .map_err(|e| McpError::internal_error(e.to_string(), None))?;
+    
+    // 3. Format text output
+    let text = format!(...);
+    
+    // 4. Build JSON response
+    Ok(CallToolResult {
+        content: vec![Content::text(text)],
+        structured_content: Some(json!({
+            "field1": result.field1,
+            "field2": result.field2,
+        })),
+        is_error: Some(false),
+        meta: None,
+    })
+}
+```
+
+## Process Management
+
+```
+run_command(background: true)
+    ↓
+ProcessManager.register(pid, info)
+    ↓
+[Process runs in background]
+    ↓
+list_processes() → show tracked processes
+kill_process(pid) → terminate
+    ↓
+ProcessManager.unregister(pid)
+```
+
+## Known Issues & TODOs
+
+### Dead Code (to remove)
+- `archive.rs:44` - `ArchiveFormat::extension()` never called
+- `grep.rs:81-119` - `impl GrepResult` helper methods unused
+- `watch.rs:76-85` - `WatchEvent::name()` never called
+- `process.rs:109` - `ProcessManager::contains()` never called
+- `process.rs:347` - `is_process_running()` never called
+- `search.rs:227` - `parse_time()` never called
+
+### Missing JSON Fields
+These struct fields are computed but not returned in JSON:
+- `CompareResult.diff_samples` - detailed binary diff
+- `CompareResult.file1_empty/file2_empty` - edge case flags
+- `DirCompareResult.errors` - comparison errors
+- `HashResult.algorithm` - redundant (delete instead)
+- `FileHashResult.error` - per-file errors
+- `JsonReadResult.total_keys/array_length` - metadata
+- `PdfReadResult.char_count` - character count
+- `WatchResult.timed_out` - timeout flag
+
+### Incomplete Refactoring: Extended Search
+`search_files_extended()` supports:
+- File type filter (file/dir/symlink)
+- Size filters (min/max)
+- Time filters (modified after/before)
+
+But `search_files` MCP tool only uses basic glob matching, discarding extended capabilities.
+
+## Security Considerations
+
+1. **Path Whitelist**: All paths validated against `AllowedDirs`
+2. **Symlink Escape**: Optional detection via `allow_symlink_escape` flag
+3. **Canonicalization**: Paths resolved to absolute before validation
+4. **Process Isolation**: `sysinfo` crate for cross-platform process management
+5. **No Shell Injection**: Direct command execution, args passed separately
+
+## Configuration
+
+CLI flags:
+- `--allowed-dir <path>` - Add allowed directory (repeatable)
+- `--allow-symlink-escape` - Allow symlinks outside allowed dirs
+- `--port <port>` - HTTP mode port
+- `--bind <addr>` - HTTP bind address
+
+Environment:
+- `RUST_LOG` - Tracing log level

@@ -72,14 +72,6 @@ impl WatchEvent {
             _ => bail!("Unknown event type '{}'. Supported: modify, create, delete", s),
         }
     }
-    
-    pub fn name(&self) -> &'static str {
-        match self {
-            Self::Modify => "modify",
-            Self::Create => "create",
-            Self::Delete => "delete",
-        }
-    }
 }
 
 /// Read last N lines from file (or last N bytes)

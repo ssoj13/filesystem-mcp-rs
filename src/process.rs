@@ -104,12 +104,6 @@ impl ProcessManager {
         let procs = self.processes.read().await;
         procs.values().cloned().collect()
     }
-
-    /// Check if process is tracked
-    pub async fn contains(&self, pid: u32) -> bool {
-        let procs = self.processes.read().await;
-        procs.contains_key(&pid)
-    }
 }
 
 /// Run a command with full control
@@ -341,15 +335,6 @@ pub fn kill_process(pid: u32, force: bool) -> Result<bool> {
     } else {
         Ok(false)  // Process not found
     }
-}
-
-/// Check if a process is running using sysinfo
-pub fn is_process_running(pid: u32) -> bool {
-    use sysinfo::{Pid, System};
-    
-    let mut sys = System::new();
-    sys.refresh_processes(sysinfo::ProcessesToUpdate::All, true);
-    sys.process(Pid::from_u32(pid)).is_some()
 }
 
 /// Process info from system search
@@ -603,11 +588,11 @@ mod tests {
         
         // Process should be registered
         let pid = result.pid.unwrap();
-        assert!(manager.contains(pid).await);
+        assert!(manager.list().await.iter().any(|p| p.pid == pid));
         
         // Wait for it to finish and unregister
         tokio::time::sleep(Duration::from_secs(4)).await;
-        assert!(!manager.contains(pid).await);
+        assert!(!manager.list().await.iter().any(|p| p.pid == pid));
     }
 
     #[tokio::test]
@@ -638,14 +623,13 @@ mod tests {
         let manager = ProcessManager::new();
         
         manager.register(123, "test".to_string(), vec![], None).await;
-        assert!(manager.contains(123).await);
         
         let list = manager.list().await;
         assert_eq!(list.len(), 1);
         assert_eq!(list[0].pid, 123);
         
         manager.unregister(123).await;
-        assert!(!manager.contains(123).await);
+        assert!(manager.list().await.is_empty());
     }
 
     #[test]

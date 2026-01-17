@@ -8,6 +8,8 @@ use tokio::fs::File;
 use tokio::io::{AsyncReadExt, AsyncSeekExt};
 use xxhash_rust::xxh64::Xxh64;
 
+use crate::{murmur3, spooky};
+
 /// Supported hash algorithms
 #[derive(Debug, Clone, Copy, Default)]
 pub enum HashAlgorithm {
@@ -17,6 +19,10 @@ pub enum HashAlgorithm {
     Sha256,
     Sha512,
     Xxh64,
+    /// MurmurHash3 128-bit (fast, non-crypto)
+    Murmur3,
+    /// SpookyHash V2 128-bit (fast, non-crypto)
+    Spooky,
 }
 
 impl HashAlgorithm {
@@ -28,17 +34,9 @@ impl HashAlgorithm {
             "sha256" => Ok(Self::Sha256),
             "sha512" => Ok(Self::Sha512),
             "xxh64" | "xxhash64" | "xxhash" => Ok(Self::Xxh64),
-            _ => bail!("Unknown algorithm '{}'. Supported: md5, sha1, sha256, sha512, xxh64", s),
-        }
-    }
-
-    pub fn name(&self) -> &'static str {
-        match self {
-            Self::Md5 => "md5",
-            Self::Sha1 => "sha1",
-            Self::Sha256 => "sha256",
-            Self::Sha512 => "sha512",
-            Self::Xxh64 => "xxh64",
+            "murmur3" | "murmur" => Ok(Self::Murmur3),
+            "spooky" | "spookyhash" => Ok(Self::Spooky),
+            _ => bail!("Unknown algorithm '{}'. Supported: md5, sha1, sha256, sha512, xxh64, murmur3, spooky", s),
         }
     }
 }
@@ -48,7 +46,6 @@ impl HashAlgorithm {
 pub struct HashResult {
     pub hash: String,
     pub size: u64,
-    pub algorithm: String,
 }
 
 /// Result of hashing multiple files
@@ -94,7 +91,6 @@ pub async fn hash_file_range(
         return Ok(HashResult {
             hash: compute_hash(&[], algorithm),
             size: 0,
-            algorithm: algorithm.name().to_string(),
         });
     }
     
@@ -171,12 +167,27 @@ pub async fn hash_file_range(
             }
             format!("{:016x}", hasher.digest())
         }
+        HashAlgorithm::Murmur3 | HashAlgorithm::Spooky => {
+            // Non-streaming hashes - read all data into memory
+            let mut data = Vec::with_capacity(to_read as usize);
+            while bytes_read < to_read {
+                let to_read_now = ((to_read - bytes_read) as usize).min(CHUNK_SIZE);
+                let n = file.read(&mut buf[..to_read_now]).await?;
+                if n == 0 { break; }
+                data.extend_from_slice(&buf[..n]);
+                bytes_read += n as u64;
+            }
+            match algorithm {
+                HashAlgorithm::Murmur3 => murmur3::hash128_hex(&data),
+                HashAlgorithm::Spooky => spooky::hash128_hex(&data),
+                _ => unreachable!(),
+            }
+        }
     };
     
     Ok(HashResult {
         hash,
         size: bytes_read,
-        algorithm: algorithm.name().to_string(),
     })
 }
 
@@ -208,6 +219,8 @@ fn compute_hash(data: &[u8], algorithm: HashAlgorithm) -> String {
             hasher.update(data);
             format!("{:016x}", hasher.digest())
         }
+        HashAlgorithm::Murmur3 => murmur3::hash128_hex(data),
+        HashAlgorithm::Spooky => spooky::hash128_hex(data),
     }
 }
 
@@ -271,7 +284,6 @@ mod tests {
         // Known SHA256 of "hello world"
         assert_eq!(result.hash, "b94d27b9934d3e08a52e52d7da7dabfac484efe37a5380ee9088f7ace2efcde9");
         assert_eq!(result.size, 11);
-        assert_eq!(result.algorithm, "sha256");
     }
 
     #[tokio::test]
@@ -423,6 +435,49 @@ mod tests {
         assert!(matches!(HashAlgorithm::from_str("md5").unwrap(), HashAlgorithm::Md5));
         assert!(matches!(HashAlgorithm::from_str("SHA256").unwrap(), HashAlgorithm::Sha256));
         assert!(matches!(HashAlgorithm::from_str("xxhash64").unwrap(), HashAlgorithm::Xxh64));
+        assert!(matches!(HashAlgorithm::from_str("murmur3").unwrap(), HashAlgorithm::Murmur3));
+        assert!(matches!(HashAlgorithm::from_str("murmur").unwrap(), HashAlgorithm::Murmur3));
+        assert!(matches!(HashAlgorithm::from_str("spooky").unwrap(), HashAlgorithm::Spooky));
+        assert!(matches!(HashAlgorithm::from_str("spookyhash").unwrap(), HashAlgorithm::Spooky));
         assert!(HashAlgorithm::from_str("invalid").is_err());
+    }
+
+    #[tokio::test]
+    async fn test_hash_file_murmur3() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("test.txt");
+        fs::write(&path, "hello world").await.unwrap();
+        
+        let result = hash_file(&path, HashAlgorithm::Murmur3).await.unwrap();
+        
+        // Murmur3 128-bit produces 32 hex chars
+        assert_eq!(result.hash.len(), 32);
+        assert_eq!(result.size, 11);
+    }
+
+    #[tokio::test]
+    async fn test_hash_file_spooky() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("test.txt");
+        fs::write(&path, "hello world").await.unwrap();
+        
+        let result = hash_file(&path, HashAlgorithm::Spooky).await.unwrap();
+        
+        // Spooky 128-bit produces 32 hex chars
+        assert_eq!(result.hash.len(), 32);
+        assert_eq!(result.size, 11);
+    }
+
+    #[tokio::test]
+    async fn test_hash_file_murmur3_with_offset() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("test.txt");
+        fs::write(&path, "hello world").await.unwrap();
+        
+        // Hash "world" with murmur3
+        let result = hash_file_range(&path, HashAlgorithm::Murmur3, Some(6), None).await.unwrap();
+        
+        assert_eq!(result.hash.len(), 32);
+        assert_eq!(result.size, 5);
     }
 }

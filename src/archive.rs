@@ -40,14 +40,6 @@ impl ArchiveFormat {
             _ => bail!("Unknown archive format '{}'. Supported: zip, tar, tar.gz", s),
         }
     }
-    
-    pub fn extension(&self) -> &'static str {
-        match self {
-            Self::Zip => ".zip",
-            Self::Tar => ".tar",
-            Self::TarGz => ".tar.gz",
-        }
-    }
 }
 
 /// Result of archive extraction

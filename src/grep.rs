@@ -78,45 +78,6 @@ pub enum GrepResult {
     Files(Vec<PathBuf>),
 }
 
-impl GrepResult {
-    /// Get matches if in content mode
-    pub fn matches(&self) -> Option<&Vec<GrepMatch>> {
-        match self {
-            GrepResult::Matches(m) => Some(m),
-            _ => None,
-        }
-    }
-    
-    /// Get counts if in count mode
-    pub fn counts(&self) -> Option<&Vec<GrepCount>> {
-        match self {
-            GrepResult::Counts(c) => Some(c),
-            _ => None,
-        }
-    }
-    
-    /// Get file list if in files mode
-    pub fn files(&self) -> Option<&Vec<PathBuf>> {
-        match self {
-            GrepResult::Files(f) => Some(f),
-            _ => None,
-        }
-    }
-    
-    /// Total count of results
-    pub fn len(&self) -> usize {
-        match self {
-            GrepResult::Matches(m) => m.len(),
-            GrepResult::Counts(c) => c.len(),
-            GrepResult::Files(f) => f.len(),
-        }
-    }
-    
-    pub fn is_empty(&self) -> bool {
-        self.len() == 0
-    }
-}
-
 /// Search for pattern in files
 pub async fn grep_files(
     params: GrepParams,
@@ -420,7 +381,10 @@ mod tests {
 
         let result = grep_files(params, &allowed, false).await;
         assert!(result.is_ok(), "Should not panic on underflow");
-        assert!(result.unwrap().len() <= 3);
+        let result = result.unwrap();
+        if let GrepResult::Matches(m) = result {
+            assert!(m.len() <= 3);
+        }
     }
 
     #[tokio::test]
@@ -436,7 +400,11 @@ mod tests {
         params.max_matches = 3;
 
         let result = grep_files(params, &allowed, false).await.unwrap();
-        assert_eq!(result.len(), 3);
+        if let GrepResult::Matches(m) = result {
+            assert_eq!(m.len(), 3);
+        } else {
+            panic!("Expected Matches variant");
+        }
     }
 
     #[tokio::test]
@@ -450,7 +418,11 @@ mod tests {
         let params = default_params(&root.to_string_lossy(), "anything");
 
         let result = grep_files(params, &allowed, false).await.unwrap();
-        assert_eq!(result.len(), 0);
+        if let GrepResult::Matches(m) = result {
+            assert_eq!(m.len(), 0);
+        } else {
+            panic!("Expected Matches variant");
+        }
     }
 
     #[tokio::test]
@@ -467,10 +439,13 @@ mod tests {
         let params = default_params(&file_path.to_string_lossy(), "hello");
 
         let result = grep_files(params, &allowed, false).await.unwrap();
-        let matches = result.matches().unwrap();
-        assert_eq!(matches.len(), 2);
-        assert_eq!(matches[0].line, "hello world");
-        assert_eq!(matches[1].line, "hello again");
+        if let GrepResult::Matches(matches) = result {
+            assert_eq!(matches.len(), 2);
+            assert_eq!(matches[0].line, "hello world");
+            assert_eq!(matches[1].line, "hello again");
+        } else {
+            panic!("Expected Matches variant");
+        }
     }
 
     #[tokio::test]
@@ -488,11 +463,13 @@ mod tests {
         params.invert_match = true;
 
         let result = grep_files(params, &allowed, false).await.unwrap();
-        let matches = result.matches().unwrap();
-        
-        assert_eq!(matches.len(), 2);
-        assert_eq!(matches[0].line, "no");
-        assert_eq!(matches[1].line, "yes");
+        if let GrepResult::Matches(matches) = result {
+            assert_eq!(matches.len(), 2);
+            assert_eq!(matches[0].line, "no");
+            assert_eq!(matches[1].line, "yes");
+        } else {
+            panic!("Expected Matches variant");
+        }
     }
 
     #[tokio::test]
@@ -509,11 +486,13 @@ mod tests {
         params.output_mode = GrepOutputMode::CountOnly;
 
         let result = grep_files(params, &allowed, false).await.unwrap();
-        let counts = result.counts().unwrap();
-        
-        assert_eq!(counts.len(), 2);
-        let total: usize = counts.iter().map(|c| c.count).sum();
-        assert_eq!(total, 5); // 3 + 2
+        if let GrepResult::Counts(counts) = result {
+            assert_eq!(counts.len(), 2);
+            let total: usize = counts.iter().map(|c| c.count).sum();
+            assert_eq!(total, 5); // 3 + 2
+        } else {
+            panic!("Expected Counts variant");
+        }
     }
 
     #[tokio::test]
@@ -530,10 +509,12 @@ mod tests {
         params.output_mode = GrepOutputMode::FilesWithMatches;
 
         let result = grep_files(params, &allowed, false).await.unwrap();
-        let files = result.files().unwrap();
-        
-        assert_eq!(files.len(), 1);
-        assert!(files[0].to_string_lossy().contains("has_match"));
+        if let GrepResult::Files(files) = result {
+            assert_eq!(files.len(), 1);
+            assert!(files[0].to_string_lossy().contains("has_match"));
+        } else {
+            panic!("Expected Files variant");
+        }
     }
 
     #[tokio::test]
@@ -550,9 +531,11 @@ mod tests {
         params.output_mode = GrepOutputMode::FilesWithoutMatch;
 
         let result = grep_files(params, &allowed, false).await.unwrap();
-        let files = result.files().unwrap();
-        
-        assert_eq!(files.len(), 1);
-        assert!(files[0].to_string_lossy().contains("no_match"));
+        if let GrepResult::Files(files) = result {
+            assert_eq!(files.len(), 1);
+            assert!(files[0].to_string_lossy().contains("no_match"));
+        } else {
+            panic!("Expected Files variant");
+        }
     }
 }
