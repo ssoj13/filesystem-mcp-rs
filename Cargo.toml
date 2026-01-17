@@ -1,6 +1,6 @@
 [package]
 name = "filesystem-mcp-rs"
-version = "0.1.8"
+version = "0.1.9"
 edition = "2024"
 description = "Rust port of the official MCP filesystem server - fast, safe, protocol-compatible file operations."
 license = "MIT"
@@ -36,6 +36,26 @@ schemars = { version = "1.2.0", features = ["derive"] }
 regex = "1.12.2"
 chardetng = "0.1.17"
 encoding_rs = "0.8"
+
+# Hashing
+sha1 = "0.10"
+sha2 = "0.10"
+md-5 = "0.10"
+xxhash-rust = { version = "0.8", features = ["xxh64"] }
+
+# PDF
+pdf-extract = "0.8"
+
+# JSON query
+serde_json_path = "0.7"
+
+# Archives
+zip = "2.2"
+tar = "0.4"
+flate2 = "1.1"
+
+# File watching
+notify = "8.0"
 
 [dev-dependencies]
 tempfile = "3.24.0"

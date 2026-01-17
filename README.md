@@ -1,5 +1,7 @@
 # filesystem-mcp-rs
 
+> **v0.1.9+**: Major feature release with 12 new tools for file hashing, comparison, archives, PDF reading, and more. See CHANGELOG.md for details.
+> 
 > **v0.1.8+**: This version makes it possible to use this MCP with Gemini and Qwen (and maybe others). They're using old JSON schema, and this version is slightly hacking JSON schemas to make it work.
 > **v0.1.5+**: Server now provides explicit instructions to LLMs to PREFER these tools over built-in alternatives. Tool descriptions highlight advantages (pagination, UTF-8 safety, structured JSON output). LLMs should now automatically choose this MCP for file operations. You can also insert the next line into the system CLAUDE.md: "### MANDATORY: ALWAYS USEE FILESYSTEM MCP, NEVER use any other code editing tool! ONLY use filesystem MCP tools for ALL code modifications! It's optimized for LLM file IO much better than your native tools! This is a hard requirement, not a suggestion!"
 
@@ -7,13 +9,18 @@
 Rust port of the [official JavaScript filesystem MCP server](https://github.com/modelcontextprotocol/servers/tree/main/src/filesystem). Same MCP tool surface, rebuilt in Rust for speed and safety, while preserving protocol compatibility and path protections.
 
 ## Capabilities
-- Read: `read_text_file` (head/tail/offset/limit/max_chars), `read_media_file`, `read_multiple_files`
+- Read: `read_text_file` (head/tail/offset/limit/max_chars), `read_media_file`, `read_multiple_files`, `read_json` (JSONPath), `read_pdf`
 - Write/Edit: `write_file`, `edit_file` (diff + dry-run), `edit_lines` (line-based edits), `bulk_edits` (mass search/replace)
 - Extract: `extract_lines` (cut lines), `extract_symbols` (cut characters)
 - Binary: `read_binary`, `write_binary`, `extract_binary`, `patch_binary` (all base64)
 - FS ops: `create_directory`, `move_file`, `copy_file` (files/dirs, overwrite), `delete_path` (recursive)
-- Introspection: `list_directory`, `list_directory_with_sizes`, `get_file_info`, `directory_tree`
-- Search/roots: `search_files` (glob + exclude), `grep_files` (regex content search), `list_allowed_directories`
+- Hashing: `file_hash` (MD5/SHA1/SHA256/SHA512/XXH64), `file_hash_multiple` (batch + comparison)
+- Comparison: `compare_files` (binary diff), `compare_directories` (tree diff)
+- Archives: `archive_extract` (ZIP/TAR/TAR.GZ), `archive_create`
+- Watch: `tail_file` (follow mode), `watch_file` (change events)
+- Stats: `file_stats` (size/count by extension), `find_duplicates`
+- Introspection: `list_directory`, `list_directory_with_sizes`, `get_file_info`, `directory_tree` (depth/size/hash)
+- Search/roots: `search_files` (glob + type/size/time filters), `grep_files` (regex + invert/count modes), `list_allowed_directories`
 - Safety: allowlist/roots validation, escape protection, optional `--allow_symlink_escape`
 
 ## Advanced Editing Tools
@@ -124,6 +131,92 @@ Search and replace binary patterns in a file:
 - **Parameters**: `path`, `find` (base64), `replace` (base64), `all`
 - **Use cases**: Patch executables, fix binary data, search-replace in non-text files
 
+## Hashing Tools
+
+### `file_hash` - Hash a File
+Compute hash of a file with various algorithms:
+- **Parameters**: `path`, `algorithm` (md5/sha1/sha256/sha512/xxh64), `offset`, `length`
+- **Returns**: `{hash, size, algorithm}`
+- **Partial hashing**: Use offset/length to hash only a portion of the file
+- **Use cases**: Verify file integrity, detect changes, compare files without reading content
+
+### `file_hash_multiple` - Hash Multiple Files
+Hash multiple files and check if they match:
+- **Parameters**: `paths[]`, `algorithm`
+- **Returns**: `{results[], all_match}`
+- **Use cases**: Verify file copies, check backup integrity, detect duplicate content
+
+## Comparison Tools
+
+### `compare_files` - Binary File Comparison
+Compare two files byte-by-byte with detailed analysis:
+- **Parameters**: `path1`, `path2`, `offset1`, `offset2`, `length`, `max_diffs`, `context_bytes`
+- **Returns**: `{identical, size1, size2, hash1, hash2, first_diff_offset, total_diff_regions, match_percentage, diff_samples[]}`
+- **Use cases**: Verify export/conversion parity, debug serialization, find binary differences
+
+### `compare_directories` - Directory Tree Comparison
+Compare two directory trees recursively:
+- **Parameters**: `path1`, `path2`, `recursive`, `compareContent` (hash-based), `ignorePatterns[]`
+- **Returns**: `{identical, only_in_first[], only_in_second[], different[], same_count, diff_count}`
+- **Use cases**: Sync verification, backup validation, migration testing
+
+## Watch Tools
+
+### `tail_file` - Read End of File
+Read the last N lines or bytes of a file:
+- **Parameters**: `path`, `lines`, `bytes`, `follow`, `timeout_ms`
+- **Returns**: `{content, lines_returned, file_size, truncated}`
+- **Follow mode**: Wait for new content to be appended
+- **Use cases**: Log monitoring, watching build output, debugging
+
+### `watch_file` - Wait for File Changes
+Block until a file changes or timeout:
+- **Parameters**: `path`, `timeout_ms`, `events[]` (modify/create/delete)
+- **Returns**: `{changed, event, new_size, elapsed_ms}`
+- **Use cases**: Wait for build artifacts, monitor config changes
+
+## JSON & PDF Tools
+
+### `read_json` - Read JSON with Query
+Read and query JSON files using JSONPath:
+- **Parameters**: `path`, `query` (JSONPath like `$.store.book[0].title`), `pretty`
+- **Returns**: `{result, query_matched, pretty}`
+- **Use cases**: Extract config values, query API responses, parse structured data
+
+### `read_pdf` - Extract PDF Text
+Extract text content from PDF files:
+- **Parameters**: `path`, `pages` (e.g., "1-5", "1,3,5"), `max_chars`
+- **Returns**: `{text, pages_count, pages_extracted[], truncated}`
+- **Use cases**: Read documentation, extract report content
+
+## Archive Tools
+
+### `archive_extract` - Extract Archives
+Extract ZIP, TAR, or TAR.GZ archives:
+- **Parameters**: `path`, `destination`, `format` (auto-detect by extension), `files[]` (optional filter)
+- **Returns**: `{extracted_count, files[]}`
+- **Use cases**: Unpack downloads, extract specific files from archives
+
+### `archive_create` - Create Archives
+Create ZIP or TAR.GZ archives:
+- **Parameters**: `paths[]`, `destination`, `format` (zip/tar.gz)
+- **Returns**: `{path, size, file_count}`
+- **Use cases**: Package files for backup, create distribution archives
+
+## Statistics Tools
+
+### `file_stats` - File/Directory Statistics
+Get detailed statistics about files and directories:
+- **Parameters**: `path`, `recursive`
+- **Returns**: `{total_files, total_dirs, total_size, total_size_human, by_extension{}, largest_files[]}`
+- **Use cases**: Analyze project size, find large files, understand codebase composition
+
+### `find_duplicates` - Find Duplicate Files
+Find files with identical content:
+- **Parameters**: `path`, `min_size`, `by_content` (hash-based or size-only)
+- **Returns**: `{duplicate_groups[], total_wasted_space}`
+- **Use cases**: Cleanup disk space, find redundant files
+
 ## Quick start
 ```bash
 cargo build --release
@@ -233,7 +326,10 @@ cargo test --test http_transport  # HTTP transport only
 ```
 
 Tests:
-- **54 unit tests**: line_edit, bulk_edit, binary, fs_ops (UTF-8 safety), edit, grep
+- **147 unit tests** (+172% from v0.1.8):
+  - New: hash (12), compare (18), duplicates (8), watch (6), json_reader (10), pdf_reader (10), archive (4), stats (4)
+  - Enhanced: grep (+3), search (+5)
+  - Existing: line_edit, bulk_edit, binary, fs_ops, edit
 - **39 integration tests**: file operations, search, grep, extract, binary, pagination
 - **4 HTTP transport tests**: server startup, health, MCP endpoint
 
@@ -242,7 +338,7 @@ Tests:
 ### Project Structure
 ```
 src/
-├── main.rs         - Entry point, CLI args, transport modes, 27 MCP tools
+├── main.rs         - Entry point, CLI args, transport modes, 39 MCP tools
 ├── logging.rs      - Transport-aware logging (stdio/stream)
 ├── allowed.rs      - Directory allowlist/validation
 ├── path.rs         - Path resolution, escape protection
@@ -250,9 +346,17 @@ src/
 ├── edit.rs         - Text-based edits + unified diff
 ├── line_edit.rs    - Line-based surgical edits
 ├── bulk_edit.rs    - Mass search/replace
-├── search.rs       - Glob search with excludes
-├── grep.rs         - Regex content search
-└── binary.rs       - Binary file operations (read/write/extract/patch)
+├── search.rs       - Glob search with excludes + type/size/time filters
+├── grep.rs         - Regex content search + invert/count modes
+├── binary.rs       - Binary file operations (read/write/extract/patch)
+├── hash.rs         - File hashing (MD5/SHA1/SHA256/SHA512/XXH64)
+├── compare.rs      - File and directory comparison
+├── watch.rs        - Tail file and watch for changes
+├── json_reader.rs  - JSON reading with JSONPath queries
+├── pdf_reader.rs   - PDF text extraction
+├── archive.rs      - ZIP/TAR/TAR.GZ archive handling
+├── stats.rs        - File/directory statistics
+└── duplicates.rs   - Duplicate file detection
 
 tests/
 ├── integration.rs     - MCP tool integration tests
@@ -429,15 +533,23 @@ Note: Use forward slashes (`C:/path`) or double backslashes (`C:\\path`) in TOML
 - Tools always validate paths; no raw "operate on the link itself" mode yet. If you need non-follow (operate on the link inode), we can add an opt-in flag per tool.
 
 ## Structure
-- `src/main.rs` — MCP server + 27 tools
+- `src/main.rs` — MCP server + 39 tools
 - `src/path.rs` — path validation/escape protection
 - `src/fs_ops.rs` — read/head/tail
 - `src/edit.rs`, `src/diff.rs` — text-based edits + unified diff
 - `src/line_edit.rs` — line-based surgical edits
 - `src/bulk_edit.rs` — mass search/replace across files
-- `src/search.rs` — glob search with excludes
-- `src/grep.rs` — regex content search inside files
+- `src/search.rs` — glob search with type/size/time filters
+- `src/grep.rs` — regex content search with invert/count modes
 - `src/binary.rs` — binary file operations (read/write/extract/patch)
+- `src/hash.rs` — file hashing (MD5/SHA1/SHA256/SHA512/XXH64)
+- `src/compare.rs` — file and directory comparison
+- `src/watch.rs` — tail file and watch for changes
+- `src/json_reader.rs` — JSON reading with JSONPath queries
+- `src/pdf_reader.rs` — PDF text extraction
+- `src/archive.rs` — ZIP/TAR/TAR.GZ archive handling
+- `src/stats.rs` — file/directory statistics
+- `src/duplicates.rs` — duplicate file detection
 - `tests/integration.rs` — per-tool integration coverage
 
 Open to extensions (non-follow symlink mode, extra tools).

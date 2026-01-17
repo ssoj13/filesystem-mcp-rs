@@ -24,6 +24,27 @@ pub struct GrepMatch {
     pub after_context: Vec<String>,
 }
 
+/// Grep output mode
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum GrepOutputMode {
+    /// Default: return matching lines with content
+    #[default]
+    Content,
+    /// Only count matches per file
+    CountOnly,
+    /// Return files that have matches (like grep -l)
+    FilesWithMatches,
+    /// Return files WITHOUT matches (like grep -L)
+    FilesWithoutMatch,
+}
+
+/// Count result per file
+#[derive(Debug, Clone)]
+pub struct GrepCount {
+    pub path: PathBuf,
+    pub count: usize,
+}
+
 /// Grep search parameters
 pub struct GrepParams {
     /// Root directory to search
@@ -40,6 +61,60 @@ pub struct GrepParams {
     pub context_after: usize,
     /// Maximum number of matches to return (0 = unlimited)
     pub max_matches: usize,
+    /// Invert match: show lines NOT matching pattern
+    pub invert_match: bool,
+    /// Output mode
+    pub output_mode: GrepOutputMode,
+}
+
+/// Enhanced grep result supporting different output modes
+#[derive(Debug, Clone)]
+pub enum GrepResult {
+    /// Content mode: return matching lines
+    Matches(Vec<GrepMatch>),
+    /// Count mode: return match counts per file
+    Counts(Vec<GrepCount>),
+    /// Files mode: return file paths only
+    Files(Vec<PathBuf>),
+}
+
+impl GrepResult {
+    /// Get matches if in content mode
+    pub fn matches(&self) -> Option<&Vec<GrepMatch>> {
+        match self {
+            GrepResult::Matches(m) => Some(m),
+            _ => None,
+        }
+    }
+    
+    /// Get counts if in count mode
+    pub fn counts(&self) -> Option<&Vec<GrepCount>> {
+        match self {
+            GrepResult::Counts(c) => Some(c),
+            _ => None,
+        }
+    }
+    
+    /// Get file list if in files mode
+    pub fn files(&self) -> Option<&Vec<PathBuf>> {
+        match self {
+            GrepResult::Files(f) => Some(f),
+            _ => None,
+        }
+    }
+    
+    /// Total count of results
+    pub fn len(&self) -> usize {
+        match self {
+            GrepResult::Matches(m) => m.len(),
+            GrepResult::Counts(c) => c.len(),
+            GrepResult::Files(f) => f.len(),
+        }
+    }
+    
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
 }
 
 /// Search for pattern in files
@@ -47,7 +122,7 @@ pub async fn grep_files(
     params: GrepParams,
     allowed: &AllowedDirs,
     allow_symlink_escape: bool,
-) -> Result<Vec<GrepMatch>> {
+) -> Result<GrepResult> {
     let root_path = resolve_validated_path(&params.root, allowed, allow_symlink_escape)
         .await
         .context("Invalid root path")?;
@@ -66,6 +141,8 @@ pub async fn grep_files(
     };
 
     let mut matches = Vec::new();
+    let mut counts = Vec::new();
+    let mut files = Vec::new();
     let mut total_matches = 0;
 
     // Check if root_path is a file (not a directory)
@@ -75,7 +152,7 @@ pub async fn grep_files(
         if let Some(matcher) = &file_matcher {
             let filename = root_path.file_name().unwrap_or_default().to_string_lossy();
             if !matcher.is_match(filename.as_ref()) {
-                return Ok(matches); // File doesn't match pattern
+                return Ok(result_for_mode(&params.output_mode, matches, counts, files));
             }
         }
         if let Ok(file_matches) = search_file(
@@ -84,18 +161,27 @@ pub async fn grep_files(
             params.context_before,
             params.context_after,
             params.max_matches,
+            params.invert_match,
         )
         .await
         {
-            return Ok(file_matches);
+            handle_file_result(
+                &root_path,
+                file_matches,
+                &params.output_mode,
+                &mut matches,
+                &mut counts,
+                &mut files,
+            );
         }
-        return Ok(matches);
+        return Ok(result_for_mode(&params.output_mode, matches, counts, files));
     }
 
     // Walk directory tree
     let mut stack = vec![root_path.clone()];
     while let Some(current) = stack.pop() {
-        if params.max_matches > 0 && total_matches >= params.max_matches {
+        if params.max_matches > 0 && total_matches >= params.max_matches 
+           && params.output_mode == GrepOutputMode::Content {
             break;
         }
 
@@ -105,7 +191,8 @@ pub async fn grep_files(
         };
 
         while let Some(entry) = dir.next_entry().await? {
-            if params.max_matches > 0 && total_matches >= params.max_matches {
+            if params.max_matches > 0 && total_matches >= params.max_matches
+               && params.output_mode == GrepOutputMode::Content {
                 break;
             }
 
@@ -140,9 +227,14 @@ pub async fn grep_files(
                 }
 
                 // Search file content
-                // Use saturating_sub to prevent underflow when total_matches >= max_matches
-                let remaining = params.max_matches.saturating_sub(total_matches);
-                if remaining == 0 && params.max_matches > 0 {
+                let remaining = if params.output_mode == GrepOutputMode::Content {
+                    params.max_matches.saturating_sub(total_matches)
+                } else {
+                    0 // unlimited for other modes
+                };
+                
+                if remaining == 0 && params.max_matches > 0 
+                   && params.output_mode == GrepOutputMode::Content {
                     break; // Already at limit
                 }
 
@@ -152,17 +244,75 @@ pub async fn grep_files(
                     params.context_before,
                     params.context_after,
                     remaining,
+                    params.invert_match,
                 )
                 .await
                 {
                     total_matches += file_matches.len();
-                    matches.extend(file_matches);
+                    handle_file_result(
+                        &path,
+                        file_matches,
+                        &params.output_mode,
+                        &mut matches,
+                        &mut counts,
+                        &mut files,
+                    );
                 }
             }
         }
     }
 
-    Ok(matches)
+    Ok(result_for_mode(&params.output_mode, matches, counts, files))
+}
+
+/// Handle search results based on output mode
+fn handle_file_result(
+    path: &Path,
+    file_matches: Vec<GrepMatch>,
+    output_mode: &GrepOutputMode,
+    matches: &mut Vec<GrepMatch>,
+    counts: &mut Vec<GrepCount>,
+    files: &mut Vec<PathBuf>,
+) {
+    match output_mode {
+        GrepOutputMode::Content => {
+            matches.extend(file_matches);
+        }
+        GrepOutputMode::CountOnly => {
+            if !file_matches.is_empty() {
+                counts.push(GrepCount {
+                    path: path.to_path_buf(),
+                    count: file_matches.len(),
+                });
+            }
+        }
+        GrepOutputMode::FilesWithMatches => {
+            if !file_matches.is_empty() {
+                files.push(path.to_path_buf());
+            }
+        }
+        GrepOutputMode::FilesWithoutMatch => {
+            if file_matches.is_empty() {
+                files.push(path.to_path_buf());
+            }
+        }
+    }
+}
+
+/// Build result based on output mode
+fn result_for_mode(
+    mode: &GrepOutputMode,
+    matches: Vec<GrepMatch>,
+    counts: Vec<GrepCount>,
+    files: Vec<PathBuf>,
+) -> GrepResult {
+    match mode {
+        GrepOutputMode::Content => GrepResult::Matches(matches),
+        GrepOutputMode::CountOnly => GrepResult::Counts(counts),
+        GrepOutputMode::FilesWithMatches | GrepOutputMode::FilesWithoutMatch => {
+            GrepResult::Files(files)
+        }
+    }
 }
 
 /// Search for pattern in a single file
@@ -172,6 +322,7 @@ async fn search_file(
     context_before: usize,
     context_after: usize,
     max_matches: usize,
+    invert_match: bool,
 ) -> Result<Vec<GrepMatch>> {
     // Try to read as text
     let content = match read_text(path).await {
@@ -188,7 +339,11 @@ async fn search_file(
             break;
         }
 
-        if regex.is_match(&lines[i]) {
+        // Match or inverse match based on flag
+        let line_matches = regex.is_match(&lines[i]);
+        let should_include = if invert_match { !line_matches } else { line_matches };
+        
+        if should_include {
             let before_start = i.saturating_sub(context_before);
             let after_end = (i + 1 + context_after).min(lines.len());
 
@@ -231,14 +386,25 @@ mod tests {
     use tempfile::TempDir;
     use tokio::fs;
 
-    // Regression test: max_matches underflow prevention (fixed with saturating_sub)
+    fn default_params(root: &str, pattern: &str) -> GrepParams {
+        GrepParams {
+            root: root.to_string(),
+            pattern: pattern.to_string(),
+            file_pattern: None,
+            case_insensitive: false,
+            context_before: 0,
+            context_after: 0,
+            max_matches: 0,
+            invert_match: false,
+            output_mode: GrepOutputMode::Content,
+        }
+    }
 
     #[tokio::test]
     async fn test_max_matches_no_underflow() {
         let temp = TempDir::new().unwrap();
         let root = temp.path();
 
-        // Create files with many matches
         fs::write(root.join("file1.txt"), "match\nmatch\nmatch\nmatch\nmatch\n")
             .await
             .unwrap();
@@ -248,30 +414,13 @@ mod tests {
 
         let allowed = AllowedDirs::new(vec![root.to_path_buf()]);
 
-        let params = GrepParams {
-            root: root.to_string_lossy().to_string(),
-            pattern: "match".to_string(),
-            file_pattern: Some("*.txt".to_string()),
-            case_insensitive: false,
-            context_before: 0,
-            context_after: 0,
-            max_matches: 3, // Limit to 3, but there are 10 matches
-        };
+        let mut params = default_params(&root.to_string_lossy(), "match");
+        params.file_pattern = Some("*.txt".to_string());
+        params.max_matches = 3;
 
-        // BUG: If first file returns 5 matches, then max_matches - total_matches
-        // becomes 3 - 5 = underflow (huge number in usize)
-        // This could cause search_file to return way more than expected
         let result = grep_files(params, &allowed, false).await;
-
         assert!(result.is_ok(), "Should not panic on underflow");
-        let matches = result.unwrap();
-
-        // Should have at most max_matches results
-        assert!(
-            matches.len() <= 3,
-            "Should respect max_matches limit. Got {} matches",
-            matches.len()
-        );
+        assert!(result.unwrap().len() <= 3);
     }
 
     #[tokio::test]
@@ -279,22 +428,12 @@ mod tests {
         let temp = TempDir::new().unwrap();
         let root = temp.path();
 
-        // Create file with exactly max_matches
-        fs::write(root.join("file.txt"), "a\nb\nc\n")
-            .await
-            .unwrap();
+        fs::write(root.join("file.txt"), "a\nb\nc\n").await.unwrap();
 
         let allowed = AllowedDirs::new(vec![root.to_path_buf()]);
 
-        let params = GrepParams {
-            root: root.to_string_lossy().to_string(),
-            pattern: "[abc]".to_string(),
-            file_pattern: None,
-            case_insensitive: false,
-            context_before: 0,
-            context_after: 0,
-            max_matches: 3,
-        };
+        let mut params = default_params(&root.to_string_lossy(), "[abc]");
+        params.max_matches = 3;
 
         let result = grep_files(params, &allowed, false).await.unwrap();
         assert_eq!(result.len(), 3);
@@ -308,22 +447,12 @@ mod tests {
         fs::write(root.join("empty.txt"), "").await.unwrap();
 
         let allowed = AllowedDirs::new(vec![root.to_path_buf()]);
-
-        let params = GrepParams {
-            root: root.to_string_lossy().to_string(),
-            pattern: "anything".to_string(),
-            file_pattern: None,
-            case_insensitive: false,
-            context_before: 0,
-            context_after: 0,
-            max_matches: 100,
-        };
+        let params = default_params(&root.to_string_lossy(), "anything");
 
         let result = grep_files(params, &allowed, false).await.unwrap();
-        assert_eq!(result.len(), 0, "Empty file should have no matches");
+        assert_eq!(result.len(), 0);
     }
 
-    // Regression test: grep on single file path (not directory)
     #[tokio::test]
     async fn test_grep_single_file_path() {
         let temp = TempDir::new().unwrap();
@@ -335,26 +464,95 @@ mod tests {
             .unwrap();
 
         let allowed = AllowedDirs::new(vec![root.to_path_buf()]);
-
-        // Pass file path directly, not directory
-        let params = GrepParams {
-            root: file_path.to_string_lossy().to_string(),
-            pattern: "hello".to_string(),
-            file_pattern: None,
-            case_insensitive: false,
-            context_before: 0,
-            context_after: 0,
-            max_matches: 100,
-        };
+        let params = default_params(&file_path.to_string_lossy(), "hello");
 
         let result = grep_files(params, &allowed, false).await.unwrap();
-        assert_eq!(
-            result.len(),
-            2,
-            "Should find 2 matches in single file. Got: {:?}",
-            result
-        );
-        assert_eq!(result[0].line, "hello world");
-        assert_eq!(result[1].line, "hello again");
+        let matches = result.matches().unwrap();
+        assert_eq!(matches.len(), 2);
+        assert_eq!(matches[0].line, "hello world");
+        assert_eq!(matches[1].line, "hello again");
+    }
+
+    #[tokio::test]
+    async fn test_invert_match() {
+        let temp = TempDir::new().unwrap();
+        let root = temp.path();
+
+        fs::write(root.join("file.txt"), "match\nno\nmatch\nyes\n")
+            .await
+            .unwrap();
+
+        let allowed = AllowedDirs::new(vec![root.to_path_buf()]);
+
+        let mut params = default_params(&root.to_string_lossy(), "match");
+        params.invert_match = true;
+
+        let result = grep_files(params, &allowed, false).await.unwrap();
+        let matches = result.matches().unwrap();
+        
+        assert_eq!(matches.len(), 2);
+        assert_eq!(matches[0].line, "no");
+        assert_eq!(matches[1].line, "yes");
+    }
+
+    #[tokio::test]
+    async fn test_count_only_mode() {
+        let temp = TempDir::new().unwrap();
+        let root = temp.path();
+
+        fs::write(root.join("file1.txt"), "a\na\na\n").await.unwrap();
+        fs::write(root.join("file2.txt"), "a\na\n").await.unwrap();
+
+        let allowed = AllowedDirs::new(vec![root.to_path_buf()]);
+
+        let mut params = default_params(&root.to_string_lossy(), "a");
+        params.output_mode = GrepOutputMode::CountOnly;
+
+        let result = grep_files(params, &allowed, false).await.unwrap();
+        let counts = result.counts().unwrap();
+        
+        assert_eq!(counts.len(), 2);
+        let total: usize = counts.iter().map(|c| c.count).sum();
+        assert_eq!(total, 5); // 3 + 2
+    }
+
+    #[tokio::test]
+    async fn test_files_with_matches_mode() {
+        let temp = TempDir::new().unwrap();
+        let root = temp.path();
+
+        fs::write(root.join("has_match.txt"), "findme\n").await.unwrap();
+        fs::write(root.join("no_match.txt"), "nothing\n").await.unwrap();
+
+        let allowed = AllowedDirs::new(vec![root.to_path_buf()]);
+
+        let mut params = default_params(&root.to_string_lossy(), "findme");
+        params.output_mode = GrepOutputMode::FilesWithMatches;
+
+        let result = grep_files(params, &allowed, false).await.unwrap();
+        let files = result.files().unwrap();
+        
+        assert_eq!(files.len(), 1);
+        assert!(files[0].to_string_lossy().contains("has_match"));
+    }
+
+    #[tokio::test]
+    async fn test_files_without_match_mode() {
+        let temp = TempDir::new().unwrap();
+        let root = temp.path();
+
+        fs::write(root.join("has_match.txt"), "findme\n").await.unwrap();
+        fs::write(root.join("no_match.txt"), "nothing\n").await.unwrap();
+
+        let allowed = AllowedDirs::new(vec![root.to_path_buf()]);
+
+        let mut params = default_params(&root.to_string_lossy(), "findme");
+        params.output_mode = GrepOutputMode::FilesWithoutMatch;
+
+        let result = grep_files(params, &allowed, false).await.unwrap();
+        let files = result.files().unwrap();
+        
+        assert_eq!(files.len(), 1);
+        assert!(files[0].to_string_lossy().contains("no_match"));
     }
 }

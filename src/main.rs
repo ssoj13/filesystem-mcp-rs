@@ -35,19 +35,27 @@ use crate::bulk_edit::bulk_edit_files;
 use crate::binary::{read_bytes, write_bytes, extract_bytes, patch_bytes, to_base64, from_base64};
 
 mod allowed;
+mod archive;
+mod binary;
+mod bulk_edit;
+mod compare;
 mod diff;
+mod duplicates;
 mod edit;
 mod format;
 mod fs_ops;
+mod grep;
+mod hash;
+mod json_reader;
+mod line_edit;
 mod logging;
 mod media;
 mod mime;
 mod path;
+mod pdf_reader;
 mod search;
-mod grep;
-mod line_edit;
-mod bulk_edit;
-mod binary;
+mod stats;
+mod watch;
 
 use logging::{init_logging, TransportMode};
 
@@ -346,6 +354,15 @@ struct DirectoryTreeArgs {
     path: String,
     #[serde(default)]
     exclude_patterns: Vec<String>,
+    /// Maximum depth to traverse (0 = unlimited)
+    #[serde(default)]
+    max_depth: usize,
+    /// Show file sizes in the output
+    #[serde(default)]
+    show_size: bool,
+    /// Show file hashes (sha256) in the output
+    #[serde(default)]
+    show_hash: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
@@ -407,10 +424,202 @@ struct GrepFilesArgs {
     /// Maximum number of matches to return (0 = unlimited, default 100)
     #[serde(default = "default_max_matches")]
     max_matches: usize,
+    /// Invert match: show lines NOT matching the pattern
+    #[serde(default)]
+    invert_match: bool,
+    /// Output mode: "content" (default), "count", "files_with_matches", "files_without_match"
+    #[serde(default)]
+    output_mode: Option<String>,
 }
 
 fn default_max_matches() -> usize {
     100
+}
+
+// ============================================================================
+// New tools Args
+// ============================================================================
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+struct FileHashArgs {
+    /// Path to file
+    path: String,
+    /// Hash algorithm: md5, sha1, sha256 (default), sha512, xxh64
+    #[serde(default)]
+    algorithm: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+struct FileHashMultipleArgs {
+    /// Paths to files
+    paths: Vec<String>,
+    /// Hash algorithm: md5, sha1, sha256 (default), sha512, xxh64
+    #[serde(default)]
+    algorithm: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+struct CompareFilesArgs {
+    /// First file path
+    path1: String,
+    /// Second file path
+    path2: String,
+    /// Maximum number of diff samples to return (default: 20)
+    #[serde(default = "default_max_diffs")]
+    max_diffs: usize,
+    /// Bytes of context around differences (default: 8)
+    #[serde(default = "default_context_bytes")]
+    context_bytes: usize,
+    /// Offset in first file (default: 0)
+    #[serde(default)]
+    offset1: u64,
+    /// Offset in second file (default: 0)
+    #[serde(default)]
+    offset2: u64,
+    /// Length to compare (0 = full file)
+    #[serde(default)]
+    length: u64,
+}
+
+fn default_max_diffs() -> usize { 20 }
+fn default_context_bytes() -> usize { 8 }
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+struct CompareDirsArgs {
+    /// First directory path
+    path1: String,
+    /// Second directory path
+    path2: String,
+    /// Recursive comparison (default: true)
+    #[serde(default = "default_true")]
+    recursive: bool,
+    /// Compare file content by hash (default: false, only name/size)
+    #[serde(default)]
+    compare_content: bool,
+    /// Glob patterns to ignore
+    #[serde(default)]
+    ignore_patterns: Vec<String>,
+}
+
+fn default_true() -> bool { true }
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+struct TailFileArgs {
+    /// Path to file
+    path: String,
+    /// Number of lines to read (default: 10)
+    #[serde(default = "default_tail_lines")]
+    lines: usize,
+    /// Alternative: number of bytes to read
+    #[serde(default)]
+    bytes: Option<usize>,
+    /// Follow mode: wait for new content
+    #[serde(default)]
+    follow: bool,
+    /// Timeout in ms for follow mode (default: 5000)
+    #[serde(default = "default_follow_timeout")]
+    timeout_ms: u64,
+}
+
+fn default_tail_lines() -> usize { 10 }
+fn default_follow_timeout() -> u64 { 5000 }
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+struct WatchFileArgs {
+    /// Path to file or directory to watch
+    path: String,
+    /// Timeout in ms (default: 30000)
+    #[serde(default = "default_watch_timeout")]
+    timeout_ms: u64,
+    /// Events to watch: modify, create, delete (default: all)
+    #[serde(default)]
+    events: Vec<String>,
+}
+
+fn default_watch_timeout() -> u64 { 30000 }
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+struct ReadJsonArgs {
+    /// Path to JSON file
+    path: String,
+    /// JSONPath query (e.g., "$.users[*].name") or dot notation ("user.name")
+    #[serde(default)]
+    query: Option<String>,
+    /// Pretty print output (default: true)
+    #[serde(default = "default_true")]
+    pretty: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+struct ReadPdfArgs {
+    /// Path to PDF file
+    path: String,
+    /// Page range: "1-5" or "1,3,5" or null for all
+    #[serde(default)]
+    pages: Option<String>,
+    /// Maximum characters to return (default: 50000)
+    #[serde(default = "default_max_chars")]
+    max_chars: usize,
+}
+
+fn default_max_chars() -> usize { 50000 }
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+struct ExtractArchiveArgs {
+    /// Path to archive file
+    path: String,
+    /// Destination directory
+    destination: String,
+    /// Archive format: zip, tar, tar.gz (auto-detect by extension if not specified)
+    #[serde(default)]
+    format: Option<String>,
+    /// Specific files to extract (extract all if not specified)
+    #[serde(default)]
+    files: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+struct CreateArchiveArgs {
+    /// Paths to files/directories to archive
+    paths: Vec<String>,
+    /// Destination archive path
+    destination: String,
+    /// Archive format: zip (default), tar, tar.gz
+    #[serde(default)]
+    format: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+struct FileStatsArgs {
+    /// Path to file or directory
+    path: String,
+    /// Recursive for directories (default: true)
+    #[serde(default = "default_true")]
+    recursive: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+struct FindDuplicatesArgs {
+    /// Directory to search
+    path: String,
+    /// Minimum file size in bytes (default: 1, skip empty files)
+    #[serde(default)]
+    min_size: Option<u64>,
+    /// Compare by content hash (default: true). False = compare by size only
+    #[serde(default = "default_true")]
+    by_content: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
@@ -475,6 +684,12 @@ struct TreeEntry {
     kind: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     children: Option<Vec<TreeEntry>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    size: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    size_human: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    hash: Option<String>,
 }
 
 // ============================================================================
@@ -976,13 +1191,21 @@ impl FileSystemServer {
         Parameters(DirectoryTreeArgs {
             path,
             exclude_patterns,
+            max_depth,
+            show_size,
+            show_hash,
         }): Parameters<DirectoryTreeArgs>,
     ) -> Result<CallToolResult, McpError> {
         let root = self.resolve(&path).await?;
         let exclude = search::build_exclude_set(&exclude_patterns)
             .map_err(internal_err("Invalid exclude patterns"))?;
 
-        let entries = build_tree(&root, &root, &exclude).await?;
+        let opts = TreeOptions {
+            max_depth: if max_depth == 0 { usize::MAX } else { max_depth },
+            show_size,
+            show_hash,
+        };
+        let entries = build_tree(&root, &root, &exclude, &opts, 0).await?;
         let json_tree = serde_json::to_string_pretty(&entries)
             .map_err(internal_err("Failed to serialize tree"))?;
         Ok(CallToolResult {
@@ -1220,6 +1443,14 @@ impl FileSystemServer {
     ) -> Result<CallToolResult, McpError> {
         self.ensure_allowed().await?;
 
+        // Parse output mode
+        let output_mode = match args.output_mode.as_deref() {
+            Some("count") | Some("count_only") => grep::GrepOutputMode::CountOnly,
+            Some("files_with_matches") | Some("files") => grep::GrepOutputMode::FilesWithMatches,
+            Some("files_without_match") => grep::GrepOutputMode::FilesWithoutMatch,
+            _ => grep::GrepOutputMode::Content,
+        };
+
         let params = GrepParams {
             root: args.path.clone(),
             pattern: args.pattern.clone(),
@@ -1228,61 +1459,72 @@ impl FileSystemServer {
             context_before: args.context_before,
             context_after: args.context_after,
             max_matches: args.max_matches,
+            invert_match: args.invert_match,
+            output_mode,
         };
 
-        let matches = grep_files(params, &self.allowed, self.allow_symlink_escape)
+        let result = grep_files(params, &self.allowed, self.allow_symlink_escape)
             .await
             .map_err(|e| McpError::internal_error(format!("Grep failed: {}", e), None))?;
 
-        // Format results
-        let mut lines = Vec::new();
-        for m in &matches {
-            let path_str = m.path.to_string_lossy();
-            
-            // Add before context
-            for (i, line) in m.before_context.iter().enumerate() {
-                let line_no = m.line_number - m.before_context.len() + i;
-                lines.push(format!("{}:{}:  {}", path_str, line_no, line));
+        // Format results based on output mode
+        let (text, structured) = match result {
+            grep::GrepResult::Matches(ref matches) => {
+                let mut lines = Vec::new();
+                for m in matches {
+                    let path_str = m.path.to_string_lossy();
+                    for (i, line) in m.before_context.iter().enumerate() {
+                        let line_no = m.line_number - m.before_context.len() + i;
+                        lines.push(format!("{}:{}:  {}", path_str, line_no, line));
+                    }
+                    lines.push(format!("{}:{}:> {}", path_str, m.line_number, m.line));
+                    for (i, line) in m.after_context.iter().enumerate() {
+                        let line_no = m.line_number + i + 1;
+                        lines.push(format!("{}:{}:  {}", path_str, line_no, line));
+                    }
+                    if !m.after_context.is_empty() {
+                        lines.push("--".to_string());
+                    }
+                }
+                let txt = if matches.is_empty() {
+                    format!("No matches for: {}", args.pattern)
+                } else {
+                    format!("Found {} matches:\n\n{}", matches.len(), lines.join("\n"))
+                };
+                let s = json!({
+                    "matches": matches.iter().map(|m| json!({
+                        "path": m.path.to_string_lossy(),
+                        "lineNumber": m.line_number,
+                        "line": m.line,
+                    })).collect::<Vec<_>>(),
+                    "totalMatches": matches.len(),
+                });
+                (txt, s)
             }
-            
-            // Add match line
-            lines.push(format!("{}:{}:> {}", path_str, m.line_number, m.line));
-            
-            // Add after context
-            for (i, line) in m.after_context.iter().enumerate() {
-                let line_no = m.line_number + i + 1;
-                lines.push(format!("{}:{}:  {}", path_str, line_no, line));
+            grep::GrepResult::Counts(ref counts) => {
+                let txt = counts.iter()
+                    .map(|c| format!("{}: {}", c.path.display(), c.count))
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                let s = json!({
+                    "counts": counts.iter().map(|c| json!({
+                        "path": c.path.to_string_lossy(),
+                        "count": c.count,
+                    })).collect::<Vec<_>>(),
+                });
+                (txt, s)
             }
-            
-            if !m.after_context.is_empty() {
-                lines.push("--".to_string());
+            grep::GrepResult::Files(ref files) => {
+                let txt = files.iter()
+                    .map(|f| f.display().to_string())
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                let s = json!({
+                    "files": files.iter().map(|f| f.to_string_lossy()).collect::<Vec<_>>(),
+                });
+                (txt, s)
             }
-        }
-
-        let text = if matches.is_empty() {
-            format!("No matches found for pattern: {}", args.pattern)
-        } else {
-            format!(
-                "Found {} matches for pattern '{}' in {}:\n\n{}",
-                matches.len(),
-                args.pattern,
-                args.path,
-                lines.join("\n")
-            )
         };
-
-        let structured = json!({
-            "matches": matches.iter().map(|m| json!({
-                "path": m.path.to_string_lossy(),
-                "lineNumber": m.line_number,
-                "line": m.line,
-                "beforeContext": m.before_context,
-                "afterContext": m.after_context,
-            })).collect::<Vec<_>>(),
-            "totalMatches": matches.len(),
-            "pattern": args.pattern,
-            "searchPath": args.path,
-        });
 
         Ok(CallToolResult {
             content: vec![Content::text(text)],
@@ -1924,6 +2166,479 @@ USE CASES: Patch executables, fix binary data, search-replace in non-text files.
             meta: None,
         })
     }
+
+    // ========================================================================
+    // NEW TOOLS: Hashing, Comparison, Watch, JSON, PDF, Archives, Stats
+    // ========================================================================
+
+    #[tool(
+        name = "file_hash",
+        description = "Compute hash of a file. Algorithms: md5, sha1, sha256 (default), sha512, xxh64."
+    )]
+    async fn file_hash(
+        &self,
+        Parameters(args): Parameters<FileHashArgs>,
+    ) -> Result<CallToolResult, McpError> {
+        let path = self.resolve(&args.path).await?;
+        let algo = hash::HashAlgorithm::from_str(args.algorithm.as_deref().unwrap_or("sha256"))
+            .map_err(|e| McpError::invalid_params(e.to_string(), None))?;
+        
+        let result = hash::hash_file(&path, algo)
+            .await
+            .map_err(|e| McpError::internal_error(e.to_string(), None))?;
+        
+        Ok(CallToolResult {
+            content: vec![Content::text(format!("{}: {}", args.path, result.hash))],
+            structured_content: Some(json!({
+                "path": args.path,
+                "algorithm": args.algorithm.as_deref().unwrap_or("sha256"),
+                "hash": result.hash,
+                "size": result.size,
+            })),
+            is_error: Some(false),
+            meta: None,
+        })
+    }
+
+    #[tool(
+        name = "file_hash_multiple",
+        description = "Compute hashes of multiple files. Returns all_match=true if all hashes are identical."
+    )]
+    async fn file_hash_multiple(
+        &self,
+        Parameters(args): Parameters<FileHashMultipleArgs>,
+    ) -> Result<CallToolResult, McpError> {
+        let mut paths = Vec::new();
+        for p in &args.paths {
+            paths.push(self.resolve(p).await?);
+        }
+        
+        let algo = hash::HashAlgorithm::from_str(args.algorithm.as_deref().unwrap_or("sha256"))
+            .map_err(|e| McpError::invalid_params(e.to_string(), None))?;
+        
+        let path_refs: Vec<&std::path::Path> = paths.iter().map(|p| p.as_path()).collect();
+        let result = hash::hash_files_multiple(&path_refs, algo).await;
+        
+        let text = result.results.iter()
+            .map(|r| format!("{}: {}", r.path, r.hash))
+            .collect::<Vec<_>>()
+            .join("\n");
+        
+        Ok(CallToolResult {
+            content: vec![Content::text(format!("{}\n\nAll match: {}", text, result.all_match))],
+            structured_content: Some(json!({
+                "results": result.results.iter().map(|r| json!({
+                    "path": r.path,
+                    "hash": r.hash,
+                    "size": r.size,
+                })).collect::<Vec<_>>(),
+                "allMatch": result.all_match,
+            })),
+            is_error: Some(false),
+            meta: None,
+        })
+    }
+
+    #[tool(
+        name = "compare_files",
+        description = "Binary comparison of two files. Returns diff samples, match percentage, and summary."
+    )]
+    async fn compare_files(
+        &self,
+        Parameters(args): Parameters<CompareFilesArgs>,
+    ) -> Result<CallToolResult, McpError> {
+        let path1 = self.resolve(&args.path1).await?;
+        let path2 = self.resolve(&args.path2).await?;
+        
+        let params = compare::CompareParams {
+            offset1: args.offset1,
+            offset2: args.offset2,
+            length: if args.length == 0 { None } else { Some(args.length) },
+            max_diffs: args.max_diffs,
+            context_bytes: args.context_bytes,
+        };
+        
+        let result = compare::compare_files(&path1, &path2, params)
+            .await
+            .map_err(|e| McpError::internal_error(e.to_string(), None))?;
+        
+        let status = if result.identical { "IDENTICAL" } else { "DIFFERENT" };
+        let text = format!(
+            "{} vs {}\nStatus: {}\nSize: {} vs {} ({:+})\nMatch: {:.2}%",
+            args.path1, args.path2, status,
+            result.size1, result.size2, result.size_diff,
+            result.match_percentage
+        );
+        
+        Ok(CallToolResult {
+            content: vec![Content::text(text)],
+            structured_content: Some(json!({
+                "identical": result.identical,
+                "size1": result.size1,
+                "size2": result.size2,
+                "sizeDiff": result.size_diff,
+                "hash1": result.hash1,
+                "hash2": result.hash2,
+                "firstDiffOffset": result.first_diff_offset,
+                "totalDiffRegions": result.total_diff_regions,
+                "totalDiffBytes": result.total_diff_bytes,
+                "matchPercentage": result.match_percentage,
+            })),
+            is_error: Some(false),
+            meta: None,
+        })
+    }
+
+    #[tool(
+        name = "compare_directories",
+        description = "Compare two directories. Returns files only in first, only in second, and different files."
+    )]
+    async fn compare_directories(
+        &self,
+        Parameters(args): Parameters<CompareDirsArgs>,
+    ) -> Result<CallToolResult, McpError> {
+        let path1 = self.resolve(&args.path1).await?;
+        let path2 = self.resolve(&args.path2).await?;
+        
+        let params = compare::DirCompareParams {
+            recursive: args.recursive,
+            compare_content: args.compare_content,
+            ignore_patterns: args.ignore_patterns.clone(),
+        };
+        
+        let result = compare::compare_directories(&path1, &path2, params)
+            .await
+            .map_err(|e| McpError::internal_error(e.to_string(), None))?;
+        
+        let status = if result.identical { "IDENTICAL" } else { "DIFFERENT" };
+        let text = format!(
+            "{}\nOnly in {}: {}\nOnly in {}: {}\nDifferent: {}\nSame: {}",
+            status,
+            args.path1, result.only_in_first.len(),
+            args.path2, result.only_in_second.len(),
+            result.different.len(),
+            result.same_count
+        );
+        
+        Ok(CallToolResult {
+            content: vec![Content::text(text)],
+            structured_content: Some(json!({
+                "identical": result.identical,
+                "onlyInFirst": result.only_in_first,
+                "onlyInSecond": result.only_in_second,
+                "different": result.different.iter().map(|d| json!({
+                    "path": d.path,
+                    "size1": d.size1,
+                    "size2": d.size2,
+                    "hash1": d.hash1,
+                    "hash2": d.hash2,
+                })).collect::<Vec<_>>(),
+                "sameCount": result.same_count,
+                "diffCount": result.diff_count,
+            })),
+            is_error: Some(false),
+            meta: None,
+        })
+    }
+
+    #[tool(
+        name = "tail_file",
+        description = "Read last N lines/bytes of a file. Supports follow mode for logs."
+    )]
+    async fn tail_file(
+        &self,
+        Parameters(args): Parameters<TailFileArgs>,
+    ) -> Result<CallToolResult, McpError> {
+        let path = self.resolve(&args.path).await?;
+        
+        let params = watch::TailParams {
+            lines: args.lines,
+            bytes: args.bytes.map(|b| b as u64),
+            follow: args.follow,
+            timeout_ms: args.timeout_ms,
+        };
+        
+        let result = watch::tail_file(&path, params)
+            .await
+            .map_err(|e| McpError::internal_error(e.to_string(), None))?;
+        
+        Ok(CallToolResult {
+            content: vec![Content::text(&result.content)],
+            structured_content: Some(json!({
+                "content": result.content,
+                "linesReturned": result.lines_returned,
+                "fileSize": result.file_size,
+                "truncated": result.truncated,
+            })),
+            is_error: Some(false),
+            meta: None,
+        })
+    }
+
+    #[tool(
+        name = "watch_file",
+        description = "Wait for file changes (modify, create, delete). Returns when event occurs or timeout."
+    )]
+    async fn watch_file(
+        &self,
+        Parameters(args): Parameters<WatchFileArgs>,
+    ) -> Result<CallToolResult, McpError> {
+        let path = self.resolve(&args.path).await?;
+        
+        let events: Vec<watch::WatchEvent> = args.events
+            .iter()
+            .filter_map(|e| watch::WatchEvent::from_str(e).ok())
+            .collect();
+        
+        let result = watch::watch_file(&path, args.timeout_ms, &events)
+            .await
+            .map_err(|e| McpError::internal_error(e.to_string(), None))?;
+        
+        let text = if result.changed {
+            format!("File changed: {:?} after {}ms", result.event, result.elapsed_ms)
+        } else {
+            "No changes detected (timeout)".to_string()
+        };
+        
+        Ok(CallToolResult {
+            content: vec![Content::text(text)],
+            structured_content: Some(json!({
+                "changed": result.changed,
+                "event": result.event,
+                "newSize": result.new_size,
+                "elapsedMs": result.elapsed_ms,
+            })),
+            is_error: Some(false),
+            meta: None,
+        })
+    }
+
+    #[tool(
+        name = "read_json",
+        description = "Read JSON file with optional JSONPath query. Handles broken JSON gracefully."
+    )]
+    async fn read_json(
+        &self,
+        Parameters(args): Parameters<ReadJsonArgs>,
+    ) -> Result<CallToolResult, McpError> {
+        let path = self.resolve(&args.path).await?;
+        
+        let result = json_reader::read_json(&path, args.query.as_deref(), args.pretty)
+            .await
+            .map_err(|e| McpError::internal_error(e.to_string(), None))?;
+        
+        let text = if let Some(ref err) = result.parse_error {
+            format!("JSON parse error at line {:?}, col {:?}: {}\nContext: {:?}",
+                err.line, err.column, err.message, err.context)
+        } else {
+            result.pretty.clone()
+        };
+        
+        Ok(CallToolResult {
+            content: vec![Content::text(text)],
+            structured_content: Some(json!({
+                "result": result.result,
+                "queryMatched": result.query_matched,
+                "parseError": result.parse_error.as_ref().map(|e| json!({
+                    "message": e.message,
+                    "line": e.line,
+                    "column": e.column,
+                })),
+            })),
+            is_error: Some(result.parse_error.is_some()),
+            meta: None,
+        })
+    }
+
+    #[tool(
+        name = "read_pdf",
+        description = "Extract text from PDF file. Supports page ranges."
+    )]
+    async fn read_pdf(
+        &self,
+        Parameters(args): Parameters<ReadPdfArgs>,
+    ) -> Result<CallToolResult, McpError> {
+        let path = self.resolve(&args.path).await?;
+        
+        let result = pdf_reader::read_pdf(&path, args.pages.as_deref(), args.max_chars)
+            .await
+            .map_err(|e| McpError::internal_error(e.to_string(), None))?;
+        
+        Ok(CallToolResult {
+            content: vec![Content::text(&result.text)],
+            structured_content: Some(json!({
+                "text": result.text,
+                "pagesCount": result.pages_count,
+                "pagesExtracted": result.pages_extracted,
+                "truncated": result.truncated,
+            })),
+            is_error: Some(false),
+            meta: None,
+        })
+    }
+
+    #[tool(
+        name = "extract_archive",
+        description = "Extract archive (zip, tar, tar.gz) to destination."
+    )]
+    async fn extract_archive(
+        &self,
+        Parameters(args): Parameters<ExtractArchiveArgs>,
+    ) -> Result<CallToolResult, McpError> {
+        let archive_path = self.resolve(&args.path).await?;
+        let dest_path = self.resolve(&args.destination).await?;
+        
+        let format = if let Some(ref f) = args.format {
+            Some(archive::ArchiveFormat::from_str(f)
+                .map_err(|e| McpError::invalid_params(e.to_string(), None))?)
+        } else {
+            None
+        };
+        
+        let files_filter = if args.files.is_empty() { None } else { Some(args.files.as_slice()) };
+        
+        let result = archive::extract_archive(&archive_path, &dest_path, format, files_filter)
+            .await
+            .map_err(|e| McpError::internal_error(e.to_string(), None))?;
+        
+        let text = format!(
+            "Extracted {} files ({} dirs) to {}. Total: {} bytes",
+            result.files_extracted, result.dirs_created,
+            args.destination, result.total_bytes
+        );
+        
+        Ok(CallToolResult {
+            content: vec![Content::text(text)],
+            structured_content: Some(json!({
+                "filesExtracted": result.files_extracted,
+                "dirsCreated": result.dirs_created,
+                "files": result.files,
+                "totalBytes": result.total_bytes,
+            })),
+            is_error: Some(false),
+            meta: None,
+        })
+    }
+
+    #[tool(
+        name = "create_archive",
+        description = "Create archive (zip, tar, tar.gz) from files/directories."
+    )]
+    async fn create_archive(
+        &self,
+        Parameters(args): Parameters<CreateArchiveArgs>,
+    ) -> Result<CallToolResult, McpError> {
+        let mut paths = Vec::new();
+        for p in &args.paths {
+            paths.push(self.resolve(p).await?);
+        }
+        let dest_path = self.resolve(&args.destination).await?;
+        
+        let format = if let Some(ref f) = args.format {
+            Some(archive::ArchiveFormat::from_str(f)
+                .map_err(|e| McpError::invalid_params(e.to_string(), None))?)
+        } else {
+            None
+        };
+        
+        let result = archive::create_archive(&paths, &dest_path, format)
+            .await
+            .map_err(|e| McpError::internal_error(e.to_string(), None))?;
+        
+        let text = format!(
+            "Created archive with {} files. Size: {} bytes",
+            result.files_added, result.archive_size
+        );
+        
+        Ok(CallToolResult {
+            content: vec![Content::text(text)],
+            structured_content: Some(json!({
+                "filesAdded": result.files_added,
+                "archiveSize": result.archive_size,
+                "archivePath": result.archive_path,
+            })),
+            is_error: Some(false),
+            meta: None,
+        })
+    }
+
+    #[tool(
+        name = "file_stats",
+        description = "Get statistics for file/directory: total files, size, breakdown by extension, largest files."
+    )]
+    async fn file_stats(
+        &self,
+        Parameters(args): Parameters<FileStatsArgs>,
+    ) -> Result<CallToolResult, McpError> {
+        let path = self.resolve(&args.path).await?;
+        
+        let result = stats::file_stats(&path, args.recursive, 10)
+            .await
+            .map_err(|e| McpError::internal_error(e.to_string(), None))?;
+        
+        let text = format!(
+            "Files: {}, Dirs: {}, Size: {}",
+            result.total_files, result.total_dirs, result.total_size_human
+        );
+        
+        Ok(CallToolResult {
+            content: vec![Content::text(text)],
+            structured_content: Some(json!({
+                "totalFiles": result.total_files,
+                "totalDirs": result.total_dirs,
+                "totalSize": result.total_size,
+                "totalSizeHuman": result.total_size_human,
+                "byExtension": result.by_extension.iter().map(|(k, v)| {
+                    (k.clone(), json!({ "count": v.count, "size": v.size }))
+                }).collect::<std::collections::HashMap<_, _>>(),
+                "largestFiles": result.largest_files.iter().map(|f| json!({
+                    "path": f.path,
+                    "size": f.size,
+                })).collect::<Vec<_>>(),
+            })),
+            is_error: Some(false),
+            meta: None,
+        })
+    }
+
+    #[tool(
+        name = "find_duplicates",
+        description = "Find duplicate files by content hash. Returns groups of duplicates and wasted space."
+    )]
+    async fn find_duplicates(
+        &self,
+        Parameters(args): Parameters<FindDuplicatesArgs>,
+    ) -> Result<CallToolResult, McpError> {
+        let path = self.resolve(&args.path).await?;
+        
+        let result = duplicates::find_duplicates(&path, args.min_size, args.by_content)
+            .await
+            .map_err(|e| McpError::internal_error(e.to_string(), None))?;
+        
+        let text = format!(
+            "Found {} duplicate groups ({} files). Wasted space: {}",
+            result.duplicate_groups.len(),
+            result.duplicate_files,
+            result.wasted_space_human
+        );
+        
+        Ok(CallToolResult {
+            content: vec![Content::text(text)],
+            structured_content: Some(json!({
+                "duplicateGroups": result.duplicate_groups.iter().map(|g| json!({
+                    "hash": g.hash,
+                    "size": g.size,
+                    "files": g.files,
+                })).collect::<Vec<_>>(),
+                "totalWastedSpace": result.total_wasted_space,
+                "wastedSpaceHuman": result.wasted_space_human,
+                "filesScanned": result.files_scanned,
+                "duplicateFiles": result.duplicate_files,
+            })),
+            is_error: Some(false),
+            meta: None,
+        })
+    }
 }
 
 #[tool_handler]
@@ -2120,11 +2835,39 @@ fn permissions_string(meta: &Metadata) -> String {
     }
 }
 
+/// Options for directory tree building
+struct TreeOptions {
+    max_depth: usize,
+    show_size: bool,
+    show_hash: bool,
+}
+
+fn human_size(bytes: u64) -> String {
+    const KB: u64 = 1024;
+    const MB: u64 = KB * 1024;
+    const GB: u64 = MB * 1024;
+    const TB: u64 = GB * 1024;
+    
+    if bytes >= TB {
+        format!("{:.2} TB", bytes as f64 / TB as f64)
+    } else if bytes >= GB {
+        format!("{:.2} GB", bytes as f64 / GB as f64)
+    } else if bytes >= MB {
+        format!("{:.2} MB", bytes as f64 / MB as f64)
+    } else if bytes >= KB {
+        format!("{:.2} KB", bytes as f64 / KB as f64)
+    } else {
+        format!("{} B", bytes)
+    }
+}
+
 #[async_recursion]
 async fn build_tree(
     root: &Path,
     current: &Path,
     exclude: &globset::GlobSet,
+    opts: &TreeOptions,
+    depth: usize,
 ) -> Result<Vec<TreeEntry>, McpError> {
     let mut dir = fs::read_dir(current)
         .await
@@ -2141,23 +2884,59 @@ async fn build_tree(
         if exclude.is_match(rel_str.as_ref()) {
             continue;
         }
-        let is_dir = entry
+        
+        let file_type = entry
             .file_type()
             .await
-            .map_err(internal_err("stat entry"))?
-            .is_dir();
+            .map_err(internal_err("stat entry"))?;
+        let is_dir = file_type.is_dir();
+        
         if is_dir {
-            let kids = build_tree(root, &path, exclude).await?;
+            // Check depth limit before recursing
+            let kids = if depth < opts.max_depth {
+                Some(build_tree(root, &path, exclude, opts, depth + 1).await?)
+            } else {
+                None // At max depth, don't include children
+            };
+            
             children.push(TreeEntry {
                 name: entry.file_name().to_string_lossy().to_string(),
                 kind: "directory".to_string(),
-                children: Some(kids),
+                children: kids,
+                size: None,
+                size_human: None,
+                hash: None,
             });
         } else {
+            // Get metadata for size
+            let (size, size_human) = if opts.show_size {
+                if let Ok(meta) = entry.metadata().await {
+                    let s = meta.len();
+                    (Some(s), Some(human_size(s)))
+                } else {
+                    (None, None)
+                }
+            } else {
+                (None, None)
+            };
+            
+            // Get hash if requested
+            let file_hash = if opts.show_hash {
+                hash::hash_file(&path, hash::HashAlgorithm::Sha256)
+                    .await
+                    .ok()
+                    .map(|r| r.hash)
+            } else {
+                None
+            };
+            
             children.push(TreeEntry {
                 name: entry.file_name().to_string_lossy().to_string(),
                 kind: "file".to_string(),
                 children: None,
+                size,
+                size_human,
+                hash: file_hash,
             });
         }
     }
