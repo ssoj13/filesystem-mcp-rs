@@ -56,6 +56,7 @@ mod pdf_reader;
 mod search;
 mod stats;
 mod watch;
+mod process;
 
 use logging::{init_logging, TransportMode};
 
@@ -94,6 +95,7 @@ struct FileSystemServer {
     allowed: AllowedDirs,
     tool_router: ToolRouter<Self>,
     allow_symlink_escape: bool,
+    process_manager: process::ProcessManager,
 }
 
 impl FileSystemServer {
@@ -104,6 +106,7 @@ impl FileSystemServer {
             allowed,
             tool_router,
             allow_symlink_escape: false,
+            process_manager: process::ProcessManager::new(),
         }
     }
 
@@ -805,6 +808,67 @@ struct PatchBinaryArgs {
     /// Replace all occurrences (default: false, replaces only first)
     #[serde(default)]
     all: bool,
+}
+
+// === Process Management Args ===
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+struct RunCommandArgs {
+    /// Command to execute (e.g., "python", "node", "cargo")
+    command: String,
+    /// Command arguments
+    #[serde(default)]
+    args: Vec<String>,
+    /// Working directory (optional)
+    cwd: Option<String>,
+    /// Environment variables to add (key-value pairs)
+    #[serde(default)]
+    env: Option<std::collections::HashMap<String, String>>,
+    /// Clear existing environment before adding env vars
+    #[serde(default)]
+    clear_env: bool,
+    /// Timeout in milliseconds (command will be killed after this time)
+    #[serde(default)]
+    timeout_ms: Option<u64>,
+    /// Redirect stdout to this file
+    stdout_file: Option<String>,
+    /// Redirect stderr to this file  
+    stderr_file: Option<String>,
+    /// Read stdin from this file
+    stdin_file: Option<String>,
+    /// Return only last N lines of stdout (useful for long output)
+    stdout_tail: Option<usize>,
+    /// Return only last N lines of stderr
+    stderr_tail: Option<usize>,
+    /// Run in background (returns immediately with PID)
+    #[serde(default)]
+    background: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+struct KillProcessArgs {
+    /// Process ID to kill
+    pid: u32,
+    /// Force kill (SIGKILL on Unix, /F on Windows)
+    #[serde(default)]
+    force: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+struct ListProcessesArgs {
+    /// Filter by command name (optional)
+    filter: Option<String>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+struct SearchProcessesArgs {
+    /// Regex pattern to match process name (e.g., "chrome", "python.*")
+    name_pattern: Option<String>,
+    /// Regex pattern to match command line (e.g., "--port=8080", "script\\.py")
+    cmdline_pattern: Option<String>,
 }
 
 #[tool_router]
@@ -2634,6 +2698,230 @@ USE CASES: Patch executables, fix binary data, search-replace in non-text files.
                 "wastedSpaceHuman": result.wasted_space_human,
                 "filesScanned": result.files_scanned,
                 "duplicateFiles": result.duplicate_files,
+            })),
+            is_error: Some(false),
+            meta: None,
+        })
+    }
+
+    // === Process Management Tools ===
+
+    #[tool(
+        name = "run_command",
+        description = "Execute a shell command with full control over execution environment.\n\n\
+            CROSS-PLATFORM: Works on Windows, macOS, and Linux.\n\n\
+            **Features:**\n\
+            - Custom working directory (cwd)\n\
+            - Environment variables (env) - added to current environment\n\
+            - Timeout with automatic kill (timeout_ms)\n\
+            - Redirect stdout/stderr to files\n\
+            - Read stdin from file\n\
+            - Tail output (stdout_tail/stderr_tail) - return only last N lines\n\
+            - Background execution (background) - returns PID immediately\n\n\
+            **Examples:**\n\
+            - Run Python script: {command: 'python', args: ['script.py']}\n\
+            - With timeout: {command: 'cargo', args: ['build'], timeout_ms: 60000}\n\
+            - Background: {command: 'npm', args: ['start'], background: true}\n\
+            - Custom env: {command: 'node', args: ['app.js'], env: {NODE_ENV: 'production'}}\n\
+            - Tail output: {command: 'cargo', args: ['test'], stdout_tail: 50}"
+    )]
+    async fn run_command(
+        &self,
+        Parameters(args): Parameters<RunCommandArgs>,
+    ) -> Result<CallToolResult, McpError> {
+        let args_refs: Vec<&str> = args.args.iter().map(|s| s.as_str()).collect();
+        
+        let params = process::RunParams {
+            cwd: args.cwd,
+            env: args.env,
+            clear_env: args.clear_env,
+            timeout_ms: args.timeout_ms,
+            kill_after_ms: args.timeout_ms, // Use same value for watchdog
+            stdout_file: args.stdout_file,
+            stderr_file: args.stderr_file,
+            stdin_file: args.stdin_file,
+            stdout_tail: args.stdout_tail,
+            stderr_tail: args.stderr_tail,
+            background: args.background,
+        };
+        
+        let result = process::run_command(&args.command, &args_refs, params, Some(&self.process_manager))
+            .await
+            .map_err(|e| McpError::internal_error(e.to_string(), None))?;
+        
+        let status = if result.background {
+            format!("Started in background (PID: {})", result.pid.unwrap_or(0))
+        } else if result.killed {
+            format!("Killed after {}ms (timeout)", result.duration_ms)
+        } else {
+            format!("Completed in {}ms (exit code: {:?})", result.duration_ms, result.exit_code)
+        };
+        
+        let mut text_parts = vec![status];
+        if !result.stdout.is_empty() {
+            text_parts.push(format!("\n--- stdout ---\n{}", result.stdout));
+        }
+        if !result.stderr.is_empty() {
+            text_parts.push(format!("\n--- stderr ---\n{}", result.stderr));
+        }
+        
+        Ok(CallToolResult {
+            content: vec![Content::text(text_parts.join(""))],
+            structured_content: Some(json!({
+                "exitCode": result.exit_code,
+                "stdout": result.stdout,
+                "stderr": result.stderr,
+                "pid": result.pid,
+                "killed": result.killed,
+                "timedOut": result.timed_out,
+                "durationMs": result.duration_ms,
+                "background": result.background,
+            })),
+            is_error: Some(result.exit_code.map(|c| c != 0).unwrap_or(result.killed)),
+            meta: None,
+        })
+    }
+
+    #[tool(
+        name = "kill_process",
+        description = "Kill a running process by PID.\n\n\
+            CROSS-PLATFORM: Works on Windows (taskkill), macOS and Linux (kill).\n\n\
+            **Parameters:**\n\
+            - pid: Process ID to kill\n\
+            - force: Force kill (SIGKILL on Unix, /F on Windows)\n\n\
+            **Examples:**\n\
+            - Graceful: {pid: 12345}\n\
+            - Force kill: {pid: 12345, force: true}"
+    )]
+    async fn kill_process(
+        &self,
+        Parameters(args): Parameters<KillProcessArgs>,
+    ) -> Result<CallToolResult, McpError> {
+        let success = process::kill_process(args.pid, args.force)
+            .map_err(|e| McpError::internal_error(e.to_string(), None))?;
+        
+        // Unregister from our process manager if we were tracking it
+        self.process_manager.unregister(args.pid).await;
+        
+        let text = if success {
+            format!("Process {} killed successfully", args.pid)
+        } else {
+            format!("Failed to kill process {} (may not exist)", args.pid)
+        };
+        
+        Ok(CallToolResult {
+            content: vec![Content::text(text)],
+            structured_content: Some(json!({
+                "pid": args.pid,
+                "success": success,
+            })),
+            is_error: Some(!success),
+            meta: None,
+        })
+    }
+
+    #[tool(
+        name = "list_processes",
+        description = "List background processes started by this server.\n\n\
+            Returns processes that were started with run_command(background: true) and are still tracked.\n\
+            Note: This only lists processes started by THIS server session, not all system processes.\n\n\
+            **Parameters:**\n\
+            - filter: Optional filter by command name"
+    )]
+    async fn list_processes(
+        &self,
+        Parameters(args): Parameters<ListProcessesArgs>,
+    ) -> Result<CallToolResult, McpError> {
+        let processes = self.process_manager.list().await;
+        
+        let filtered: Vec<_> = if let Some(ref filter) = args.filter {
+            processes.into_iter()
+                .filter(|p| p.command.contains(filter))
+                .collect()
+        } else {
+            processes
+        };
+        
+        let text = if filtered.is_empty() {
+            "No background processes tracked".to_string()
+        } else {
+            filtered.iter()
+                .map(|p| format!(
+                    "PID {}: {} {} (running for {}s)",
+                    p.pid,
+                    p.command,
+                    p.args.join(" "),
+                    p.started_at.elapsed().as_secs()
+                ))
+                .collect::<Vec<_>>()
+                .join("\n")
+        };
+        
+        Ok(CallToolResult {
+            content: vec![Content::text(text)],
+            structured_content: Some(json!({
+                "processes": filtered.iter().map(|p| json!({
+                    "pid": p.pid,
+                    "command": p.command,
+                    "args": p.args,
+                    "cwd": p.cwd,
+                    "runningForSecs": p.started_at.elapsed().as_secs(),
+                })).collect::<Vec<_>>(),
+                "count": filtered.len(),
+            })),
+            is_error: Some(false),
+            meta: None,
+        })
+    }
+
+    #[tool(
+        name = "search_processes",
+        description = "Search for running processes by name or command line pattern.\n\n\
+            CROSS-PLATFORM: Works on Windows, macOS, and Linux.\n\n\
+            **Parameters:**\n\
+            - name_pattern: Regex to match process name (e.g., 'chrome', 'python.*')\n\
+            - cmdline_pattern: Regex to match full command line (e.g., '--port=8080')\n\
+            - include_window_title: Include window titles (Windows only, slower)\n\n\
+            **Examples:**\n\
+            - Find Chrome: {name_pattern: 'chrome'}\n\
+            - Find by port: {cmdline_pattern: '--port=3000'}\n\
+            - Find Python scripts: {name_pattern: 'python', cmdline_pattern: 'script\\\\.py'}\n\n\
+            **Note:** At least one of name_pattern or cmdline_pattern must be provided."
+    )]
+    async fn search_processes(
+        &self,
+        Parameters(args): Parameters<SearchProcessesArgs>,
+    ) -> Result<CallToolResult, McpError> {
+        if args.name_pattern.is_none() && args.cmdline_pattern.is_none() {
+            return Err(McpError::invalid_params(
+                "At least one of name_pattern or cmdline_pattern must be provided",
+                None,
+            ));
+        }
+        
+        let results = process::search_processes(
+            args.name_pattern.as_deref(),
+            args.cmdline_pattern.as_deref(),
+        ).map_err(|e| McpError::internal_error(e.to_string(), None))?;
+        
+        let text = if results.is_empty() {
+            "No matching processes found".to_string()
+        } else {
+            results.iter()
+                .map(|p| {
+                    let cmdline = p.command_line.as_deref().unwrap_or("");
+                    format!("PID {}: {} ({:.1}% CPU, {} MB) - {}", 
+                        p.pid, p.name, p.cpu_percent, p.memory_bytes / 1024 / 1024, cmdline)
+                })
+                .collect::<Vec<_>>()
+                .join("\n")
+        };
+        
+        Ok(CallToolResult {
+            content: vec![Content::text(text)],
+            structured_content: Some(json!({
+                "processes": results,
+                "count": results.len(),
             })),
             is_error: Some(false),
             meta: None,

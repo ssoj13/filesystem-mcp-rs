@@ -22,6 +22,19 @@
 - `file_stats` - Directory statistics: file counts, sizes by extension, largest files.
 - `find_duplicates` - Find duplicate files by content hash or size only.
 
+**Process Management (Cross-platform via sysinfo):**
+- `run_command` - Execute shell commands with full control:
+  - Custom working directory (cwd)
+  - Environment variables injection (env)
+  - Timeout with auto-kill (timeout_ms, kill_after_ms)
+  - Redirect stdout/stderr to files
+  - Read stdin from file
+  - Tail output (stdout_tail, stderr_tail) - return only last N lines
+  - Background execution with PID tracking
+- `kill_process` - Kill process by PID using native API (SIGTERM/SIGKILL on Unix, TerminateProcess on Windows)
+- `list_processes` - List background processes started by this server
+- `search_processes` - Search system processes by name/cmdline regex. Returns: PID, name, command line, exe path, memory, CPU usage, status, user
+
 ### Enhanced
 
 **grep_files improvements:**
@@ -51,8 +64,9 @@
 - `stats.rs`: 4 tests (recursive stats, largest files)
 - `grep.rs`: 3 new tests (invert, count, files-without-match)
 - `search.rs`: 5 new tests (type/size/time filters)
+- `process.rs`: 14 tests (run_command, timeout, env, tail, background, search, kill errors)
 
-Total: 54 → 147 unit tests (+172% growth)
+Total: 54 → 158 unit tests (+193% growth)
 
 ### Dependencies Added
 - `sha1`, `sha2`, `md-5`, `xxhash-rust` - Hashing algorithms

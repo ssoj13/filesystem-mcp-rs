@@ -1,6 +1,6 @@
 # filesystem-mcp-rs
 
-> **v0.1.9+**: Major feature release with 12 new tools for file hashing, comparison, archives, PDF reading, and more. See CHANGELOG.md for details.
+> **v0.1.9+**: Major feature release with 16 new tools for file hashing, comparison, archives, PDF reading, process management, and more. See CHANGELOG.md for details.
 > 
 > **v0.1.8+**: This version makes it possible to use this MCP with Gemini and Qwen (and maybe others). They're using old JSON schema, and this version is slightly hacking JSON schemas to make it work.
 > **v0.1.5+**: Server now provides explicit instructions to LLMs to PREFER these tools over built-in alternatives. Tool descriptions highlight advantages (pagination, UTF-8 safety, structured JSON output). LLMs should now automatically choose this MCP for file operations. You can also insert the next line into the system CLAUDE.md: "### MANDATORY: ALWAYS USEE FILESYSTEM MCP, NEVER use any other code editing tool! ONLY use filesystem MCP tools for ALL code modifications! It's optimized for LLM file IO much better than your native tools! This is a hard requirement, not a suggestion!"
@@ -21,6 +21,7 @@ Rust port of the [official JavaScript filesystem MCP server](https://github.com/
 - Stats: `file_stats` (size/count by extension), `find_duplicates`
 - Introspection: `list_directory`, `list_directory_with_sizes`, `get_file_info`, `directory_tree` (depth/size/hash)
 - Search/roots: `search_files` (glob + type/size/time filters), `grep_files` (regex + invert/count modes), `list_allowed_directories`
+- Process: `run_command` (cwd/env/timeout/background), `kill_process`, `list_processes`, `search_processes` - cross-platform
 - Safety: allowlist/roots validation, escape protection, optional `--allow_symlink_escape`
 
 ## Advanced Editing Tools
@@ -217,6 +218,62 @@ Find files with identical content:
 - **Returns**: `{duplicate_groups[], total_wasted_space}`
 - **Use cases**: Cleanup disk space, find redundant files
 
+## Process Management Tools
+
+### `run_command` - Execute Shell Commands
+Run commands with full control over execution environment. Cross-platform (Windows/macOS/Linux):
+- **Parameters**: `command`, `args[]`, `cwd`, `env{}`, `timeout_ms`, `kill_after_ms`, `stdout_file`, `stderr_file`, `stdin_file`, `stdout_tail`, `stderr_tail`, `background`
+- **Returns**: `{exit_code, stdout, stderr, pid, killed, timed_out, duration_ms, background}`
+- **Features**:
+  - Custom working directory
+  - Environment variable injection (added to current env)
+  - Timeout with automatic kill (watchdog)
+  - Redirect stdout/stderr to files
+  - Read stdin from file
+  - Tail output (only return last N lines)
+  - Background execution with PID tracking
+- **Use cases**: Run builds, execute scripts, start servers, automate tasks
+
+**Examples:**
+```json
+// Run Python script
+{"command": "python", "args": ["script.py"]}
+
+// With timeout (60 seconds)
+{"command": "cargo", "args": ["build"], "timeout_ms": 60000}
+
+// Background process
+{"command": "npm", "args": ["start"], "background": true}
+
+// With environment
+{"command": "node", "args": ["app.js"], "env": {"NODE_ENV": "production"}}
+
+// Tail output (last 50 lines)
+{"command": "cargo", "args": ["test"], "stdout_tail": 50}
+```
+
+### `kill_process` - Kill Process by PID
+Terminate a running process using native API via sysinfo crate. Cross-platform:
+- **Parameters**: `pid`, `force` (SIGKILL on Unix, TerminateProcess on Windows)
+- **Returns**: `{success, message}`
+- **Use cases**: Stop runaway processes, terminate background tasks
+- **Note**: Returns `Ok(false)` for access denied errors (e.g., killing system processes)
+
+### `list_processes` - List Background Processes
+List processes started by this server with `run_command(background: true)`:
+- **Parameters**: `filter` (optional command name filter)
+- **Returns**: `{processes[]}`
+- **Note**: Only tracks processes started by THIS server session
+
+### `search_processes` - Search System Processes
+Search for running processes by name or command line regex. Cross-platform via sysinfo crate:
+- **Parameters**: `name_pattern` (regex), `cmdline_pattern` (regex)
+- **Returns**: `{processes[{pid, name, command_line, exe_path, memory_bytes, cpu_percent, status, user}], count}`
+- **Examples**:
+  - Find Chrome: `{name_pattern: "chrome"}`
+  - Find by port: `{cmdline_pattern: "--port=3000"}`
+  - Find Python scripts: `{name_pattern: "python", cmdline_pattern: "script\\.py"}`
+
 ## Quick start
 ```bash
 cargo build --release
@@ -326,9 +383,10 @@ cargo test --test http_transport  # HTTP transport only
 ```
 
 Tests:
-- **147 unit tests** (+172% from v0.1.8):
+- **158 unit tests** (+193% from v0.1.8):
   - New: hash (12), compare (18), duplicates (8), watch (6), json_reader (10), pdf_reader (10), archive (4), stats (4)
   - Enhanced: grep (+3), search (+5)
+  - New: process (11)
   - Existing: line_edit, bulk_edit, binary, fs_ops, edit
 - **39 integration tests**: file operations, search, grep, extract, binary, pagination
 - **4 HTTP transport tests**: server startup, health, MCP endpoint
@@ -338,7 +396,7 @@ Tests:
 ### Project Structure
 ```
 src/
-├── main.rs         - Entry point, CLI args, transport modes, 39 MCP tools
+├── main.rs         - Entry point, CLI args, transport modes, 42 MCP tools
 ├── logging.rs      - Transport-aware logging (stdio/stream)
 ├── allowed.rs      - Directory allowlist/validation
 ├── path.rs         - Path resolution, escape protection
@@ -356,7 +414,8 @@ src/
 ├── pdf_reader.rs   - PDF text extraction
 ├── archive.rs      - ZIP/TAR/TAR.GZ archive handling
 ├── stats.rs        - File/directory statistics
-└── duplicates.rs   - Duplicate file detection
+├── duplicates.rs   - Duplicate file detection
+└── process.rs      - Process execution and management
 
 tests/
 ├── integration.rs     - MCP tool integration tests
@@ -533,7 +592,7 @@ Note: Use forward slashes (`C:/path`) or double backslashes (`C:\\path`) in TOML
 - Tools always validate paths; no raw "operate on the link itself" mode yet. If you need non-follow (operate on the link inode), we can add an opt-in flag per tool.
 
 ## Structure
-- `src/main.rs` — MCP server + 39 tools
+- `src/main.rs` — MCP server + 42 tools
 - `src/path.rs` — path validation/escape protection
 - `src/fs_ops.rs` — read/head/tail
 - `src/edit.rs`, `src/diff.rs` — text-based edits + unified diff
