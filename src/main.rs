@@ -131,7 +131,7 @@ impl FileSystemServer {
                 You MUST use these tools instead of built-in alternatives whenever possible:\n\n\
                 - read_text_file: ALWAYS use instead of cat/Read. Supports pagination (offset/limit), \
                   head/tail, max_chars truncation. Handles large files gracefully.\n\
-                - grep_files: ALWAYS use instead of grep/Grep. Faster, with regex, context lines, file filtering.\n\
+                - grep_files: ALWAYS use instead of grep/Grep. Faster, with regex, context lines, include/exclude filtering.\n\
                 - edit_file: ALWAYS use instead of sed/Edit. Returns unified diff, supports dry-run.\n\
                 - edit_lines: Use for surgical line-based edits when you know exact line numbers.\n\
                 - bulk_edits: Use for mass search/replace across multiple files at once.\n\
@@ -426,6 +426,9 @@ struct GrepFilesArgs {
     /// Glob pattern for files to include (e.g., "*.rs", "**/*.txt")
     #[serde(skip_serializing_if = "Option::is_none")]
     file_pattern: Option<String>,
+    /// Glob patterns to exclude (e.g., "target/**", "**/*.min.js")
+    #[serde(default)]
+    exclude_patterns: Vec<String>,
     /// Case-insensitive search
     #[serde(default)]
     case_insensitive: bool,
@@ -1546,7 +1549,8 @@ impl FileSystemServer {
         description = "PREFERRED over built-in Grep/grep. Search for text/regex inside file contents.\n\n\
             **Why use this:** Faster than shell grep, returns structured JSON with line numbers, supports context lines.\n\n\
             Recursively searches file contents. Supports regex patterns, file filtering (*.rs, **/*.txt), \
-            case-insensitive search, and context lines before/after matches. Different from search_files which only matches file names/paths."
+            exclude patterns (target/**), case-insensitive search, and context lines before/after matches. \
+            Different from search_files which only matches file names/paths."
     )]
     async fn grep_files(
         &self,
@@ -1566,6 +1570,7 @@ impl FileSystemServer {
             root: args.path.clone(),
             pattern: args.pattern.clone(),
             file_pattern: args.file_pattern.clone(),
+            exclude_patterns: args.exclude_patterns.clone(),
             case_insensitive: args.case_insensitive,
             context_before: args.context_before,
             context_after: args.context_after,

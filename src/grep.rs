@@ -53,6 +53,8 @@ pub struct GrepParams {
     pub pattern: String,
     /// Glob pattern for files to include (e.g., "*.rs", "**/*.txt")
     pub file_pattern: Option<String>,
+    /// Glob patterns to exclude (e.g., "target/**", "**/*.min.js")
+    pub exclude_patterns: Vec<String>,
     /// Case-insensitive search
     pub case_insensitive: bool,
     /// Number of context lines before match
@@ -100,6 +102,11 @@ pub async fn grep_files(
     } else {
         None
     };
+    let exclude_matcher = if params.exclude_patterns.is_empty() {
+        None
+    } else {
+        Some(build_glob_set(&params.exclude_patterns)?)
+    };
 
     let mut matches = Vec::new();
     let mut counts = Vec::new();
@@ -110,6 +117,12 @@ pub async fn grep_files(
     let metadata = fs::metadata(&root_path).await?;
     if metadata.is_file() {
         // Search single file directly
+        if let Some(matcher) = &exclude_matcher {
+            let filename = root_path.file_name().unwrap_or_default().to_string_lossy();
+            if matcher.is_match(filename.as_ref()) {
+                return Ok(result_for_mode(&params.output_mode, matches, counts, files));
+            }
+        }
         if let Some(matcher) = &file_matcher {
             let filename = root_path.file_name().unwrap_or_default().to_string_lossy();
             if !matcher.is_match(filename.as_ref()) {
@@ -175,6 +188,13 @@ pub async fn grep_files(
                 Ok(ft) => ft,
                 Err(_) => continue,
             };
+
+            if let Some(matcher) = &exclude_matcher {
+                let rel = path.strip_prefix(&root_path).unwrap_or(&path);
+                if matcher.is_match(rel.to_string_lossy().as_ref()) {
+                    continue;
+                }
+            }
 
             if file_type.is_dir() {
                 stack.push(path);
@@ -341,6 +361,14 @@ fn build_glob(pattern: &str) -> Result<GlobSet> {
     Ok(builder.build()?)
 }
 
+fn build_glob_set(patterns: &[String]) -> Result<GlobSet> {
+    let mut builder = GlobSetBuilder::new();
+    for pattern in patterns {
+        builder.add(Glob::new(pattern)?);
+    }
+    Ok(builder.build()?)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -352,6 +380,7 @@ mod tests {
             root: root.to_string(),
             pattern: pattern.to_string(),
             file_pattern: None,
+            exclude_patterns: Vec::new(),
             case_insensitive: false,
             context_before: 0,
             context_after: 0,
@@ -536,6 +565,28 @@ mod tests {
             assert!(files[0].to_string_lossy().contains("no_match"));
         } else {
             panic!("Expected Files variant");
+        }
+    }
+
+    #[tokio::test]
+    async fn test_exclude_patterns() {
+        let temp = TempDir::new().unwrap();
+        let root = temp.path();
+
+        fs::write(root.join("keep.txt"), "match\n").await.unwrap();
+        fs::write(root.join("skip.txt"), "match\n").await.unwrap();
+
+        let allowed = AllowedDirs::new(vec![root.to_path_buf()]);
+
+        let mut params = default_params(&root.to_string_lossy(), "match");
+        params.exclude_patterns = vec!["skip.txt".to_string()];
+
+        let result = grep_files(params, &allowed, false).await.unwrap();
+        if let GrepResult::Matches(matches) = result {
+            assert_eq!(matches.len(), 1);
+            assert!(matches[0].path.to_string_lossy().contains("keep.txt"));
+        } else {
+            panic!("Expected Matches variant");
         }
     }
 }

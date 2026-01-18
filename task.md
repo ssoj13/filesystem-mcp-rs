@@ -1,0 +1,2 @@
+﻿
+exclude patterns for grep

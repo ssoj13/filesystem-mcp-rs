@@ -22,7 +22,7 @@ Rust port of the [official JavaScript filesystem MCP server](https://github.com/
 - Watch: `tail_file` (follow mode), `watch_file` (change events)
 - Stats: `file_stats` (size/count by extension), `find_duplicates`
 - Introspection: `list_directory`, `list_directory_with_sizes`, `get_file_info`, `directory_tree` (depth/size/hash)
-- Search/roots: `search_files` (glob + type/size/time filters), `grep_files` (regex + invert/count modes), `list_allowed_directories`
+- Search/roots: `search_files` (glob + type/size/time filters), `grep_files` (regex + exclude + invert/count modes), `list_allowed_directories`
 - Process: `run_command` (cwd/env/timeout/background), `kill_process`, `list_processes`, `search_processes` - cross-platform
 - Safety: allowlist/roots validation, escape protection, optional `--allow_symlink_escape`
 
@@ -63,7 +63,7 @@ Apply the same edits to multiple files at once. More efficient than editing file
 ### `grep_files` - Content Search
 Search for text/regex patterns **inside** file contents (not filenames):
 - **Supports**: Regex patterns, case-insensitive search, context lines
-- **File filtering**: Optional glob patterns to limit scope
+- **File filtering**: Optional glob include/exclude patterns to limit scope
 - **Returns**: Matching lines with file paths and line numbers
 - **Use cases**: Finding code patterns, locating function definitions, searching across codebase
 
