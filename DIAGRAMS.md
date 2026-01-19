@@ -91,6 +91,22 @@ sequenceDiagram
     Main-->>Client: CallToolResult
 ```
 
+## Data Flow: run_command (background)
+
+```mermaid
+sequenceDiagram
+    participant Client
+    participant Main as main.rs
+    participant Proc as process.rs
+    participant PM as ProcessManager
+
+    Client->>Main: run_command(background=true)
+    Main->>Proc: run_command(...)
+    Proc-->>Main: pid + immediate return
+    Proc->>PM: register(pid, info)
+    Main-->>Client: CallToolResult(pid)
+```
+
 ## Dead Code Flow (to be cleaned)
 
 ```mermaid

@@ -119,6 +119,9 @@ kill_process(pid) → terminate
 ProcessManager.unregister(pid)
 ```
 
+Notes:
+- Background mode returns immediately with `pid`; stdout/stderr are only captured to files when `stdout_file`/`stderr_file` are provided.
+
 ## Known Issues & TODOs
 
 ### Dead Code (to remove)
