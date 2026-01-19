@@ -1,6 +1,8 @@
 use std::collections::BTreeMap;
 use anyhow::{Context, Result, bail};
+use aws_credential_types::Credentials;
 use aws_sdk_s3::{Client, types::ObjectIdentifier};
+use aws_types::region::Region;
 use aws_sdk_s3::presigning::PresigningConfig;
 use base64::{engine::general_purpose, Engine as _};
 use tokio::fs;
@@ -100,6 +102,20 @@ pub struct S3PresignParams {
     pub expires_in_seconds: u64,
 }
 
+#[derive(Debug, Clone, Default)]
+pub struct S3Credentials {
+    pub access_key_id: Option<String>,
+    pub secret_access_key: Option<String>,
+    pub session_token: Option<String>,
+    pub region: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+pub struct S3BucketInfo {
+    pub name: String,
+    pub created_at: Option<String>,
+}
+
 pub fn is_bucket_allowed(bucket: &str, allowlist: &[String]) -> bool {
     if allowlist.is_empty() {
         return false;
@@ -110,6 +126,47 @@ pub fn is_bucket_allowed(bucket: &str, allowlist: &[String]) -> bool {
 pub async fn build_s3_client() -> Result<Client> {
     let config = aws_config::load_defaults(aws_config::BehaviorVersion::latest()).await;
     Ok(Client::new(&config))
+}
+
+pub async fn build_s3_client_with_credentials(creds: Option<S3Credentials>) -> Result<Client> {
+    let mut loader = aws_config::defaults(aws_config::BehaviorVersion::latest());
+
+    if let Some(ref creds) = creds {
+        if let Some(region) = creds.region.as_ref() {
+            loader = loader.region(Region::new(region.clone()));
+        }
+        if let (Some(access_key), Some(secret_key)) =
+            (creds.access_key_id.as_ref(), creds.secret_access_key.as_ref())
+        {
+            let provider = Credentials::new(
+                access_key.clone(),
+                secret_key.clone(),
+                creds.session_token.clone(),
+                None,
+                "filesystem-mcp",
+            );
+            loader = loader.credentials_provider(provider);
+        }
+    }
+
+    let config = loader.load().await;
+    Ok(Client::new(&config))
+}
+
+pub async fn list_buckets(client: &Client) -> Result<Vec<S3BucketInfo>> {
+    let resp = client.list_buckets().send().await.context("S3 list_buckets failed")?;
+    let mut buckets = Vec::new();
+    if let Some(items) = resp.buckets {
+        for bucket in items {
+            if let Some(name) = bucket.name {
+                buckets.push(S3BucketInfo {
+                    name,
+                    created_at: bucket.creation_date.map(|d| d.to_string()),
+                });
+            }
+        }
+    }
+    Ok(buckets)
 }
 
 pub async fn list_objects(client: &Client, params: S3ListParams) -> Result<S3ListResult> {

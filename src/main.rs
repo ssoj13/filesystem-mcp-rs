@@ -1,4 +1,5 @@
 use std::collections::BTreeMap;
+use std::env;
 use std::fs::Metadata;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -55,9 +56,9 @@ use reqwest::Url;
 use crate::tools::http_tools::{HttpRequestParams, http_request, http_request_batch, is_domain_allowed, decode_body_text, parse_url};
 #[cfg(feature = "s3-tools")]
 use crate::tools::s3_tools::{
-    S3ListParams, S3GetParams, S3PutParams, S3CopyParams, S3DeleteParams, S3PresignParams,
-    list_objects, stat_object, get_object, put_object, copy_object, delete_object, delete_objects,
-    presign, is_bucket_allowed, build_s3_client,
+    S3Credentials, S3ListParams, S3GetParams, S3PutParams, S3CopyParams, S3DeleteParams, S3PresignParams,
+    build_s3_client, build_s3_client_with_credentials, copy_object, delete_object, delete_objects, get_object,
+    is_bucket_allowed, list_buckets, list_objects, presign, put_object, stat_object,
 };
 
 mod core;
@@ -96,12 +97,12 @@ struct Args {
 
     /// HTTP allowlist domains (repeatable). Use "*" to allow all.
     #[cfg(feature = "http-tools")]
-    #[arg(long = "http-allowlist-domain", value_name = "DOMAIN", num_args = 0..)]
+    #[arg(long = "http-allowlist-domain", value_name = "DOMAIN", action = clap::ArgAction::Append)]
     http_allowlist_domains: Vec<String>,
 
     /// S3 allowlist buckets (repeatable). Use "*" to allow all.
     #[cfg(feature = "s3-tools")]
-    #[arg(long = "s3-allowlist-bucket", value_name = "BUCKET", num_args = 0..)]
+    #[arg(long = "s3-allowlist-bucket", value_name = "BUCKET", action = clap::ArgAction::Append)]
     s3_allowlist_buckets: Vec<String>,
 }
 
@@ -173,7 +174,7 @@ impl FileSystemServer {
                 - grep_files: ALWAYS use instead of grep/Grep. Faster, with regex, context lines, include/exclude filtering.\n\
                 - grep_context: Use for context-aware searches (requires nearby terms in a window).\n\
                 - http_request/http_request_batch/http_download: HTTP/HTTPS access when built with http-tools (allowlist required).\n\
-                - s3_list/s3_get/s3_put/s3_delete/s3_copy/s3_presign: S3 access when built with s3-tools (allowlist required).\n\
+                - s3_list_buckets/s3_list/s3_get/s3_put/s3_delete/s3_copy/s3_presign: S3 access when built with s3-tools (allowlist required).\n\
                 - edit_file: ALWAYS use instead of sed/Edit. Returns unified diff, supports dry-run.\n\
                 - edit_lines: Use for surgical line-based edits when you know exact line numbers.\n\
                 - bulk_edits: Use for mass search/replace across multiple files at once.\n\
@@ -242,6 +243,16 @@ impl FileSystemServer {
             })
             .await?;
         Ok(client.clone())
+    }
+
+    #[cfg(feature = "s3-tools")]
+    async fn s3_client_for(&self, creds: &S3CredentialsArgs) -> Result<aws_sdk_s3::Client, McpError> {
+        if let Some(creds) = creds.to_credentials() {
+            return build_s3_client_with_credentials(Some(creds))
+                .await
+                .map_err(|e| McpError::internal_error(format!("S3 config failed: {e}"), None));
+        }
+        self.s3_client().await
     }
 
     async fn refresh_roots(
@@ -676,6 +687,47 @@ fn default_s3_max_bytes() -> usize {
 #[cfg(feature = "s3-tools")]
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
+struct S3CredentialsArgs {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    access_key_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    secret_access_key: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    session_token: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    region: Option<String>,
+}
+
+#[cfg(feature = "s3-tools")]
+impl S3CredentialsArgs {
+    fn to_credentials(&self) -> Option<S3Credentials> {
+        if self.access_key_id.is_none()
+            && self.secret_access_key.is_none()
+            && self.session_token.is_none()
+            && self.region.is_none()
+        {
+            return None;
+        }
+        Some(S3Credentials {
+            access_key_id: self.access_key_id.clone(),
+            secret_access_key: self.secret_access_key.clone(),
+            session_token: self.session_token.clone(),
+            region: self.region.clone(),
+        })
+    }
+}
+
+#[cfg(feature = "s3-tools")]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+struct S3ListBucketsArgs {
+    #[serde(flatten)]
+    credentials: S3CredentialsArgs,
+}
+
+#[cfg(feature = "s3-tools")]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
 struct S3ListArgs {
     bucket: String,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -686,6 +738,8 @@ struct S3ListArgs {
     max_keys: Option<i32>,
     #[serde(skip_serializing_if = "Option::is_none")]
     continuation_token: Option<String>,
+    #[serde(flatten)]
+    credentials: S3CredentialsArgs,
 }
 
 #[cfg(feature = "s3-tools")]
@@ -694,6 +748,8 @@ struct S3ListArgs {
 struct S3StatArgs {
     bucket: String,
     key: String,
+    #[serde(flatten)]
+    credentials: S3CredentialsArgs,
 }
 
 #[cfg(feature = "s3-tools")]
@@ -710,6 +766,8 @@ struct S3GetArgs {
     max_bytes: usize,
     #[serde(default)]
     accept_text: bool,
+    #[serde(flatten)]
+    credentials: S3CredentialsArgs,
 }
 
 #[cfg(feature = "s3-tools")]
@@ -730,6 +788,8 @@ struct S3PutArgs {
     cache_control: Option<String>,
     #[serde(default)]
     metadata: BTreeMap<String, String>,
+    #[serde(flatten)]
+    credentials: S3CredentialsArgs,
 }
 
 #[cfg(feature = "s3-tools")]
@@ -740,6 +800,8 @@ struct S3CopyArgs {
     source_key: String,
     dest_bucket: String,
     dest_key: String,
+    #[serde(flatten)]
+    credentials: S3CredentialsArgs,
 }
 
 #[cfg(feature = "s3-tools")]
@@ -748,6 +810,8 @@ struct S3CopyArgs {
 struct S3DeleteArgs {
     bucket: String,
     key: String,
+    #[serde(flatten)]
+    credentials: S3CredentialsArgs,
 }
 
 #[cfg(feature = "s3-tools")]
@@ -756,6 +820,8 @@ struct S3DeleteArgs {
 struct S3DeleteBatchArgs {
     bucket: String,
     keys: Vec<String>,
+    #[serde(flatten)]
+    credentials: S3CredentialsArgs,
 }
 
 #[cfg(feature = "s3-tools")]
@@ -767,6 +833,8 @@ struct S3PresignArgs {
     method: String,
     #[serde(default = "default_s3_presign_ttl")]
     expires_in_seconds: u64,
+    #[serde(flatten)]
+    credentials: S3CredentialsArgs,
 }
 
 #[cfg(feature = "s3-tools")]
@@ -2475,6 +2543,47 @@ impl FileSystemServer {
 
     #[cfg(feature = "s3-tools")]
     #[tool(
+        name = "s3_list_buckets",
+        description = "List S3 buckets for the current credentials. Requires allowlisted buckets (use '*' to allow all)."
+    )]
+    async fn s3_list_buckets(
+        &self,
+        Parameters(args): Parameters<S3ListBucketsArgs>,
+    ) -> Result<CallToolResult, McpError> {
+        if self.s3_allowlist_buckets.is_empty() {
+            return Err(McpError::invalid_params(
+                "S3 allowlist is empty; use FS_MCP_S3_ALLOW_LIST or --s3-allowlist-bucket",
+                None,
+            ));
+        }
+        if !self.s3_allowlist_buckets.iter().any(|b| b == "*") {
+            return Err(McpError::invalid_params(
+                "S3 allowlist must include '*' to list all buckets",
+                None,
+            ));
+        }
+
+        let client = self.s3_client_for(&args.credentials).await?;
+        let buckets = list_buckets(&client)
+            .await
+            .map_err(|e| McpError::internal_error(format!("S3 list buckets failed: {e}"), None))?;
+
+        let text = format!("S3 buckets: {}", buckets.len());
+        Ok(CallToolResult {
+            content: vec![Content::text(text)],
+            structured_content: Some(json!({
+                "buckets": buckets.iter().map(|b| json!({
+                    "name": b.name,
+                    "createdAt": b.created_at,
+                })).collect::<Vec<_>>(),
+            })),
+            is_error: Some(false),
+            meta: None,
+        })
+    }
+
+    #[cfg(feature = "s3-tools")]
+    #[tool(
         name = "s3_list",
         description = "List S3 objects and common prefixes. Requires allowlisted buckets."
     )]
@@ -2489,7 +2598,7 @@ impl FileSystemServer {
             ));
         }
 
-        let client = self.s3_client().await?;
+        let client = self.s3_client_for(&args.credentials).await?;
         let params = S3ListParams {
             bucket: args.bucket.clone(),
             prefix: args.prefix.clone(),
@@ -2541,7 +2650,7 @@ impl FileSystemServer {
             ));
         }
 
-        let client = self.s3_client().await?;
+        let client = self.s3_client_for(&args.credentials).await?;
         let result = stat_object(&client, &args.bucket, &args.key)
             .await
             .map_err(|e| McpError::internal_error(format!("S3 stat failed: {e}"), None))?;
@@ -2585,7 +2694,7 @@ impl FileSystemServer {
             None
         };
 
-        let client = self.s3_client().await?;
+        let client = self.s3_client_for(&args.credentials).await?;
         let params = S3GetParams {
             bucket: args.bucket.clone(),
             key: args.key.clone(),
@@ -2642,7 +2751,7 @@ impl FileSystemServer {
             None
         };
 
-        let client = self.s3_client().await?;
+        let client = self.s3_client_for(&args.credentials).await?;
         let params = S3PutParams {
             bucket: args.bucket.clone(),
             key: args.key.clone(),
@@ -2677,7 +2786,7 @@ impl FileSystemServer {
             ));
         }
 
-        let client = self.s3_client().await?;
+        let client = self.s3_client_for(&args.credentials).await?;
         let params = S3CopyParams {
             source_bucket: args.source_bucket.clone(),
             source_key: args.source_key.clone(),
@@ -2707,7 +2816,7 @@ impl FileSystemServer {
             ));
         }
 
-        let client = self.s3_client().await?;
+        let client = self.s3_client_for(&args.credentials).await?;
         delete_object(&client, S3DeleteParams { bucket: args.bucket, key: args.key })
             .await
             .map_err(|e| McpError::internal_error(format!("S3 delete failed: {e}"), None))?;
@@ -2730,7 +2839,7 @@ impl FileSystemServer {
                 None,
             ));
         }
-        let client = self.s3_client().await?;
+        let client = self.s3_client_for(&args.credentials).await?;
         delete_objects(&client, &args.bucket, args.keys)
             .await
             .map_err(|e| McpError::internal_error(format!("S3 delete batch failed: {e}"), None))?;
@@ -2752,7 +2861,7 @@ impl FileSystemServer {
                 None,
             ));
         }
-        let client = self.s3_client().await?;
+        let client = self.s3_client_for(&args.credentials).await?;
         let url = presign(&client, S3PresignParams {
             bucket: args.bucket,
             key: args.key,
@@ -2779,7 +2888,6 @@ impl FileSystemServer {
         &self,
         Parameters(args): Parameters<S3GetBatchArgs>,
     ) -> Result<CallToolResult, McpError> {
-        let client = self.s3_client().await?;
         let mut results = Vec::new();
 
         for req in args.requests {
@@ -2792,6 +2900,19 @@ impl FileSystemServer {
                 }));
                 continue;
             }
+
+            let client = match self.s3_client_for(&req.credentials).await {
+                Ok(client) => client,
+                Err(e) => {
+                    results.push(json!({
+                        "bucket": req.bucket,
+                        "key": req.key,
+                        "ok": false,
+                        "error": e.to_string(),
+                    }));
+                    continue;
+                }
+            };
 
             let output_path = if let Some(path) = &req.output_path {
                 match self.resolve(path).await {
@@ -2857,7 +2978,6 @@ impl FileSystemServer {
         &self,
         Parameters(args): Parameters<S3PutBatchArgs>,
     ) -> Result<CallToolResult, McpError> {
-        let client = self.s3_client().await?;
         let mut results = Vec::new();
 
         for req in args.requests {
@@ -2870,6 +2990,19 @@ impl FileSystemServer {
                 }));
                 continue;
             }
+
+            let client = match self.s3_client_for(&req.credentials).await {
+                Ok(client) => client,
+                Err(e) => {
+                    results.push(json!({
+                        "bucket": req.bucket,
+                        "key": req.key,
+                        "ok": false,
+                        "error": e.to_string(),
+                    }));
+                    continue;
+                }
+            };
 
             let path = if let Some(p) = &req.path {
                 match self.resolve(p).await {
@@ -2931,7 +3064,6 @@ impl FileSystemServer {
         &self,
         Parameters(args): Parameters<S3CopyBatchArgs>,
     ) -> Result<CallToolResult, McpError> {
-        let client = self.s3_client().await?;
         let mut results = Vec::new();
 
         for req in args.requests {
@@ -2946,6 +3078,20 @@ impl FileSystemServer {
                 }));
                 continue;
             }
+
+            let client = match self.s3_client_for(&req.credentials).await {
+                Ok(client) => client,
+                Err(e) => {
+                    results.push(json!({
+                        "sourceBucket": req.source_bucket,
+                        "destBucket": req.dest_bucket,
+                        "key": req.source_key,
+                        "ok": false,
+                        "error": e.to_string(),
+                    }));
+                    continue;
+                }
+            };
 
             let params = S3CopyParams {
                 source_bucket: req.source_bucket.clone(),
@@ -4414,11 +4560,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     server.allow_symlink_escape = args.allow_symlink_escape;
     #[cfg(feature = "http-tools")]
     {
-        server.http_allowlist_domains = args.http_allowlist_domains;
+        let mut allowlist = args.http_allowlist_domains;
+        allowlist.extend(parse_allowlist_env("FS_MCP_HTTP_ALLOW_LIST"));
+        server.http_allowlist_domains = allowlist;
     }
     #[cfg(feature = "s3-tools")]
     {
-        server.s3_allowlist_buckets = args.s3_allowlist_buckets;
+        let mut allowlist = args.s3_allowlist_buckets;
+        allowlist.extend(parse_allowlist_env("FS_MCP_S3_ALLOW_LIST"));
+        server.s3_allowlist_buckets = allowlist;
     }
 
     // Run in selected mode
@@ -4438,6 +4588,17 @@ fn internal_err<T: ToString>(message: &'static str) -> impl FnOnce(T) -> McpErro
             Some(json!({ "error": details }))
         )
     }
+}
+
+fn parse_allowlist_env(var_name: &str) -> Vec<String> {
+    let Ok(value) = env::var(var_name) else {
+        return Vec::new();
+    };
+    value
+        .split(|c: char| c == ',' || c == ';' || c.is_whitespace())
+        .filter(|s| !s.is_empty())
+        .map(|s| s.to_string())
+        .collect()
 }
 
 fn service_error(message: &'static str, error: ServiceError) -> McpError {

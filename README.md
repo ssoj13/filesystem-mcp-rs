@@ -25,7 +25,7 @@ Rust port of the [official JavaScript filesystem MCP server](https://github.com/
 - Search/roots: `search_files` (glob + type/size/time filters), `grep_files` (regex + exclude + invert/count modes), `grep_context` (context-aware), `list_allowed_directories`
 - Process: `run_command` (cwd/env/timeout/background), `kill_process`, `list_processes`, `search_processes` - cross-platform
 - Network (feature): `http_request`, `http_request_batch`, `http_download`, `http_download_batch`
-- S3 (feature): `s3_list`, `s3_stat`, `s3_get`, `s3_put`, `s3_delete`, `s3_copy`, `s3_presign`, batch ops
+- S3 (feature): `s3_list_buckets`, `s3_list`, `s3_stat`, `s3_get`, `s3_put`, `s3_delete`, `s3_copy`, `s3_presign`, batch ops
 - Safety: allowlist/roots validation, escape protection, optional `--allow_symlink_escape`
 
 ## Feature Flags
@@ -36,9 +36,12 @@ HTTP/S3 tools are enabled by default. To disable, build with `--no-default-featu
 cargo build
 ```
 
-HTTP/S3 tools require allowlists at runtime:
+HTTP/S3 tools require allowlists at runtime (CLI flags or env vars):
 - `--http-allowlist-domain example.com --http-allowlist-domain "*.example.org"`
 - `--s3-allowlist-bucket my-bucket`
+Alternatively via env vars (comma/semicolon/whitespace separated):
+- `FS_MCP_HTTP_ALLOW_LIST=example.com,*.example.org` (use `*` to allow all)
+- `FS_MCP_S3_ALLOW_LIST=my-bucket;other-bucket` (use `*` to allow all)
 
 ## Advanced Editing Tools
 
@@ -376,6 +379,11 @@ Download files to local paths:
 ```
 
 ## S3 Tools (feature)
+
+### `s3_list_buckets` - List Buckets
+```json
+{}
+```
 
 ### `s3_list` - List Objects
 ```json
