@@ -26,11 +26,12 @@ Rust port of the [official JavaScript filesystem MCP server](https://github.com/
 - Process: `run_command` (cwd/env/timeout/background), `kill_process`, `list_processes`, `search_processes` - cross-platform
 - Network (feature): `http_request`, `http_request_batch`, `http_download`, `http_download_batch`
 - S3 (feature): `s3_list_buckets`, `s3_list`, `s3_stat`, `s3_get`, `s3_put`, `s3_delete`, `s3_copy`, `s3_presign`, batch ops
+- Screenshot (feature): `screenshot_list_monitors`, `screenshot_list_windows`, `screenshot_capture_screen`, `screenshot_capture_window`, `screenshot_capture_region`, `screenshot_copy_to_clipboard`
 - Safety: allowlist/roots validation, escape protection, optional `--allow_symlink_escape`
 
 ## Feature Flags
 
-HTTP/S3 tools are enabled by default. To disable, build with `--no-default-features`.
+HTTP/S3/screenshot tools are enabled by default. To disable, build with `--no-default-features`.
 
 ```bash
 cargo build
@@ -42,6 +43,31 @@ HTTP/S3 tools require allowlists at runtime (CLI flags or env vars):
 Alternatively via env vars (comma/semicolon/whitespace separated):
 - `FS_MCP_HTTP_ALLOW_LIST=example.com,*.example.org` (use `*` to allow all)
 - `FS_MCP_S3_ALLOW_LIST=my-bucket;other-bucket` (use `*` to allow all)
+
+## Screenshot Tools
+
+Tools: `screenshot_list_monitors`, `screenshot_list_windows`, `screenshot_capture_screen`, `screenshot_capture_window`, `screenshot_capture_region`, `screenshot_copy_to_clipboard`
+
+**Examples:**
+```json
+// List monitors
+{"tool": "screenshot_list_monitors", "arguments": {}}
+
+// List windows with title filter
+{"tool": "screenshot_list_windows", "arguments": {"title_filter": "Chrome"}}
+
+// Capture primary monitor to a file
+{"tool": "screenshot_capture_screen", "arguments": {"output": "file", "path": "C:/temp/screen.png"}}
+
+// Capture a window by title to base64
+{"tool": "screenshot_capture_window", "arguments": {"title": "Terminal", "output": "base64"}}
+
+// Capture a region on monitor 0
+{"tool": "screenshot_capture_region", "arguments": {"monitor_id": 0, "x": 100, "y": 100, "width": 800, "height": 600, "output": "file", "path": "C:/temp/region.png"}}
+
+// Copy an existing PNG to clipboard
+{"tool": "screenshot_copy_to_clipboard", "arguments": {"path": "C:/temp/region.png"}}
+```
 
 ## Advanced Editing Tools
 

@@ -23,3 +23,5 @@ pub mod watch;
 pub mod http_tools;
 #[cfg(feature = "s3-tools")]
 pub mod s3_tools;
+#[cfg(feature = "screenshot-tools")]
+pub mod screenshot;

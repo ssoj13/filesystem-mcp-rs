@@ -61,6 +61,9 @@ User Path → resolve_path() → Validated Path
 - `tools/json_reader.rs` - JSON read with JSONPath query
 - `tools/pdf_reader.rs` - PDF text extraction
 
+### Media
+- `tools/screenshot.rs` - Screenshot capture + clipboard output
+
 ### Network
 - `tools/http_tools.rs` - HTTP/HTTPS requests + batch downloads
 - `tools/s3_tools.rs` - AWS S3 list/get/put/delete/copy/presign + batch ops

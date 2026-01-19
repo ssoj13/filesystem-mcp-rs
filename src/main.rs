@@ -60,6 +60,10 @@ use crate::tools::s3_tools::{
     build_s3_client, build_s3_client_with_credentials, copy_object, delete_object, delete_objects, get_object,
     is_bucket_allowed, list_buckets, list_objects, presign, put_object, stat_object,
 };
+#[cfg(feature = "screenshot-tools")]
+use crate::tools::screenshot;
+#[cfg(feature = "screenshot-tools")]
+use image::RgbaImage;
 
 mod core;
 mod tools;
@@ -175,6 +179,7 @@ impl FileSystemServer {
                 - grep_context: Use for context-aware searches (requires nearby terms in a window).\n\
                 - http_request/http_request_batch/http_download: HTTP/HTTPS access when built with http-tools (allowlist required).\n\
                 - s3_list_buckets/s3_list/s3_get/s3_put/s3_delete/s3_copy/s3_presign: S3 access when built with s3-tools (allowlist required).\n\
+                - screenshot_list_monitors/screenshot_list_windows/screenshot_capture_screen/screenshot_capture_window/screenshot_capture_region/screenshot_copy_to_clipboard: Screenshot capture when built with screenshot-tools.\n\
                 - edit_file: ALWAYS use instead of sed/Edit. Returns unified diff, supports dry-run.\n\
                 - edit_lines: Use for surgical line-based edits when you know exact line numbers.\n\
                 - bulk_edits: Use for mass search/replace across multiple files at once.\n\
@@ -253,6 +258,78 @@ impl FileSystemServer {
                 .map_err(|e| McpError::internal_error(format!("S3 config failed: {e}"), None));
         }
         self.s3_client().await
+    }
+
+    #[cfg(feature = "screenshot-tools")]
+    async fn handle_screenshot_output(
+        &self,
+        image: &RgbaImage,
+        output: ScreenshotOutputMode,
+        path: Option<&str>,
+    ) -> Result<CallToolResult, McpError> {
+        match output {
+            ScreenshotOutputMode::File => {
+                let raw_path = path.ok_or_else(|| {
+                    McpError::invalid_params("path is required when output is 'file'", None)
+                })?;
+                let target = self.resolve(raw_path).await?;
+                screenshot::save_png(image, &target)
+                    .map_err(|e| McpError::internal_error(e.to_string(), None))?;
+                let text = format!(
+                    "Saved screenshot to {} ({}x{})",
+                    target.display(),
+                    image.width(),
+                    image.height()
+                );
+                Ok(CallToolResult {
+                    content: vec![Content::text(text)],
+                    structured_content: Some(json!({
+                        "output": "file",
+                        "path": target.display().to_string(),
+                        "width": image.width(),
+                        "height": image.height()
+                    })),
+                    is_error: Some(false),
+                    meta: None,
+                })
+            }
+            ScreenshotOutputMode::Clipboard => {
+                screenshot::copy_image(image)
+                    .map_err(|e| McpError::internal_error(e.to_string(), None))?;
+                let text = format!(
+                    "Copied screenshot to clipboard ({}x{})",
+                    image.width(),
+                    image.height()
+                );
+                Ok(CallToolResult {
+                    content: vec![Content::text(text)],
+                    structured_content: Some(json!({
+                        "output": "clipboard",
+                        "width": image.width(),
+                        "height": image.height()
+                    })),
+                    is_error: Some(false),
+                    meta: None,
+                })
+            }
+            ScreenshotOutputMode::Base64 => {
+                let data = screenshot::to_base64(image)
+                    .map_err(|e| McpError::internal_error(format!("Encode error: {e}"), None))?;
+                let payload = json!({
+                    "format": "png",
+                    "encoding": "base64",
+                    "data": data,
+                    "width": image.width(),
+                    "height": image.height()
+                });
+                Ok(CallToolResult {
+                    content: vec![Content::text(payload.to_string())],
+                    structured_content: Some(payload),
+                    is_error: Some(false),
+                    meta: None,
+                })
+            }
+        }
     }
 
     async fn refresh_roots(
@@ -1302,6 +1379,64 @@ struct SearchProcessesArgs {
     name_pattern: Option<String>,
     /// Regex pattern to match command line (e.g., "--port=8080", "script\\.py")
     cmdline_pattern: Option<String>,
+}
+
+#[cfg(feature = "screenshot-tools")]
+#[derive(Debug, Clone, Default, Deserialize, JsonSchema)]
+#[serde(rename_all = "lowercase")]
+enum ScreenshotOutputMode {
+    #[default]
+    File,
+    Clipboard,
+    Base64,
+}
+
+#[cfg(feature = "screenshot-tools")]
+#[derive(Debug, Deserialize, JsonSchema)]
+struct ListMonitorsArgs {}
+
+#[cfg(feature = "screenshot-tools")]
+#[derive(Debug, Deserialize, JsonSchema)]
+struct ListWindowsArgs {
+    title_filter: Option<String>,
+}
+
+#[cfg(feature = "screenshot-tools")]
+#[derive(Debug, Deserialize, JsonSchema)]
+struct CaptureScreenArgs {
+    monitor_id: Option<u32>,
+    #[serde(default)]
+    output: ScreenshotOutputMode,
+    path: Option<String>,
+}
+
+#[cfg(feature = "screenshot-tools")]
+#[derive(Debug, Deserialize, JsonSchema)]
+struct CaptureWindowArgs {
+    window_id: Option<u32>,
+    title: Option<String>,
+    #[serde(default)]
+    output: ScreenshotOutputMode,
+    path: Option<String>,
+}
+
+#[cfg(feature = "screenshot-tools")]
+#[derive(Debug, Deserialize, JsonSchema)]
+struct CaptureRegionArgs {
+    monitor_id: Option<u32>,
+    x: i32,
+    y: i32,
+    width: u32,
+    height: u32,
+    #[serde(default)]
+    output: ScreenshotOutputMode,
+    path: Option<String>,
+}
+
+#[cfg(feature = "screenshot-tools")]
+#[derive(Debug, Deserialize, JsonSchema)]
+struct CopyToClipboardArgs {
+    path: String,
 }
 
 #[tool_router]
@@ -4468,6 +4603,109 @@ USE CASES: Patch executables, fix binary data, search-replace in non-text files.
                 "processes": results,
                 "count": results.len(),
             })),
+            is_error: Some(false),
+            meta: None,
+        })
+    }
+
+    // === Screenshot Tools ===
+
+    #[cfg(feature = "screenshot-tools")]
+    #[tool(name = "screenshot_list_monitors", description = "List all monitors with IDs and dimensions")]
+    async fn list_monitors(
+        &self,
+        Parameters(_args): Parameters<ListMonitorsArgs>,
+    ) -> Result<CallToolResult, McpError> {
+        let monitors = screenshot::list_monitors()
+            .map_err(|e| McpError::internal_error(e.to_string(), None))?;
+        let payload = json!({ "monitors": monitors });
+        Ok(CallToolResult {
+            content: vec![Content::text(serde_json::to_string_pretty(&payload).unwrap())],
+            structured_content: Some(payload),
+            is_error: Some(false),
+            meta: None,
+        })
+    }
+
+    #[cfg(feature = "screenshot-tools")]
+    #[tool(name = "screenshot_list_windows", description = "List all visible windows. Optional title_filter.")]
+    async fn list_windows(
+        &self,
+        Parameters(args): Parameters<ListWindowsArgs>,
+    ) -> Result<CallToolResult, McpError> {
+        let mut windows = screenshot::list_windows()
+            .map_err(|e| McpError::internal_error(e.to_string(), None))?;
+        if let Some(filter) = &args.title_filter {
+            let lower = filter.to_lowercase();
+            windows.retain(|w| w.title.to_lowercase().contains(&lower));
+        }
+        let payload = json!({ "windows": windows });
+        Ok(CallToolResult {
+            content: vec![Content::text(serde_json::to_string_pretty(&payload).unwrap())],
+            structured_content: Some(payload),
+            is_error: Some(false),
+            meta: None,
+        })
+    }
+
+    #[cfg(feature = "screenshot-tools")]
+    #[tool(name = "screenshot_capture_screen", description = "Capture monitor. Args: monitor_id, output (file/clipboard/base64), path")]
+    async fn capture_screen(
+        &self,
+        Parameters(args): Parameters<CaptureScreenArgs>,
+    ) -> Result<CallToolResult, McpError> {
+        let image = screenshot::capture_monitor(args.monitor_id)
+            .map_err(|e| McpError::internal_error(e.to_string(), None))?;
+        self.handle_screenshot_output(&image, args.output, args.path.as_deref()).await
+    }
+
+    #[cfg(feature = "screenshot-tools")]
+    #[tool(name = "screenshot_capture_window", description = "Capture window by window_id or title")]
+    async fn capture_window(
+        &self,
+        Parameters(args): Parameters<CaptureWindowArgs>,
+    ) -> Result<CallToolResult, McpError> {
+        let image = match (args.window_id, &args.title) {
+            (Some(id), _) => screenshot::capture_window_by_id(id),
+            (None, Some(title)) => screenshot::capture_window_by_title(title),
+            _ => return Err(McpError::invalid_params("window_id or title required", None)),
+        }
+        .map_err(|e| McpError::internal_error(e.to_string(), None))?;
+        self.handle_screenshot_output(&image, args.output, args.path.as_deref()).await
+    }
+
+    #[cfg(feature = "screenshot-tools")]
+    #[tool(name = "screenshot_capture_region", description = "Capture region. Args: x, y, width, height, monitor_id, output, path")]
+    async fn capture_region(
+        &self,
+        Parameters(args): Parameters<CaptureRegionArgs>,
+    ) -> Result<CallToolResult, McpError> {
+        let image = screenshot::capture_region(
+            args.monitor_id,
+            args.x,
+            args.y,
+            args.width,
+            args.height,
+        )
+        .map_err(|e| McpError::internal_error(e.to_string(), None))?;
+        self.handle_screenshot_output(&image, args.output, args.path.as_deref()).await
+    }
+
+    #[cfg(feature = "screenshot-tools")]
+    #[tool(name = "screenshot_copy_to_clipboard", description = "Copy image file to clipboard")]
+    async fn copy_to_clipboard(
+        &self,
+        Parameters(args): Parameters<CopyToClipboardArgs>,
+    ) -> Result<CallToolResult, McpError> {
+        let path = self.resolve(&args.path).await?;
+        screenshot::copy_file(&path)
+            .map_err(|e| McpError::internal_error(e.to_string(), None))?;
+        Ok(CallToolResult {
+            content: vec![Content::text(format!(
+                "Copied to clipboard: {}",
+                path.display()
+            ))],
+            structured_content: Some(json!({ "path": path.display().to_string() })),
             is_error: Some(false),
             meta: None,
         })

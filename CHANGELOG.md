@@ -7,6 +7,7 @@
 - **S3 tools (feature flag)**: `s3_list`, `s3_stat`, `s3_get`, `s3_put`, `s3_delete`, `s3_copy`, `s3_presign`, plus batch ops
 - **Context-aware grep**: `grep_context` for matches that require nearby terms within word/char windows
 - **S3 list buckets**: `s3_list_buckets` tool for listing available buckets (requires `*` allowlist)
+- **Screenshot tools (feature flag)**: `screenshot_list_monitors`, `screenshot_list_windows`, `screenshot_capture_screen`, `screenshot_capture_window`, `screenshot_capture_region`, `screenshot_copy_to_clipboard`
 - **Batch I/O**: multi-request/multi-download/multi-S3 operations for handling many files at once
 - **HTTP allowlist**: `--http-allowlist-domain` (repeatable) to restrict outbound access
 - **S3 allowlist**: `--s3-allowlist-bucket` (repeatable) to restrict buckets
