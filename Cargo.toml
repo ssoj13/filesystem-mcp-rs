@@ -38,7 +38,7 @@ chardetng = "0.1.17"
 encoding_rs = "0.8"
 reqwest = { version = "0.13", features = ["json", "stream"] }
 image = { version = "0.25", default-features = false, features = ["png"], optional = true }
-xcap = { version = "0.5", optional = true }
+xcap = { version = "0.8", optional = true }
 arboard = { version = "3", optional = true }
 
 # Hashing
@@ -63,10 +63,10 @@ notify = "8.2"
 
 # Process management
 sysinfo = "0.37"
-aws-config = { version = "1.6.1", optional = true }
-aws-sdk-s3 = { version = "1.87.0", optional = true }
-aws-credential-types = { version = "1.2.2", optional = true }
-aws-types = { version = "1.3.3", optional = true }
+aws-config = { version = "1.8.12", optional = true }
+aws-sdk-s3 = { version = "1.120.0", optional = true }
+aws-credential-types = { version = "1.2.11", optional = true }
+aws-types = { version = "1.3.11", optional = true }
 
 [dev-dependencies]
 tempfile = "3.24.0"
