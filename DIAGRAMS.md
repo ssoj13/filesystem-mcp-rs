@@ -18,7 +18,7 @@ graph TB
     
     subgraph "File Operations"
         search[search.rs<br/>Glob Search]
-        grep[grep.rs<br/>Content Search]
+        grep[grep.rs<br/>Content Search (include/exclude)]
         binary[binary.rs<br/>Binary R/W]
         line_edit[line_edit.rs<br/>Line Editing]
         bulk_edit[bulk_edit.rs<br/>Bulk Edits]
@@ -35,6 +35,11 @@ graph TB
         archive[archive.rs<br/>ZIP/TAR]
         json_reader[json_reader.rs<br/>JSON + Query]
         pdf_reader[pdf_reader.rs<br/>PDF Extract]
+    end
+
+    subgraph "Network"
+        http_tools[http_tools.rs<br/>HTTP/HTTPS Tools]
+        s3_tools[s3_tools.rs<br/>S3 Tools]
     end
     
     subgraph "Runtime"
@@ -60,6 +65,8 @@ graph TB
     main --> archive
     main --> json_reader
     main --> pdf_reader
+    main --> http_tools
+    main --> s3_tools
     main --> process
     main --> watch
 ```

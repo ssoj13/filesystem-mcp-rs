@@ -1,6 +1,6 @@
 use anyhow::{Result, bail, Context};
 
-use crate::diff::unified_diff;
+use crate::tools::diff::unified_diff;
 
 /// Line-based edit operation
 #[derive(Debug, Clone)]

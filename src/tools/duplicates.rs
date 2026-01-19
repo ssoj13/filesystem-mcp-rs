@@ -3,7 +3,7 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Result, Context};
 
-use crate::hash::{hash_file, HashAlgorithm};
+use crate::tools::hash::{hash_file, HashAlgorithm};
 
 /// A group of duplicate files
 #[derive(Debug, Clone)]

@@ -6,7 +6,7 @@ use globset::{Glob, GlobSet, GlobSetBuilder};
 use tokio::fs::{self, File};
 use tokio::io::{AsyncReadExt, AsyncSeekExt};
 
-use crate::hash::{hash_file_range, HashAlgorithm};
+use crate::tools::hash::{hash_file_range, HashAlgorithm};
 
 /// Single diff region sample
 #[derive(Debug, Clone)]

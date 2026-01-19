@@ -5,8 +5,8 @@ use anyhow::Result;
 use globset::{Glob, GlobSet, GlobSetBuilder};
 use tokio::fs;
 
-use crate::allowed::AllowedDirs;
-use crate::path::resolve_validated_path;
+use crate::core::allowed::AllowedDirs;
+use crate::core::path::resolve_validated_path;
 
 /// File type filter for search
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]

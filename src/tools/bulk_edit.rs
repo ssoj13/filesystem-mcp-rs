@@ -3,10 +3,10 @@ use std::path::PathBuf;
 use anyhow::{Result, Context};
 use tokio::fs;
 
-use crate::allowed::AllowedDirs;
-use crate::edit::{FileEdit, apply_edits};
-use crate::fs_ops::read_text;
-use crate::search::search_paths;
+use crate::core::allowed::AllowedDirs;
+use crate::tools::edit::{FileEdit, apply_edits_with_mode};
+use crate::tools::fs_ops::read_text;
+use crate::tools::search::search_paths;
 
 /// Result of editing a single file
 #[derive(Debug, Clone)]
@@ -28,6 +28,7 @@ pub async fn bulk_edit_files(
     exclude_patterns: &[String],
     edits: &[FileEdit],
     dry_run: bool,
+    fail_on_no_match: bool,
     allowed: &AllowedDirs,
     allow_symlink_escape: bool,
 ) -> Result<Vec<BulkEditResult>> {
@@ -59,7 +60,7 @@ pub async fn bulk_edit_files(
         };
 
         // Apply edits
-        match apply_edits(&content, edits) {
+        match apply_edits_with_mode(&content, edits, fail_on_no_match) {
             Ok((modified, diff)) => {
                 let changed = content != modified;
 
@@ -98,7 +99,7 @@ pub async fn bulk_edit_files(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::allowed::AllowedDirs;
+    use crate::core::allowed::AllowedDirs;
     use tempfile::TempDir;
     use tokio::fs;
 
@@ -129,6 +130,8 @@ mod tests {
             "*.txt",
             &[],
             &edits,
+            false,
+            false,
             false,
             &allowed_dirs,
             false,
@@ -176,6 +179,8 @@ mod tests {
             &[],
             &edits,
             true, // dry_run = true
+            false,
+            false,
             &allowed_dirs,
             false,
         )
@@ -217,6 +222,8 @@ mod tests {
             &["skip.txt".to_string()],
             &edits,
             false,
+            false,
+            false,
             &allowed_dirs,
             false,
         )
@@ -255,6 +262,7 @@ mod tests {
             &[],
             &edits,
             false,
+            false,
             &allowed_dirs,
             false,
         )
@@ -290,6 +298,7 @@ mod tests {
             "*.txt",
             &[],
             &edits,
+            false,
             false,
             &allowed_dirs,
             false,
@@ -333,6 +342,7 @@ mod tests {
             &[],
             &edits,
             false,
+            false,
             &allowed_dirs,
             false,
         )
@@ -373,6 +383,7 @@ mod tests {
             "*.txt",
             &[],
             &edits,
+            false,
             false,
             &allowed_dirs,
             false,
@@ -442,6 +453,7 @@ mod tests {
             "**/*.rs",
             &[],
             &edits,
+            false,
             false,
             &allowed_dirs,
             false,

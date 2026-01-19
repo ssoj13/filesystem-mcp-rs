@@ -8,7 +8,7 @@ use tokio::io::{AsyncReadExt, AsyncSeekExt};
 use tokio::sync::mpsc;
 use tokio::time::timeout;
 
-use crate::fs_ops::decode_bytes;
+use crate::tools::fs_ops::decode_bytes;
 
 /// Result of tail operation
 #[derive(Debug, Clone)]

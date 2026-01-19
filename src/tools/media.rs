@@ -5,7 +5,7 @@ use base64::Engine;
 use tokio::fs::File;
 use tokio::io::AsyncReadExt;
 
-use crate::mime::mime_for_ext;
+use crate::tools::mime::mime_for_ext;
 
 pub async fn read_media_base64(path: &Path) -> Result<(String, String)> {
     let mut file = File::open(path).await?;

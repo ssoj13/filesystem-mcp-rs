@@ -1,7 +1,7 @@
 use anyhow::{Result, bail};
 use regex::Regex;
 
-use crate::diff::unified_diff;
+use crate::tools::diff::unified_diff;
 
 /// Truncate string to max chars safely (Unicode-aware, no panic on multi-byte)
 fn truncate_preview(s: &str, max_chars: usize) -> String {
@@ -25,6 +25,14 @@ pub struct FileEdit {
 }
 
 pub fn apply_edits(content: &str, edits: &[FileEdit]) -> Result<(String, String)> {
+    apply_edits_with_mode(content, edits, true)
+}
+
+pub fn apply_edits_with_mode(
+    content: &str,
+    edits: &[FileEdit],
+    fail_on_no_match: bool,
+) -> Result<(String, String)> {
     let mut modified = normalize_newlines(content);
 
     for edit in edits {
@@ -37,16 +45,18 @@ pub fn apply_edits(content: &str, edits: &[FileEdit]) -> Result<(String, String)
                 .map_err(|e| anyhow::anyhow!("Invalid regex pattern '{}': {}", old, e))?;
 
             if !re.is_match(&modified) {
-                // No match found - error out like literal mode does
-                let preview = truncate_preview(&edit.old_text, 200);
-                bail!(
-                    "Regex pattern not found in file.\n\
-                    \n\
-                    Pattern: {}\n\
-                    \n\
-                    This usually means the pattern doesn't match any content in the file.",
-                    preview
-                );
+                if fail_on_no_match {
+                    let preview = truncate_preview(&edit.old_text, 200);
+                    bail!(
+                        "Regex pattern not found in file.\n\
+                        \n\
+                        Pattern: {}\n\
+                        \n\
+                        This usually means the pattern doesn't match any content in the file.",
+                        preview
+                    );
+                }
+                continue;
             }
 
             if edit.replace_all {
@@ -61,6 +71,9 @@ pub fn apply_edits(content: &str, edits: &[FileEdit]) -> Result<(String, String)
         if edit.replace_all {
             if modified.contains(&old) {
                 modified = modified.replace(&old, &new);
+                continue;
+            }
+            if !fail_on_no_match {
                 continue;
             }
             // Fall through to whitespace-tolerant match
@@ -93,6 +106,10 @@ pub fn apply_edits(content: &str, edits: &[FileEdit]) -> Result<(String, String)
             if matched {
                 continue;
             }
+        }
+
+        if !fail_on_no_match {
+            continue;
         }
 
         // No match found
@@ -167,6 +184,20 @@ mod tests {
 
         let result = apply_edits(content, &edits);
         assert!(result.is_err(), "Literal mode with no match should error");
+    }
+
+    #[test]
+    fn test_relaxed_no_match_is_ok() {
+        let content = "hello world";
+        let edits = vec![FileEdit {
+            old_text: "missing".to_string(),
+            new_text: "replacement".to_string(),
+            is_regex: false,
+            replace_all: false,
+        }];
+
+        let result = apply_edits_with_mode(content, &edits, false).unwrap();
+        assert_eq!(result.0, content);
     }
 
     #[test]

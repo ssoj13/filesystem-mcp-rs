@@ -5,7 +5,7 @@ use serde_json::Value;
 use serde_json_path::JsonPath;
 use tokio::fs;
 
-use crate::fs_ops::decode_bytes;
+use crate::tools::fs_ops::decode_bytes;
 
 /// Result of reading JSON file
 #[derive(Debug, Clone)]

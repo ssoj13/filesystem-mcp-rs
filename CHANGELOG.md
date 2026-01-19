@@ -1,5 +1,25 @@
 # Changelog
 
+## [Unreleased]
+
+### Added
+- **HTTP tools (feature flag)**: `http_request`, `http_request_batch`, `http_download`, `http_download_batch` (supports headers/cookies/query/body)
+- **S3 tools (feature flag)**: `s3_list`, `s3_stat`, `s3_get`, `s3_put`, `s3_delete`, `s3_copy`, `s3_presign`, plus batch ops
+- **Context-aware grep**: `grep_context` for matches that require nearby terms within word/char windows
+- **Batch I/O**: multi-request/multi-download/multi-S3 operations for handling many files at once
+- **HTTP allowlist**: `--http-allowlist-domain` (repeatable) to restrict outbound access
+- **S3 allowlist**: `--s3-allowlist-bucket` (repeatable) to restrict buckets
+- **Project structure**: split into `src/core` and `src/tools` for plugin-style organization
+
+### Enhanced
+- **bulk_edits**: new `failOnNoMatch` flag (default false) to avoid errors when files lack matches
+- **grep_files**: include/exclude patterns in MCP args
+- **run_command**: stream stdout/stderr directly to `stdout_file`/`stderr_file` while running (foreground + background)
+- **bld.cmd**: optional log file argument to redirect build output
+
+### Tests
+- Added relaxed bulk edit test for no-match behavior
+
 ## [0.1.10] - 2026-01-17
 
 ### Added

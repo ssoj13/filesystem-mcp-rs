@@ -37,35 +37,39 @@ User Path → resolve_path() → Validated Path
 ## Module Responsibilities
 
 ### Core Path Handling
-- `allowed.rs` - Thread-safe AllowedDirs storage
-- `path.rs` - Path resolution, validation, symlink checks
+- `core/allowed.rs` - Thread-safe AllowedDirs storage
+- `core/path.rs` - Path resolution, validation, symlink checks
 
 ### File I/O
-- `fs_ops.rs` - read_text_file, head/tail, encoding detection
-- `binary.rs` - Binary read/write/extract/patch operations
-- `edit.rs` - Text replacement (literal & regex)
-- `line_edit.rs` - Line-based editing (insert/replace/delete)
-- `bulk_edit.rs` - Multi-file search/replace
-- `diff.rs` - Unified diff generation
+- `tools/fs_ops.rs` - read_text_file, head/tail, encoding detection
+- `tools/binary.rs` - Binary read/write/extract/patch operations
+- `tools/edit.rs` - Text replacement (literal & regex)
+- `tools/line_edit.rs` - Line-based editing (insert/replace/delete)
+- `tools/bulk_edit.rs` - Multi-file search/replace
+- `tools/diff.rs` - Unified diff generation
 
 ### Search & Analysis
-- `search.rs` - Glob-based file search with filters
-- `grep.rs` - Content search with regex
-- `hash.rs` - File hashing (MD5, SHA1, SHA256, SHA512, XXH64)
-- `compare.rs` - Binary file/directory comparison
-- `stats.rs` - Directory statistics
-- `duplicates.rs` - Duplicate file finder
+- `tools/search.rs` - Glob-based file search with filters
+- `tools/grep.rs` - Content search with regex + include/exclude globs
+- `tools/hash.rs` - File hashing (MD5, SHA1, SHA256, SHA512, XXH64)
+- `tools/compare.rs` - Binary file/directory comparison
+- `tools/stats.rs` - Directory statistics
+- `tools/duplicates.rs` - Duplicate file finder
 
 ### Format Support
-- `archive.rs` - ZIP/TAR/TAR.GZ extract/create
-- `json_reader.rs` - JSON read with JSONPath query
-- `pdf_reader.rs` - PDF text extraction
+- `tools/archive.rs` - ZIP/TAR/TAR.GZ extract/create
+- `tools/json_reader.rs` - JSON read with JSONPath query
+- `tools/pdf_reader.rs` - PDF text extraction
+
+### Network
+- `tools/http_tools.rs` - HTTP/HTTPS requests + batch downloads
+- `tools/s3_tools.rs` - AWS S3 list/get/put/delete/copy/presign + batch ops
 
 ### Runtime
-- `process.rs` - Command execution, process management
-- `watch.rs` - File watching, tail -f functionality
-- `logging.rs` - Tracing setup
-- `format.rs` - JSON Schema draft conversion (2020-12 → Draft-07)
+- `tools/process.rs` - Command execution, process management
+- `tools/watch.rs` - File watching, tail -f functionality
+- `core/logging.rs` - Tracing setup
+- `core/format.rs` - JSON Schema draft conversion (2020-12 → Draft-07)
 
 ## Tool Response Pattern
 

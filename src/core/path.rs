@@ -3,7 +3,7 @@ use std::path::{Component, Path, PathBuf};
 use anyhow::{Context, Result, anyhow, bail};
 use tokio::fs;
 
-use crate::allowed::AllowedDirs;
+use crate::core::allowed::AllowedDirs;
 
 /// Normalize path separators and collapse `.`/`..` where possible.
 fn normalize_path(path: &Path) -> PathBuf {

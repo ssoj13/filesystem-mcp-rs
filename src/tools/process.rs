@@ -168,6 +168,12 @@ pub async fn run_command(
     
     // Background mode: return immediately
     if params.background {
+        let stdout_handle = child.stdout.take();
+        let stderr_handle = child.stderr.take();
+
+        spawn_output_task(stdout_handle, params.stdout_file.clone());
+        spawn_output_task(stderr_handle, params.stderr_file.clone());
+
         if let (Some(manager), Some(pid)) = (manager, pid) {
             manager.register(
                 pid,
@@ -184,7 +190,7 @@ pub async fn run_command(
             });
         }
         
-        return Ok(RunResult {
+    return Ok(RunResult {
             exit_code: None,
             stdout: String::new(),
             stderr: String::new(),
@@ -197,21 +203,54 @@ pub async fn run_command(
     }
     
     // Foreground mode: wait for completion with optional timeout
-    let result = wait_for_process(child, &params, start).await;
-    
-    // Write output to files if requested
-    if let Ok(ref res) = result {
-        if let Some(ref stdout_file) = params.stdout_file {
-            tokio::fs::write(stdout_file, &res.stdout).await
-                .with_context(|| format!("Failed to write stdout to: {}", stdout_file))?;
+    wait_for_process(
+        child,
+        &params,
+        start,
+        params.stdout_file.clone(),
+        params.stderr_file.clone(),
+    )
+    .await
+}
+
+async fn open_output_file(path: Option<String>) -> Option<tokio::fs::File> {
+    let Some(path) = path else {
+        return None;
+    };
+
+    tokio::fs::OpenOptions::new()
+        .create(true)
+        .write(true)
+        .truncate(true)
+        .open(path)
+        .await
+        .ok()
+}
+
+fn spawn_output_task<R>(handle: Option<R>, output_file: Option<String>)
+where
+    R: tokio::io::AsyncRead + Unpin + Send + 'static,
+{
+    tokio::spawn(async move {
+        let Some(handle) = handle else {
+            return;
+        };
+
+        let reader = BufReader::new(handle);
+        let mut line_reader = reader.lines();
+
+        let mut writer = open_output_file(output_file).await;
+        while let Ok(Some(line)) = line_reader.next_line().await {
+            if let Some(ref mut file) = writer {
+                if file.write_all(line.as_bytes()).await.is_err() {
+                    break;
+                }
+                if file.write_all(b"\n").await.is_err() {
+                    break;
+                }
+            }
         }
-        if let Some(ref stderr_file) = params.stderr_file {
-            tokio::fs::write(stderr_file, &res.stderr).await
-                .with_context(|| format!("Failed to write stderr to: {}", stderr_file))?;
-        }
-    }
-    
-    result
+    });
 }
 
 /// Wait for process with timeout/watchdog handling
@@ -219,6 +258,8 @@ async fn wait_for_process(
     mut child: Child,
     params: &RunParams,
     start: Instant,
+    stdout_file: Option<String>,
+    stderr_file: Option<String>,
 ) -> Result<RunResult> {
     let pid = child.id();
     
@@ -237,9 +278,14 @@ async fn wait_for_process(
     let stdout_task = tokio::spawn(async move {
         let mut lines = Vec::new();
         if let Some(stdout) = stdout_handle {
+            let mut writer = open_output_file(stdout_file).await;
             let reader = BufReader::new(stdout);
             let mut line_reader = reader.lines();
             while let Ok(Some(line)) = line_reader.next_line().await {
+                if let Some(ref mut file) = writer {
+                    let _ = file.write_all(line.as_bytes()).await;
+                    let _ = file.write_all(b"\n").await;
+                }
                 lines.push(line);
             }
         }
@@ -249,9 +295,14 @@ async fn wait_for_process(
     let stderr_task = tokio::spawn(async move {
         let mut lines = Vec::new();
         if let Some(stderr) = stderr_handle {
+            let mut writer = open_output_file(stderr_file).await;
             let reader = BufReader::new(stderr);
             let mut line_reader = reader.lines();
             while let Ok(Some(line)) = line_reader.next_line().await {
+                if let Some(ref mut file) = writer {
+                    let _ = file.write_all(line.as_bytes()).await;
+                    let _ = file.write_all(b"\n").await;
+                }
                 lines.push(line);
             }
         }

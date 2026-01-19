@@ -8,7 +8,7 @@ use tokio::fs::File;
 use tokio::io::{AsyncReadExt, AsyncSeekExt};
 use xxhash_rust::xxh64::Xxh64;
 
-use crate::{murmur3, spooky};
+use crate::tools::{murmur3, spooky};
 
 /// Supported hash algorithms
 #[derive(Debug, Clone, Copy, Default)]

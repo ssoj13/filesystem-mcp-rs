@@ -5,9 +5,9 @@ use globset::{Glob, GlobSet, GlobSetBuilder};
 use regex::{Regex, RegexBuilder};
 use tokio::fs;
 
-use crate::allowed::AllowedDirs;
-use crate::fs_ops::read_text;
-use crate::path::resolve_validated_path;
+use crate::core::allowed::AllowedDirs;
+use crate::tools::fs_ops::read_text;
+use crate::core::path::resolve_validated_path;
 
 /// Result of a grep match in a file
 #[derive(Debug, Clone)]
@@ -36,6 +36,21 @@ pub enum GrepOutputMode {
     FilesWithMatches,
     /// Return files WITHOUT matches (like grep -L)
     FilesWithoutMatch,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum NearbyDirection {
+    Before,
+    After,
+    #[default]
+    Both,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum NearbyMatchMode {
+    #[default]
+    Any,
+    All,
 }
 
 /// Count result per file
@@ -67,6 +82,41 @@ pub struct GrepParams {
     pub invert_match: bool,
     /// Output mode
     pub output_mode: GrepOutputMode,
+}
+
+pub struct GrepContextParams {
+    /// Root directory to search
+    pub root: String,
+    /// Regex pattern to search for
+    pub pattern: String,
+    /// Glob pattern for files to include (e.g., "*.rs", "**/*.txt")
+    pub file_pattern: Option<String>,
+    /// Glob patterns to exclude (e.g., "target/**", "**/*.min.js")
+    pub exclude_patterns: Vec<String>,
+    /// Case-insensitive search
+    pub case_insensitive: bool,
+    /// Number of context lines before match
+    pub context_before: usize,
+    /// Number of context lines after match
+    pub context_after: usize,
+    /// Maximum number of matches to return (0 = unlimited)
+    pub max_matches: usize,
+    /// Output mode
+    pub output_mode: GrepOutputMode,
+    /// Nearby patterns that must appear within the window
+    pub nearby_patterns: Vec<String>,
+    /// Treat nearby patterns as regex (false = literal)
+    pub nearby_is_regex: bool,
+    /// Case-insensitive matching for nearby patterns
+    pub nearby_case_insensitive: bool,
+    /// Direction to search for nearby patterns
+    pub nearby_direction: NearbyDirection,
+    /// Window size in words (optional)
+    pub nearby_window_words: Option<usize>,
+    /// Window size in characters (optional)
+    pub nearby_window_chars: Option<usize>,
+    /// How to match multiple nearby patterns
+    pub nearby_match_mode: NearbyMatchMode,
 }
 
 /// Enhanced grep result supporting different output modes
@@ -246,6 +296,177 @@ pub async fn grep_files(
     Ok(result_for_mode(&params.output_mode, matches, counts, files))
 }
 
+pub async fn grep_context_files(
+    params: GrepContextParams,
+    allowed: &AllowedDirs,
+    allow_symlink_escape: bool,
+) -> Result<GrepResult> {
+    let root_path = resolve_validated_path(&params.root, allowed, allow_symlink_escape)
+        .await
+        .context("Invalid root path")?;
+
+    let regex = RegexBuilder::new(&params.pattern)
+        .case_insensitive(params.case_insensitive)
+        .build()
+        .context("Invalid regex pattern")?;
+
+    let nearby_regexes = build_nearby_regexes(
+        &params.nearby_patterns,
+        params.nearby_is_regex,
+        params.nearby_case_insensitive,
+    )?;
+
+    let file_matcher = if let Some(pattern) = &params.file_pattern {
+        Some(build_glob(pattern)?)
+    } else {
+        None
+    };
+    let exclude_matcher = if params.exclude_patterns.is_empty() {
+        None
+    } else {
+        Some(build_glob_set(&params.exclude_patterns)?)
+    };
+
+    let mut matches = Vec::new();
+    let mut counts = Vec::new();
+    let mut files = Vec::new();
+    let mut total_matches = 0;
+
+    let metadata = fs::metadata(&root_path).await?;
+    if metadata.is_file() {
+        if let Some(matcher) = &exclude_matcher {
+            let filename = root_path.file_name().unwrap_or_default().to_string_lossy();
+            if matcher.is_match(filename.as_ref()) {
+                return Ok(result_for_mode(&params.output_mode, matches, counts, files));
+            }
+        }
+        if let Some(matcher) = &file_matcher {
+            let filename = root_path.file_name().unwrap_or_default().to_string_lossy();
+            if !matcher.is_match(filename.as_ref()) {
+                return Ok(result_for_mode(&params.output_mode, matches, counts, files));
+            }
+        }
+        if let Ok(file_matches) = search_file_with_context(
+            &root_path,
+            &regex,
+            &nearby_regexes,
+            params.context_before,
+            params.context_after,
+            params.max_matches,
+            params.nearby_direction,
+            params.nearby_window_words,
+            params.nearby_window_chars,
+            params.nearby_match_mode,
+        )
+        .await
+        {
+            handle_file_result(
+                &root_path,
+                file_matches,
+                &params.output_mode,
+                &mut matches,
+                &mut counts,
+                &mut files,
+            );
+        }
+        return Ok(result_for_mode(&params.output_mode, matches, counts, files));
+    }
+
+    let mut stack = vec![root_path.clone()];
+    while let Some(current) = stack.pop() {
+        if params.max_matches > 0 && total_matches >= params.max_matches
+           && params.output_mode == GrepOutputMode::Content {
+            break;
+        }
+
+        let mut dir = match fs::read_dir(&current).await {
+            Ok(d) => d,
+            Err(_) => continue,
+        };
+
+        while let Some(entry) = dir.next_entry().await? {
+            if params.max_matches > 0 && total_matches >= params.max_matches
+               && params.output_mode == GrepOutputMode::Content {
+                break;
+            }
+
+            let path = entry.path();
+
+            if resolve_validated_path(
+                path.to_string_lossy().as_ref(),
+                allowed,
+                allow_symlink_escape,
+            )
+            .await
+            .is_err()
+            {
+                continue;
+            }
+
+            let file_type = match entry.file_type().await {
+                Ok(ft) => ft,
+                Err(_) => continue,
+            };
+
+            if let Some(matcher) = &exclude_matcher {
+                let rel = path.strip_prefix(&root_path).unwrap_or(&path);
+                if matcher.is_match(rel.to_string_lossy().as_ref()) {
+                    continue;
+                }
+            }
+
+            if file_type.is_dir() {
+                stack.push(path);
+            } else if file_type.is_file() {
+                if let Some(matcher) = &file_matcher {
+                    let rel = path.strip_prefix(&root_path).unwrap_or(&path);
+                    if !matcher.is_match(rel.to_string_lossy().as_ref()) {
+                        continue;
+                    }
+                }
+
+                let remaining = if params.output_mode == GrepOutputMode::Content {
+                    params.max_matches.saturating_sub(total_matches)
+                } else {
+                    0
+                };
+
+                if remaining == 0 && params.max_matches > 0
+                   && params.output_mode == GrepOutputMode::Content {
+                    break;
+                }
+
+                if let Ok(file_matches) = search_file_with_context(
+                    &path,
+                    &regex,
+                    &nearby_regexes,
+                    params.context_before,
+                    params.context_after,
+                    remaining,
+                    params.nearby_direction,
+                    params.nearby_window_words,
+                    params.nearby_window_chars,
+                    params.nearby_match_mode,
+                )
+                .await
+                {
+                    total_matches += file_matches.len();
+                    handle_file_result(
+                        &path,
+                        file_matches,
+                        &params.output_mode,
+                        &mut matches,
+                        &mut counts,
+                        &mut files,
+                    );
+                }
+            }
+        }
+    }
+
+    Ok(result_for_mode(&params.output_mode, matches, counts, files))
+}
+
 /// Handle search results based on output mode
 fn handle_file_result(
     path: &Path,
@@ -353,6 +574,296 @@ async fn search_file(
     }
 
     Ok(matches)
+}
+
+async fn search_file_with_context(
+    path: &Path,
+    regex: &Regex,
+    nearby_regexes: &[Regex],
+    context_before: usize,
+    context_after: usize,
+    max_matches: usize,
+    nearby_direction: NearbyDirection,
+    nearby_window_words: Option<usize>,
+    nearby_window_chars: Option<usize>,
+    nearby_match_mode: NearbyMatchMode,
+) -> Result<Vec<GrepMatch>> {
+    let content = match read_text(path).await {
+        Ok(c) => c,
+        Err(_) => return Ok(Vec::new()),
+    };
+
+    let lines: Vec<&str> = content.lines().collect();
+    let line_starts = build_line_starts(&content);
+    let word_spans = build_word_spans(&content);
+    let mut matches = Vec::new();
+
+    for match_result in regex.find_iter(&content) {
+        if max_matches > 0 && matches.len() >= max_matches {
+            break;
+        }
+
+        if !nearby_patterns_match(
+            &content,
+            match_result.start(),
+            match_result.end(),
+            nearby_regexes,
+            &word_spans,
+            nearby_direction,
+            nearby_window_words,
+            nearby_window_chars,
+            nearby_match_mode,
+        ) {
+            continue;
+        }
+
+        let line_index = line_index_for_offset(&line_starts, match_result.start());
+        if line_index >= lines.len() {
+            continue;
+        }
+
+        let before_start = line_index.saturating_sub(context_before);
+        let after_end = (line_index + 1 + context_after).min(lines.len());
+
+        let before_context = if context_before > 0 {
+            lines[before_start..line_index].iter().map(|s| s.to_string()).collect()
+        } else {
+            Vec::new()
+        };
+
+        let after_context = if context_after > 0 {
+            lines[(line_index + 1)..after_end].iter().map(|s| s.to_string()).collect()
+        } else {
+            Vec::new()
+        };
+
+        matches.push(GrepMatch {
+            path: path.to_path_buf(),
+            line_number: line_index + 1,
+            line: lines[line_index].to_string(),
+            before_context,
+            after_context,
+        });
+    }
+
+    Ok(matches)
+}
+
+fn build_nearby_regexes(
+    patterns: &[String],
+    is_regex: bool,
+    case_insensitive: bool,
+) -> Result<Vec<Regex>> {
+    let mut compiled = Vec::new();
+    for pattern in patterns {
+        let pat = if is_regex {
+            pattern.clone()
+        } else {
+            regex::escape(pattern)
+        };
+        let re = RegexBuilder::new(&pat)
+            .case_insensitive(case_insensitive)
+            .build()
+            .context("Invalid nearby pattern regex")?;
+        compiled.push(re);
+    }
+    Ok(compiled)
+}
+
+fn build_line_starts(content: &str) -> Vec<usize> {
+    let mut starts = vec![0];
+    for (idx, ch) in content.char_indices() {
+        if ch == '\n' {
+            starts.push(idx + 1);
+        }
+    }
+    starts
+}
+
+fn line_index_for_offset(starts: &[usize], offset: usize) -> usize {
+    let mut low = 0;
+    let mut high = starts.len();
+    while low < high {
+        let mid = (low + high) / 2;
+        if starts[mid] <= offset {
+            low = mid + 1;
+        } else {
+            high = mid;
+        }
+    }
+    low.saturating_sub(1)
+}
+
+fn build_word_spans(content: &str) -> Vec<(usize, usize)> {
+    let mut spans = Vec::new();
+    let word_re = Regex::new(r"\b\w+\b").unwrap();
+    for m in word_re.find_iter(content) {
+        spans.push((m.start(), m.end()));
+    }
+    spans
+}
+
+fn nearby_patterns_match(
+    content: &str,
+    match_start: usize,
+    match_end: usize,
+    nearby_regexes: &[Regex],
+    word_spans: &[(usize, usize)],
+    direction: NearbyDirection,
+    window_words: Option<usize>,
+    window_chars: Option<usize>,
+    match_mode: NearbyMatchMode,
+) -> bool {
+    if nearby_regexes.is_empty() {
+        return false;
+    }
+
+    let windows = build_windows(
+        content,
+        match_start,
+        match_end,
+        word_spans,
+        direction,
+        window_words,
+        window_chars,
+    );
+    if windows.is_empty() {
+        return false;
+    }
+
+    let mut results = Vec::with_capacity(nearby_regexes.len());
+    for re in nearby_regexes {
+        let found = windows.iter().any(|w| re.is_match(w));
+        results.push(found);
+    }
+
+    match match_mode {
+        NearbyMatchMode::Any => results.into_iter().any(|v| v),
+        NearbyMatchMode::All => results.into_iter().all(|v| v),
+    }
+}
+
+fn build_windows<'a>(
+    content: &'a str,
+    match_start: usize,
+    match_end: usize,
+    word_spans: &[(usize, usize)],
+    direction: NearbyDirection,
+    window_words: Option<usize>,
+    window_chars: Option<usize>,
+) -> Vec<&'a str> {
+    let mut windows = Vec::new();
+
+    if let Some(chars) = window_chars.filter(|c| *c > 0) {
+        if let Some(window) = char_window(content, match_start, match_end, direction, chars) {
+            windows.extend(window);
+        }
+    }
+
+    if let Some(words) = window_words.filter(|w| *w > 0) {
+        if let Some(window) = word_window(content, match_start, word_spans, direction, words) {
+            windows.extend(window);
+        }
+    }
+
+    windows
+}
+
+fn char_window<'a>(
+    content: &'a str,
+    match_start: usize,
+    match_end: usize,
+    direction: NearbyDirection,
+    window_chars: usize,
+) -> Option<Vec<&'a str>> {
+    let total_chars = content.chars().count();
+    let start_chars = content[..match_start].chars().count();
+    let end_chars = content[..match_end].chars().count();
+
+    let mut windows = Vec::new();
+
+    if matches!(direction, NearbyDirection::Before | NearbyDirection::Both) && start_chars > 0 {
+        let before_start = start_chars.saturating_sub(window_chars);
+        let start_byte = char_index_to_byte(content, before_start);
+        let end_byte = char_index_to_byte(content, start_chars);
+        if start_byte < end_byte {
+            windows.push(&content[start_byte..end_byte]);
+        }
+    }
+
+    if matches!(direction, NearbyDirection::After | NearbyDirection::Both) && end_chars < total_chars {
+        let after_end = (end_chars + window_chars).min(total_chars);
+        let start_byte = char_index_to_byte(content, end_chars);
+        let end_byte = char_index_to_byte(content, after_end);
+        if start_byte < end_byte {
+            windows.push(&content[start_byte..end_byte]);
+        }
+    }
+
+    if windows.is_empty() { None } else { Some(windows) }
+}
+
+fn word_window<'a>(
+    content: &'a str,
+    match_start: usize,
+    word_spans: &[(usize, usize)],
+    direction: NearbyDirection,
+    window_words: usize,
+) -> Option<Vec<&'a str>> {
+    if word_spans.is_empty() {
+        return None;
+    }
+
+    let mut match_index = None;
+    for (idx, (start, end)) in word_spans.iter().enumerate() {
+        if *start <= match_start && match_start < *end {
+            match_index = Some(idx);
+            break;
+        }
+    }
+    if match_index.is_none() {
+        for (idx, (start, _)) in word_spans.iter().enumerate() {
+            if *start > match_start {
+                match_index = Some(idx);
+                break;
+            }
+        }
+    }
+    let Some(idx) = match_index else {
+        return None;
+    };
+
+    let mut windows = Vec::new();
+
+    if matches!(direction, NearbyDirection::Before | NearbyDirection::Both) && idx > 0 {
+        let start_idx = idx.saturating_sub(window_words);
+        let end_idx = idx.saturating_sub(1);
+        let start_byte = word_spans[start_idx].0;
+        let end_byte = word_spans[end_idx].1;
+        if start_byte < end_byte {
+            windows.push(&content[start_byte..end_byte]);
+        }
+    }
+
+    if matches!(direction, NearbyDirection::After | NearbyDirection::Both) && idx + 1 < word_spans.len() {
+        let start_idx = (idx + 1).min(word_spans.len() - 1);
+        let end_idx = (idx + window_words).min(word_spans.len() - 1);
+        let start_byte = word_spans[start_idx].0;
+        let end_byte = word_spans[end_idx].1;
+        if start_byte < end_byte {
+            windows.push(&content[start_byte..end_byte]);
+        }
+    }
+
+    if windows.is_empty() { None } else { Some(windows) }
+}
+
+fn char_index_to_byte(content: &str, char_index: usize) -> usize {
+    content
+        .char_indices()
+        .nth(char_index)
+        .map(|(idx, _)| idx)
+        .unwrap_or_else(|| content.len())
 }
 
 fn build_glob(pattern: &str) -> Result<GlobSet> {

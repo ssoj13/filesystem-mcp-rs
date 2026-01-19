@@ -22,9 +22,23 @@ Rust port of the [official JavaScript filesystem MCP server](https://github.com/
 - Watch: `tail_file` (follow mode), `watch_file` (change events)
 - Stats: `file_stats` (size/count by extension), `find_duplicates`
 - Introspection: `list_directory`, `list_directory_with_sizes`, `get_file_info`, `directory_tree` (depth/size/hash)
-- Search/roots: `search_files` (glob + type/size/time filters), `grep_files` (regex + exclude + invert/count modes), `list_allowed_directories`
+- Search/roots: `search_files` (glob + type/size/time filters), `grep_files` (regex + exclude + invert/count modes), `grep_context` (context-aware), `list_allowed_directories`
 - Process: `run_command` (cwd/env/timeout/background), `kill_process`, `list_processes`, `search_processes` - cross-platform
+- Network (feature): `http_request`, `http_request_batch`, `http_download`, `http_download_batch`
+- S3 (feature): `s3_list`, `s3_stat`, `s3_get`, `s3_put`, `s3_delete`, `s3_copy`, `s3_presign`, batch ops
 - Safety: allowlist/roots validation, escape protection, optional `--allow_symlink_escape`
+
+## Feature Flags
+
+HTTP/S3 tools are enabled by default. To disable, build with `--no-default-features`.
+
+```bash
+cargo build
+```
+
+HTTP/S3 tools require allowlists at runtime:
+- `--http-allowlist-domain example.com --http-allowlist-domain "*.example.org"`
+- `--s3-allowlist-bucket my-bucket`
 
 ## Advanced Editing Tools
 
@@ -44,6 +58,7 @@ Apply the same edits to multiple files at once. More efficient than editing file
 - **Error handling**: Continues on failure, reports errors per-file
 - **Use cases**: Renaming functions/variables across codebase, updating imports, fixing typos everywhere, refactoring patterns
 - **Features**: Returns summary with diffs, dry-run mode for preview
+- **failOnNoMatch**: If true, files without matches return errors (default false)
 
 **Examples:**
 ```json
@@ -66,6 +81,35 @@ Search for text/regex patterns **inside** file contents (not filenames):
 - **File filtering**: Optional glob include/exclude patterns to limit scope
 - **Returns**: Matching lines with file paths and line numbers
 - **Use cases**: Finding code patterns, locating function definitions, searching across codebase
+
+**Example:**
+```json
+{
+  "path": ".",
+  "pattern": "TODO|FIXME",
+  "filePattern": "**/*.rs",
+  "excludePatterns": ["target/**", "**/*.generated.rs"]
+}
+```
+
+### `grep_context` - Context-Aware Search
+Find a pattern only when specific terms appear nearby:
+- **Nearby terms**: `nearbyPatterns` list (literal by default, regex if `nearbyIsRegex` true)
+- **Window**: `nearbyWindowWords` and/or `nearbyWindowChars`
+- **Direction**: `nearbyDirection` = before/after/both
+- **Match mode**: `nearbyMatchMode` = any/all
+
+**Example:**
+```json
+{
+  "path": ".",
+  "pattern": "error",
+  "nearbyPatterns": ["timeout", "retry"],
+  "nearbyWindowWords": 6,
+  "nearbyDirection": "before",
+  "filePattern": "**/*.log"
+}
+```
 
 ### `read_text_file` - Pagination for Large Files
 Read files with flexible pagination options for handling large files:
@@ -251,6 +295,7 @@ Run commands with full control over execution environment. Cross-platform (Windo
   - Read stdin from file
   - Tail output (only return last N lines)
   - Background execution with PID tracking
+  - Background output can be streamed to stdout_file/stderr_file (stdout/stderr fields stay empty)
 - **Use cases**: Run builds, execute scripts, start servers, automate tasks
 
 **Examples:**
@@ -292,6 +337,72 @@ Search for running processes by name or command line regex. Cross-platform via s
   - Find Chrome: `{name_pattern: "chrome"}`
   - Find by port: `{cmdline_pattern: "--port=3000"}`
   - Find Python scripts: `{name_pattern: "python", cmdline_pattern: "script\\.py"}`
+
+## HTTP Tools (feature)
+
+### `http_request` - General HTTP/HTTPS
+Send requests with headers, cookies, query params, and body:
+
+```json
+{
+  "method": "POST",
+  "url": "https://api.example.com/v1/items",
+  "headers": { "Authorization": "Bearer TOKEN", "Content-Type": "application/json" },
+  "cookies": { "session": "abc123" },
+  "query": { "page": "1" },
+  "body": "{\"name\":\"demo\"}",
+  "accept": "json",
+  "timeoutMs": 20000
+}
+```
+
+### `http_request_batch`
+Run multiple requests in one call:
+
+```json
+{
+  "requests": [
+    { "id": "a", "method": "GET", "url": "https://example.com/a" },
+    { "id": "b", "method": "GET", "url": "https://example.com/b" }
+  ]
+}
+```
+
+### `http_download` / `http_download_batch`
+Download files to local paths:
+
+```json
+{ "url": "https://example.com/file.zip", "path": "downloads/file.zip" }
+```
+
+## S3 Tools (feature)
+
+### `s3_list` - List Objects
+```json
+{ "bucket": "my-bucket", "prefix": "reports/", "maxKeys": 100 }
+```
+
+### `s3_get` / `s3_put`
+```json
+{ "bucket": "my-bucket", "key": "reports/2025.csv", "outputPath": "reports/2025.csv" }
+```
+
+```json
+{ "bucket": "my-bucket", "key": "uploads/log.txt", "path": "logs/log.txt", "contentType": "text/plain" }
+```
+
+### `s3_delete` / `s3_copy` / `s3_presign`
+```json
+{ "bucket": "my-bucket", "key": "old/file.txt" }
+```
+
+```json
+{ "sourceBucket": "my-bucket", "sourceKey": "a.txt", "destBucket": "my-bucket", "destKey": "b.txt" }
+```
+
+```json
+{ "bucket": "my-bucket", "key": "uploads/file.bin", "method": "GET", "expiresInSeconds": 600 }
+```
 
 ## Quick start
 ```bash
@@ -415,26 +526,31 @@ Tests:
 ### Project Structure
 ```
 src/
-├── main.rs         - Entry point, CLI args, transport modes, 42 MCP tools
-├── logging.rs      - Transport-aware logging (stdio/stream)
-├── allowed.rs      - Directory allowlist/validation
-├── path.rs         - Path resolution, escape protection
-├── fs_ops.rs       - File read/head/tail
-├── edit.rs         - Text-based edits + unified diff
-├── line_edit.rs    - Line-based surgical edits
-├── bulk_edit.rs    - Mass search/replace
-├── search.rs       - Glob search with excludes + type/size/time filters
-├── grep.rs         - Regex content search + invert/count modes
-├── binary.rs       - Binary file operations (read/write/extract/patch)
-├── hash.rs         - File hashing (MD5/SHA1/SHA256/SHA512/XXH64)
-├── compare.rs      - File and directory comparison
-├── watch.rs        - Tail file and watch for changes
-├── json_reader.rs  - JSON reading with JSONPath queries
-├── pdf_reader.rs   - PDF text extraction
-├── archive.rs      - ZIP/TAR/TAR.GZ archive handling
-├── stats.rs        - File/directory statistics
-├── duplicates.rs   - Duplicate file detection
-└── process.rs      - Process execution and management
+├── main.rs         - Entry point, CLI args, transport modes, MCP tools
+├── core/
+│   ├── allowed.rs  - Directory allowlist/validation
+│   ├── logging.rs  - Transport-aware logging (stdio/stream)
+│   ├── path.rs     - Path resolution, escape protection
+│   └── format.rs   - Schema utilities
+├── tools/
+│   ├── fs_ops.rs      - File read/head/tail
+│   ├── edit.rs        - Text-based edits + unified diff
+│   ├── line_edit.rs   - Line-based surgical edits
+│   ├── bulk_edit.rs   - Mass search/replace
+│   ├── search.rs      - Glob search with excludes + type/size/time filters
+│   ├── grep.rs        - Regex content search + invert/count modes
+│   ├── binary.rs      - Binary file operations (read/write/extract/patch)
+│   ├── hash.rs        - File hashing (MD5/SHA1/SHA256/SHA512/XXH64)
+│   ├── compare.rs     - File and directory comparison
+│   ├── watch.rs       - Tail file and watch for changes
+│   ├── json_reader.rs - JSON reading with JSONPath queries
+│   ├── pdf_reader.rs  - PDF text extraction
+│   ├── archive.rs     - ZIP/TAR/TAR.GZ archive handling
+│   ├── http_tools.rs  - HTTP/HTTPS requests + batch
+│   ├── s3_tools.rs    - AWS S3 operations + batch
+│   ├── stats.rs       - File/directory statistics
+│   ├── duplicates.rs  - Duplicate file detection
+│   └── process.rs     - Process execution and management
 
 tests/
 ├── integration.rs     - MCP tool integration tests
@@ -611,23 +727,25 @@ Note: Use forward slashes (`C:/path`) or double backslashes (`C:\\path`) in TOML
 - Tools always validate paths; no raw "operate on the link itself" mode yet. If you need non-follow (operate on the link inode), we can add an opt-in flag per tool.
 
 ## Structure
-- `src/main.rs` — MCP server + 42 tools
-- `src/path.rs` — path validation/escape protection
-- `src/fs_ops.rs` — read/head/tail
-- `src/edit.rs`, `src/diff.rs` — text-based edits + unified diff
-- `src/line_edit.rs` — line-based surgical edits
-- `src/bulk_edit.rs` — mass search/replace across files
-- `src/search.rs` — glob search with type/size/time filters
-- `src/grep.rs` — regex content search with invert/count modes
-- `src/binary.rs` — binary file operations (read/write/extract/patch)
-- `src/hash.rs` — file hashing (MD5/SHA1/SHA256/SHA512/XXH64)
-- `src/compare.rs` — file and directory comparison
-- `src/watch.rs` — tail file and watch for changes
-- `src/json_reader.rs` — JSON reading with JSONPath queries
-- `src/pdf_reader.rs` — PDF text extraction
-- `src/archive.rs` — ZIP/TAR/TAR.GZ archive handling
-- `src/stats.rs` — file/directory statistics
-- `src/duplicates.rs` — duplicate file detection
+- `src/main.rs` — MCP server + tools
+- `src/core/path.rs` — path validation/escape protection
+- `src/tools/fs_ops.rs` — read/head/tail
+- `src/tools/edit.rs`, `src/tools/diff.rs` — text-based edits + unified diff
+- `src/tools/line_edit.rs` — line-based surgical edits
+- `src/tools/bulk_edit.rs` — mass search/replace across files
+- `src/tools/search.rs` — glob search with type/size/time filters
+- `src/tools/grep.rs` — regex content search with invert/count modes
+- `src/tools/binary.rs` — binary file operations (read/write/extract/patch)
+- `src/tools/hash.rs` — file hashing (MD5/SHA1/SHA256/SHA512/XXH64)
+- `src/tools/compare.rs` — file and directory comparison
+- `src/tools/watch.rs` — tail file and watch for changes
+- `src/tools/json_reader.rs` — JSON reading with JSONPath queries
+- `src/tools/pdf_reader.rs` — PDF text extraction
+- `src/tools/archive.rs` — ZIP/TAR/TAR.GZ archive handling
+- `src/tools/http_tools.rs` — HTTP/HTTPS tools (feature)
+- `src/tools/s3_tools.rs` — S3 tools (feature)
+- `src/tools/stats.rs` — file/directory statistics
+- `src/tools/duplicates.rs` — duplicate file detection
 - `tests/integration.rs` — per-tool integration coverage
 
 Open to extensions (non-follow symlink mode, extra tools).

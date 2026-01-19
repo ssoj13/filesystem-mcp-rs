@@ -36,6 +36,7 @@ schemars = { version = "1.2.0", features = ["derive"] }
 regex = "1.12.2"
 chardetng = "0.1.17"
 encoding_rs = "0.8"
+reqwest = { version = "0.13", features = ["json", "stream"] }
 
 # Hashing
 sha1 = "0.10"
@@ -59,8 +60,15 @@ notify = "8.2"
 
 # Process management
 sysinfo = "0.37"
+aws-config = { version = "1.6.1", optional = true }
+aws-sdk-s3 = { version = "1.87.0", optional = true }
+aws-credential-types = { version = "1.2.2", optional = true }
 
 [dev-dependencies]
 tempfile = "3.24.0"
 uuid = { version = "1.19.0", features = ["v4"] }
-reqwest = { version = "0.13", features = ["json"] }
+
+[features]
+default = ["http-tools", "s3-tools"]
+http-tools = []
+s3-tools = ["dep:aws-config", "dep:aws-sdk-s3", "dep:aws-credential-types"]
