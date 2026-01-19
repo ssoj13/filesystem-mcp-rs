@@ -143,6 +143,11 @@ These struct fields are computed but not returned in JSON:
 - `PdfReadResult.char_count` - character count
 - `WatchResult.timed_out` - timeout flag
 
+### Error Handling Gaps (HTTP)
+- `http_download` writes response bodies for non-2xx/3xx statuses, producing misleading "Downloaded" outputs even when the server returns errors. `src/main.rs:2566`
+- `http_download_batch` persists bodies and reports `ok: true` without checking HTTP status codes. `src/main.rs:2628`
+- `http_request_batch` marks responses as `ok: true` for 4xx/5xx statuses, leaving callers to infer failures. `src/main.rs:2508`
+
 ### Incomplete Refactoring: Extended Search
 `search_files_extended()` supports:
 - File type filter (file/dir/symlink)

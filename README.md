@@ -110,6 +110,7 @@ Search for text/regex patterns **inside** file contents (not filenames):
 - **File filtering**: Optional glob include/exclude patterns to limit scope
 - **Returns**: Matching lines with file paths and line numbers
 - **Use cases**: Finding code patterns, locating function definitions, searching across codebase
+- **Note**: Do not use `rg`/`grep` via `run_command`; use `grep_files` or `search_files` instead
 
 **Example:**
 ```json

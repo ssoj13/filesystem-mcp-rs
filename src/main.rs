@@ -177,6 +177,7 @@ impl FileSystemServer {
                   head/tail, max_chars truncation. Handles large files gracefully.\n\
                 - grep_files: ALWAYS use instead of grep/Grep. Faster, with regex, context lines, include/exclude filtering.\n\
                 - grep_context: Use for context-aware searches (requires nearby terms in a window).\n\
+                - Do NOT use rg/grep via run_command; use grep_files or search_files instead.\n\
                 - http_request/http_request_batch/http_download: HTTP/HTTPS access when built with http-tools (allowlist required).\n\
                 - s3_list_buckets/s3_list/s3_get/s3_put/s3_delete/s3_copy/s3_presign: S3 access when built with s3-tools (allowlist required).\n\
                 - screenshot_list_monitors/screenshot_list_windows/screenshot_capture_screen/screenshot_capture_window/screenshot_capture_region/screenshot_copy_to_clipboard: Screenshot capture when built with screenshot-tools.\n\

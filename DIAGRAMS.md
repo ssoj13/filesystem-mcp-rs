@@ -107,6 +107,23 @@ sequenceDiagram
     Main-->>Client: CallToolResult(pid)
 ```
 
+## Data Flow: http_download (Current)
+
+```mermaid
+sequenceDiagram
+    participant Client
+    participant Main as main.rs
+    participant HTTP as http_tools::http_request
+    participant FS as Filesystem
+
+    Client->>Main: http_download(url, path)
+    Main->>HTTP: http_request(...)
+    HTTP-->>Main: HttpResponse(status, body)
+    Note over Main: status not checked before write
+    Main->>FS: write(body)
+    Main-->>Client: CallToolResult(ok=true)
+```
+
 ## Dead Code Flow (to be cleaned)
 
 ```mermaid
