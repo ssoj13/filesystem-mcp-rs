@@ -232,25 +232,65 @@ where
     R: tokio::io::AsyncRead + Unpin + Send + 'static,
 {
     tokio::spawn(async move {
-        let Some(handle) = handle else {
-            return;
-        };
+        let _ = drain_stream(handle, output_file).await;
+    });
+}
 
-        let reader = BufReader::new(handle);
-        let mut line_reader = reader.lines();
+async fn drain_stream<R>(handle: Option<R>, output_file: Option<String>) -> Result<()>
+where
+    R: tokio::io::AsyncRead + Unpin + Send + 'static,
+{
+    let Some(handle) = handle else {
+        return Ok(());
+    };
 
-        let mut writer = open_output_file(output_file).await;
-        while let Ok(Some(line)) = line_reader.next_line().await {
-            if let Some(ref mut file) = writer {
-                if file.write_all(line.as_bytes()).await.is_err() {
-                    break;
-                }
-                if file.write_all(b"\n").await.is_err() {
-                    break;
-                }
+    let mut writer = open_output_file(output_file).await;
+    let mut reader = BufReader::new(handle);
+    let mut buf = Vec::new();
+    loop {
+        buf.clear();
+        let read = reader.read_until(b'\n', &mut buf).await?;
+        if read == 0 {
+            break;
+        }
+        if let Some(ref mut file) = writer {
+            file.write_all(&buf).await?;
+        }
+    }
+    Ok(())
+}
+
+async fn collect_stream_lines<R>(handle: Option<R>, output_file: Option<String>) -> Result<Vec<String>>
+where
+    R: tokio::io::AsyncRead + Unpin + Send + 'static,
+{
+    let Some(handle) = handle else {
+        return Ok(Vec::new());
+    };
+
+    let mut lines = Vec::new();
+    let mut writer = open_output_file(output_file).await;
+    let mut reader = BufReader::new(handle);
+    let mut buf = Vec::new();
+    loop {
+        buf.clear();
+        let read = reader.read_until(b'\n', &mut buf).await?;
+        if read == 0 {
+            break;
+        }
+        if let Some(ref mut file) = writer {
+            let _ = file.write_all(&buf).await;
+        }
+        let mut line = String::from_utf8_lossy(&buf).to_string();
+        if line.ends_with('\n') {
+            line.pop();
+            if line.ends_with('\r') {
+                line.pop();
             }
         }
-    });
+        lines.push(line);
+    }
+    Ok(lines)
 }
 
 /// Wait for process with timeout/watchdog handling
@@ -276,37 +316,11 @@ async fn wait_for_process(
     let stderr_handle = child.stderr.take();
     
     let stdout_task = tokio::spawn(async move {
-        let mut lines = Vec::new();
-        if let Some(stdout) = stdout_handle {
-            let mut writer = open_output_file(stdout_file).await;
-            let reader = BufReader::new(stdout);
-            let mut line_reader = reader.lines();
-            while let Ok(Some(line)) = line_reader.next_line().await {
-                if let Some(ref mut file) = writer {
-                    let _ = file.write_all(line.as_bytes()).await;
-                    let _ = file.write_all(b"\n").await;
-                }
-                lines.push(line);
-            }
-        }
-        lines
+        collect_stream_lines(stdout_handle, stdout_file).await.unwrap_or_default()
     });
     
     let stderr_task = tokio::spawn(async move {
-        let mut lines = Vec::new();
-        if let Some(stderr) = stderr_handle {
-            let mut writer = open_output_file(stderr_file).await;
-            let reader = BufReader::new(stderr);
-            let mut line_reader = reader.lines();
-            while let Ok(Some(line)) = line_reader.next_line().await {
-                if let Some(ref mut file) = writer {
-                    let _ = file.write_all(line.as_bytes()).await;
-                    let _ = file.write_all(b"\n").await;
-                }
-                lines.push(line);
-            }
-        }
-        lines
+        collect_stream_lines(stderr_handle, stderr_file).await.unwrap_or_default()
     });
     
     // Wait for process with optional timeout

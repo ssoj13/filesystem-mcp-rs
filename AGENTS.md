@@ -124,37 +124,7 @@ Notes:
 
 ## Known Issues & TODOs
 
-### Dead Code (to remove)
-- `archive.rs:44` - `ArchiveFormat::extension()` never called
-- `grep.rs:81-119` - `impl GrepResult` helper methods unused
-- `watch.rs:76-85` - `WatchEvent::name()` never called
-- `process.rs:109` - `ProcessManager::contains()` never called
-- `process.rs:347` - `is_process_running()` never called
-- `search.rs:227` - `parse_time()` never called
-
-### Missing JSON Fields
-These struct fields are computed but not returned in JSON:
-- `CompareResult.diff_samples` - detailed binary diff
-- `CompareResult.file1_empty/file2_empty` - edge case flags
-- `DirCompareResult.errors` - comparison errors
-- `HashResult.algorithm` - redundant (delete instead)
-- `FileHashResult.error` - per-file errors
-- `JsonReadResult.total_keys/array_length` - metadata
-- `PdfReadResult.char_count` - character count
-- `WatchResult.timed_out` - timeout flag
-
-### Error Handling Gaps (HTTP)
-- `http_download` writes response bodies for non-2xx/3xx statuses, producing misleading "Downloaded" outputs even when the server returns errors. `src/main.rs:2566`
-- `http_download_batch` persists bodies and reports `ok: true` without checking HTTP status codes. `src/main.rs:2628`
-- `http_request_batch` marks responses as `ok: true` for 4xx/5xx statuses, leaving callers to infer failures. `src/main.rs:2508`
-
-### Incomplete Refactoring: Extended Search
-`search_files_extended()` supports:
-- File type filter (file/dir/symlink)
-- Size filters (min/max)
-- Time filters (modified after/before)
-
-But `search_files` MCP tool only uses basic glob matching, discarding extended capabilities.
+No open items tracked as of this audit. See `BUGHUNT_REPORT.md` for resolved findings.
 
 ## Security Considerations
 

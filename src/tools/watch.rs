@@ -246,10 +246,10 @@ pub async fn watch_file(
         )?;
         
         // Watch parent directory to catch create/delete
-        let watch_path = if path_buf.is_file() {
-            path_buf.parent().unwrap_or(&path_buf).to_path_buf()
-        } else {
+        let watch_path = if path_buf.is_dir() {
             path_buf.clone()
+        } else {
+            path_buf.parent().unwrap_or(&path_buf).to_path_buf()
         };
         
         watcher.watch(&watch_path, RecursiveMode::NonRecursive)?;

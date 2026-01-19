@@ -107,7 +107,7 @@ sequenceDiagram
     Main-->>Client: CallToolResult(pid)
 ```
 
-## Data Flow: http_download (Current)
+## Data Flow: http_download
 
 ```mermaid
 sequenceDiagram
@@ -119,75 +119,47 @@ sequenceDiagram
     Client->>Main: http_download(url, path)
     Main->>HTTP: http_request(...)
     HTTP-->>Main: HttpResponse(status, body)
-    Note over Main: status not checked before write
-    Main->>FS: write(body)
-    Main-->>Client: CallToolResult(ok=true)
+    alt status >= 400
+        Main-->>Client: error (status)
+    else status < 400
+        Main->>FS: write(body)
+        Main-->>Client: CallToolResult(ok=true)
+    end
 ```
 
-## Dead Code Flow (to be cleaned)
+## HTTP Batch Status Handling
 
 ```mermaid
-graph LR
-    subgraph "Unused Methods"
-        A1[archive::extension]
-        A2[grep::matches/counts/files/len/is_empty]
-        A3[watch::name]
-        A4[process::contains]
-        A5[process::is_process_running]
-        A6[search::parse_time]
-    end
-    
-    subgraph "Unused Fields"
-        B1[CompareResult::diff_samples]
-        B2[CompareResult::file1_empty/file2_empty]
-        B3[DirCompareResult::errors]
-        B4[HashResult::algorithm]
-        B5[FileHashResult::error]
-        B6[JsonReadResult::total_keys/array_length]
-        B7[PdfReadResult::char_count]
-        B8[WatchResult::timed_out]
-        B9[SearchResult::is_symlink/size/modified]
-    end
-    
-    A1 -.->|DELETE| X((Removed))
-    A2 -.->|DELETE| X
-    A3 -.->|DELETE| X
-    A4 -.->|DELETE| X
-    A5 -.->|DELETE| X
-    A6 -.->|DELETE| X
-    
-    B1 -.->|ADD TO JSON| Y((Exposed))
-    B2 -.->|ADD TO JSON| Y
-    B3 -.->|ADD TO JSON| Y
-    B4 -.->|DELETE| X
-    B5 -.->|ADD TO JSON| Y
-    B6 -.->|ADD TO JSON| Y
-    B7 -.->|ADD TO JSON| Y
-    B8 -.->|ADD TO JSON| Y
-    B9 -.->|DECISION| Z((TBD))
+sequenceDiagram
+    participant Client
+    participant Main as main.rs
+    participant HTTP as http_tools::http_request_batch
+
+    Client->>Main: http_request_batch(...)
+    Main->>HTTP: http_request_batch(...)
+    HTTP-->>Main: HttpBatchResult(ok=false, status=4xx/5xx)
+    Main-->>Client: results[].ok=false + status/error
 ```
 
-## Search Module Architecture (Incomplete Refactoring)
+## Search Module API
 
 ```mermaid
 graph TB
-    subgraph "Current State"
-        API[MCP API: search_files]
-        SP[search_paths<br/>Returns: Vec&lt;PathBuf&gt;]
-        SFE[search_files_extended<br/>Returns: Vec&lt;SearchResult&gt;]
-        SR[SearchResult struct<br/>path, is_file, is_dir,<br/>is_symlink, size, modified]
-    end
-    
-    API -->|calls| SP
-    SP -->|calls| SFE
-    SFE -->|returns| SR
-    SP -->|discards fields| PathBuf
-    
-    subgraph "Problem"
-        LOST[Lost: is_file, is_dir,<br/>is_symlink, size, modified]
-    end
-    
-    SR -.-> LOST
+    API[search_files args]
+    SFE[search_files_extended filters]
+    API --> SFE
+    API --> M[modifiedAfter/modifiedBefore exposed]
+    SFE --> M
+```
+
+## Watch File: Missing Target Path
+
+```mermaid
+flowchart TB
+    Call[watch_file(path)] --> Check{path_buf.is_dir()?}
+    Check -- true --> Watch[watch target dir]
+    Check -- false --> Parent[watch parent dir]
+    Parent --> Create[create events observed]
 ```
 
 ## Tool Categories

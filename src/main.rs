@@ -575,6 +575,12 @@ struct SearchArgs {
     /// Maximum file size in bytes
     #[serde(skip_serializing_if = "Option::is_none")]
     max_size: Option<u64>,
+    /// Modified after (RFC3339 or duration, e.g. "2024-01-01T00:00:00Z" or "7d")
+    #[serde(skip_serializing_if = "Option::is_none")]
+    modified_after: Option<String>,
+    /// Modified before (RFC3339 or duration, e.g. "2024-01-01T00:00:00Z" or "7d")
+    #[serde(skip_serializing_if = "Option::is_none")]
+    modified_before: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
@@ -1355,6 +1361,11 @@ struct RunCommandArgs {
     /// Run in background (returns immediately with PID)
     #[serde(default)]
     background: bool,
+    /// Stream output to log files (auto-creates files if not provided)
+    #[serde(default)]
+    stream_output: bool,
+    /// Directory for streamed output files (optional)
+    stream_dir: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
@@ -1969,7 +1980,7 @@ impl FileSystemServer {
         description = "PREFERRED over built-in Glob/find. Search for files by glob pattern.\n\n\
             **Why use this:** Supports exclusion patterns, returns structured JSON, symlink-safe path validation.\n\n\
             Recursively search for paths matching glob pattern (e.g., **/*.rs, src/**/*.txt) with optional exclusions.\n\n\
-            **Filters:** fileType (file/dir/symlink/any), minSize, maxSize in bytes."
+            **Filters:** fileType (file/dir/symlink/any), minSize/maxSize in bytes, modifiedAfter/modifiedBefore (RFC3339 or duration)."
     )]
     async fn search_files(
         &self,
@@ -1980,6 +1991,8 @@ impl FileSystemServer {
             file_type,
             min_size,
             max_size,
+            modified_after,
+            modified_before,
         }): Parameters<SearchArgs>,
     ) -> Result<CallToolResult, McpError> {
         let root = self.resolve(&path).await?;
@@ -1990,6 +2003,15 @@ impl FileSystemServer {
             .and_then(FileTypeFilter::from_str)
             .unwrap_or_default();
         
+        let modified_after = match modified_after.as_deref() {
+            Some(raw) => Some(parse_time_filter(raw).map_err(|e| McpError::invalid_params(e, None))?),
+            None => None,
+        };
+        let modified_before = match modified_before.as_deref() {
+            Some(raw) => Some(parse_time_filter(raw).map_err(|e| McpError::invalid_params(e, None))?),
+            None => None,
+        };
+
         let params = SearchParams {
             root: root.to_string_lossy().to_string(),
             pattern,
@@ -1997,6 +2019,8 @@ impl FileSystemServer {
             file_type: ft,
             min_size,
             max_size,
+            modified_after,
+            modified_before,
             ..Default::default()
         };
         
@@ -2501,24 +2525,27 @@ impl FileSystemServer {
             for (index, result) in indices.into_iter().zip(batch_results) {
                 let json_result = match result {
                     crate::tools::http_tools::HttpBatchResult { id, ok, response, error } => {
-                        if ok {
-                            if let Some(resp) = response {
-                                json!({
-                                    "id": id,
-                                    "ok": true,
-                                    "status": resp.status,
-                                    "url": resp.url,
-                                    "headers": resp.headers,
-                                    "contentType": resp.content_type,
-                                    "contentLength": resp.content_length,
-                                    "truncated": resp.truncated,
-                                    "bodyBase64": to_base64(&resp.body),
-                                })
-                            } else {
-                                json!({ "id": id, "ok": false, "error": "Missing response" })
+                        if let Some(resp) = response {
+                            let mut payload = json!({
+                                "id": id,
+                                "ok": ok,
+                                "status": resp.status,
+                                "url": resp.url,
+                                "headers": resp.headers,
+                                "contentType": resp.content_type,
+                                "contentLength": resp.content_length,
+                                "truncated": resp.truncated,
+                                "bodyBase64": to_base64(&resp.body),
+                            });
+                            if !ok {
+                                let err_msg = error.unwrap_or_else(|| format!("HTTP status {}", resp.status));
+                                if let Some(map) = payload.as_object_mut() {
+                                    map.insert("error".to_string(), Value::String(err_msg));
+                                }
                             }
+                            payload
                         } else {
-                            json!({ "id": id, "ok": false, "error": error })
+                            json!({ "id": id, "ok": false, "error": error.unwrap_or_else(|| "Missing response".to_string()) })
                         }
                     }
                 };
@@ -2567,6 +2594,13 @@ impl FileSystemServer {
         let resp = http_request(client, params)
             .await
             .map_err(|e| McpError::internal_error(format!("HTTP request failed: {e}"), None))?;
+
+        if resp.status >= 400 {
+            return Err(McpError::internal_error(
+                format!("HTTP status {} for {}", resp.status, resp.url),
+                None,
+            ));
+        }
 
         let path = self.resolve(&args.path).await?;
         fs::write(&path, &resp.body)
@@ -2628,6 +2662,16 @@ impl FileSystemServer {
             let client = self.http_client(item.follow_redirects);
             match http_request(client, params).await {
                 Ok(resp) => {
+                    if resp.status >= 400 {
+                        results.push(json!({
+                            "url": item.url,
+                            "path": item.path,
+                            "ok": false,
+                            "status": resp.status,
+                            "error": format!("HTTP status {}", resp.status),
+                        }));
+                        continue;
+                    }
                     match self.resolve(&item.path).await {
                         Ok(path) => {
                             if let Err(e) = fs::write(&path, &resp.body).await {
@@ -4395,6 +4439,7 @@ USE CASES: Patch executables, fix binary data, search-replace in non-text files.
             - Environment variables (env) - added to current environment\n\
             - Timeout with automatic kill (timeout_ms)\n\
             - Redirect stdout/stderr to files\n\
+            - Stream output to files (streamOutput; use with background)\n\
             - Read stdin from file\n\
             - Tail output (stdout_tail/stderr_tail) - return only last N lines\n\
             - Background execution (background) - returns PID immediately\n\
@@ -4403,6 +4448,7 @@ USE CASES: Patch executables, fix binary data, search-replace in non-text files.
             - Run Python script: {command: 'python', args: ['script.py']}\n\
             - With timeout: {command: 'cargo', args: ['build'], timeout_ms: 60000}\n\
             - Background: {command: 'npm', args: ['start'], background: true}\n\
+            - Stream to logs: {command: 'cargo', args: ['build'], background: true, streamOutput: true}\n\
             - Custom env: {command: 'node', args: ['app.js'], env: {NODE_ENV: 'production'}}\n\
             - Tail output: {command: 'cargo', args: ['test'], stdout_tail: 50}"
     )]
@@ -4411,15 +4457,27 @@ USE CASES: Patch executables, fix binary data, search-replace in non-text files.
         Parameters(args): Parameters<RunCommandArgs>,
     ) -> Result<CallToolResult, McpError> {
         let args_refs: Vec<&str> = args.args.iter().map(|s| s.as_str()).collect();
-        
+
+        let mut stdout_file = args.stdout_file.clone();
+        let mut stderr_file = args.stderr_file.clone();
+        if args.stream_output {
+            let (stream_stdout, stream_stderr) = prepare_stream_paths(&args).await?;
+            if stdout_file.is_none() {
+                stdout_file = Some(stream_stdout);
+            }
+            if stderr_file.is_none() {
+                stderr_file = Some(stream_stderr);
+            }
+        }
+
         let params = process::RunParams {
             cwd: args.cwd,
             env: args.env,
             clear_env: args.clear_env,
             timeout_ms: args.timeout_ms,
             kill_after_ms: args.timeout_ms, // Use same value for watchdog
-            stdout_file: args.stdout_file,
-            stderr_file: args.stderr_file,
+            stdout_file: stdout_file.clone(),
+            stderr_file: stderr_file.clone(),
             stdin_file: args.stdin_file,
             stdout_tail: args.stdout_tail,
             stderr_tail: args.stderr_tail,
@@ -4457,6 +4515,8 @@ USE CASES: Patch executables, fix binary data, search-replace in non-text files.
                 "timedOut": result.timed_out,
                 "durationMs": result.duration_ms,
                 "background": result.background,
+                "stdoutFile": stdout_file,
+                "stderrFile": stderr_file,
             })),
             is_error: Some(result.exit_code.map(|c| c != 0).unwrap_or(result.killed)),
             meta: None,
@@ -4917,6 +4977,47 @@ fn format_time(time: Option<SystemTime>) -> Option<String> {
             let ts = SystemTime::UNIX_EPOCH + Duration::from_secs(d.as_secs());
             humantime::format_rfc3339(ts).to_string()
         })
+}
+
+fn parse_time_filter(raw: &str) -> Result<SystemTime, String> {
+    if let Ok(ts) = humantime::parse_rfc3339(raw) {
+        return Ok(ts);
+    }
+    if let Ok(duration) = humantime::parse_duration(raw) {
+        return SystemTime::now()
+            .checked_sub(duration)
+            .ok_or_else(|| "Time filter underflow".to_string());
+    }
+    Err(format!(
+        "Invalid time filter '{raw}'. Expected RFC3339 or duration like '7d'"
+    ))
+}
+
+async fn prepare_stream_paths(args: &RunCommandArgs) -> Result<(String, String), McpError> {
+    let dir = if let Some(ref dir) = args.stream_dir {
+        PathBuf::from(dir)
+    } else if let Some(ref cwd) = args.cwd {
+        PathBuf::from(cwd)
+    } else {
+        env::temp_dir().join("filesystem-mcp")
+    };
+
+    fs::create_dir_all(&dir)
+        .await
+        .map_err(internal_err("Failed to create stream output directory"))?;
+
+    let ts = SystemTime::now()
+        .duration_since(SystemTime::UNIX_EPOCH)
+        .map(|d| d.as_millis())
+        .unwrap_or(0);
+    let base = format!("run_command_{ts}");
+    let stdout = dir.join(format!("{base}_stdout.log"));
+    let stderr = dir.join(format!("{base}_stderr.log"));
+
+    Ok((
+        stdout.to_string_lossy().to_string(),
+        stderr.to_string_lossy().to_string(),
+    ))
 }
 
 fn permissions_string(meta: &Metadata) -> String {

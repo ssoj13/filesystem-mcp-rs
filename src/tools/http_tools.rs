@@ -205,12 +205,20 @@ pub async fn http_request_batch(
     let mut results = Vec::with_capacity(items.len());
     for item in items {
         match http_request(client, item.params).await {
-            Ok(response) => results.push(HttpBatchResult {
-                id: item.id,
-                ok: true,
-                response: Some(response),
-                error: None,
-            }),
+            Ok(response) => {
+                let ok = response.status < 400;
+                let error = if ok {
+                    None
+                } else {
+                    Some(format!("HTTP status {}", response.status))
+                };
+                results.push(HttpBatchResult {
+                    id: item.id,
+                    ok,
+                    response: Some(response),
+                    error,
+                });
+            }
             Err(err) => results.push(HttpBatchResult {
                 id: item.id,
                 ok: false,

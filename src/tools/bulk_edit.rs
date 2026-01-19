@@ -132,7 +132,6 @@ mod tests {
             &edits,
             false,
             false,
-            false,
             &allowed_dirs,
             false,
         )
@@ -180,7 +179,6 @@ mod tests {
             &edits,
             true, // dry_run = true
             false,
-            false,
             &allowed_dirs,
             false,
         )
@@ -221,7 +219,6 @@ mod tests {
             "*.txt",
             &["skip.txt".to_string()],
             &edits,
-            false,
             false,
             false,
             &allowed_dirs,
