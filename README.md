@@ -1,6 +1,6 @@
 # filesystem-mcp-rs
 
-> **v0.1.10+**: Added MurmurHash3 and SpookyHash algorithms, partial hashing with offset/length, extended search parameters. See CHANGELOG.md for details.
+> **v0.1.10+**: Added MurmurHash3 and SpookyHash algorithms, partial hashing with offset/length, extended search parameters, HTTP, S3, Screenshot tools. See CHANGELOG.md for details.
 >
 > **v0.1.9+**: Major feature release with 16 new tools for file hashing, comparison, archives, PDF reading, process management, and more.
 > 
