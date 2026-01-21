@@ -1,5 +1,6 @@
 # Rust
 /target/
+/target-test/
 **/*.rs.bk
 *.pdb
 *.mp4
