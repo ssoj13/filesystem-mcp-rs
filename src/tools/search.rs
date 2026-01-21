@@ -90,7 +90,7 @@ pub async fn search_files_extended(
             let rel = path.strip_prefix(&root_path).unwrap_or(&path);
             let rel_str = rel.to_string_lossy();
 
-            if exclude.is_match(rel_str.as_ref()) {
+            if exclude.is_match(&*rel_str) {
                 continue;
             }
 
@@ -127,7 +127,7 @@ pub async fn search_files_extended(
             }
 
             // Check if pattern matches
-            let pattern_matches = matcher.is_match(rel_str.as_ref());
+            let pattern_matches = matcher.is_match(&*rel_str);
             
             if pattern_matches && type_matches {
                 // Apply size filters (only for files)

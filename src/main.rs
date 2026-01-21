@@ -5077,7 +5077,7 @@ async fn build_tree(
         let path = entry.path();
         let rel = path.strip_prefix(root).unwrap_or(&path);
         let rel_str = rel.to_string_lossy();
-        if exclude.is_match(rel_str.as_ref()) {
+        if exclude.is_match(&*rel_str) {
             continue;
         }
         

@@ -169,13 +169,13 @@ pub async fn grep_files(
         // Search single file directly
         if let Some(matcher) = &exclude_matcher {
             let filename = root_path.file_name().unwrap_or_default().to_string_lossy();
-            if matcher.is_match(filename.as_ref()) {
+            if matcher.is_match(&*filename) {
                 return Ok(result_for_mode(&params.output_mode, matches, counts, files));
             }
         }
         if let Some(matcher) = &file_matcher {
             let filename = root_path.file_name().unwrap_or_default().to_string_lossy();
-            if !matcher.is_match(filename.as_ref()) {
+            if !matcher.is_match(&*filename) {
                 return Ok(result_for_mode(&params.output_mode, matches, counts, files));
             }
         }
@@ -241,7 +241,7 @@ pub async fn grep_files(
 
             if let Some(matcher) = &exclude_matcher {
                 let rel = path.strip_prefix(&root_path).unwrap_or(&path);
-                if matcher.is_match(rel.to_string_lossy().as_ref()) {
+                if matcher.is_match(&*rel.to_string_lossy()) {
                     continue;
                 }
             }
@@ -252,7 +252,7 @@ pub async fn grep_files(
                 // Check file pattern match
                 if let Some(matcher) = &file_matcher {
                     let rel = path.strip_prefix(&root_path).unwrap_or(&path);
-                    if !matcher.is_match(rel.to_string_lossy().as_ref()) {
+                    if !matcher.is_match(&*rel.to_string_lossy()) {
                         continue;
                     }
                 }
@@ -336,13 +336,13 @@ pub async fn grep_context_files(
     if metadata.is_file() {
         if let Some(matcher) = &exclude_matcher {
             let filename = root_path.file_name().unwrap_or_default().to_string_lossy();
-            if matcher.is_match(filename.as_ref()) {
+            if matcher.is_match(&*filename) {
                 return Ok(result_for_mode(&params.output_mode, matches, counts, files));
             }
         }
         if let Some(matcher) = &file_matcher {
             let filename = root_path.file_name().unwrap_or_default().to_string_lossy();
-            if !matcher.is_match(filename.as_ref()) {
+            if !matcher.is_match(&*filename) {
                 return Ok(result_for_mode(&params.output_mode, matches, counts, files));
             }
         }
@@ -410,7 +410,7 @@ pub async fn grep_context_files(
 
             if let Some(matcher) = &exclude_matcher {
                 let rel = path.strip_prefix(&root_path).unwrap_or(&path);
-                if matcher.is_match(rel.to_string_lossy().as_ref()) {
+                if matcher.is_match(&*rel.to_string_lossy()) {
                     continue;
                 }
             }
@@ -420,7 +420,7 @@ pub async fn grep_context_files(
             } else if file_type.is_file() {
                 if let Some(matcher) = &file_matcher {
                     let rel = path.strip_prefix(&root_path).unwrap_or(&path);
-                    if !matcher.is_match(rel.to_string_lossy().as_ref()) {
+                    if !matcher.is_match(&*rel.to_string_lossy()) {
                         continue;
                     }
                 }
