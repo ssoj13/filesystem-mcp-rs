@@ -23,9 +23,24 @@ pub fn decode_bytes(bytes: &[u8]) -> String {
 }
 
 /// Read full file with auto-detected encoding.
+/// Line endings are normalized to LF (\n) for consistent behavior across platforms.
 pub async fn read_text(path: &Path) -> Result<String> {
     let bytes = fs::read(path).await?;
-    Ok(decode_bytes(&bytes))
+    let content = decode_bytes(&bytes);
+    // Normalize line endings: CRLF -> LF, CR -> LF
+    Ok(normalize_line_endings(&content))
+}
+
+/// Normalize line endings to LF for consistent cross-platform behavior.
+/// Handles CRLF (Windows), CR (old Mac), and preserves LF (Unix).
+#[inline]
+pub fn normalize_line_endings(s: &str) -> String {
+    // Fast path: no CR in content
+    if !s.contains('\r') {
+        return s.to_string();
+    }
+    // Replace CRLF first, then standalone CR
+    s.replace("\r\n", "\n").replace('\r', "\n")
 }
 
 /// Return first N lines (encoding-safe).
@@ -167,6 +182,59 @@ mod tests {
 
         let result = head(&path, 2).await.unwrap();
         assert_eq!(result, "line1\nline2");
+    }
+
+    #[tokio::test]
+    async fn test_read_text_normalizes_crlf() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("crlf.txt");
+        async_fs::write(&path, "line1\r\nline2\r\nline3").await.unwrap();
+
+        let content = read_text(&path).await.unwrap();
+        assert_eq!(content, "line1\nline2\nline3");
+        assert!(!content.contains('\r'));
+    }
+
+    #[tokio::test]
+    async fn test_read_text_normalizes_cr_only() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("cr.txt");
+        // Old Mac style: CR only
+        async_fs::write(&path, "line1\rline2\rline3").await.unwrap();
+
+        let content = read_text(&path).await.unwrap();
+        assert_eq!(content, "line1\nline2\nline3");
+        assert!(!content.contains('\r'));
+    }
+
+    #[test]
+    fn test_normalize_line_endings_fast_path() {
+        // No CR - should return as-is (fast path)
+        let input = "hello\nworld\n";
+        let result = normalize_line_endings(input);
+        assert_eq!(result, input);
+    }
+
+    #[test]
+    fn test_normalize_line_endings_crlf() {
+        let input = "hello\r\nworld\r\n";
+        let result = normalize_line_endings(input);
+        assert_eq!(result, "hello\nworld\n");
+    }
+
+    #[test]
+    fn test_normalize_line_endings_cr_only() {
+        let input = "hello\rworld\r";
+        let result = normalize_line_endings(input);
+        assert_eq!(result, "hello\nworld\n");
+    }
+
+    #[test]
+    fn test_normalize_line_endings_mixed() {
+        // Mixed: CRLF, LF, CR
+        let input = "a\r\nb\nc\rd";
+        let result = normalize_line_endings(input);
+        assert_eq!(result, "a\nb\nc\nd");
     }
 
     // UTF-8 safety tests
