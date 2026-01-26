@@ -15,7 +15,7 @@ main.rs
 │   └── serve() / serve_http() - start MCP server
 │
 └── FileSystemServer struct
-    ├── #[tool_router] - 50+ MCP tools
+    ├── #[tool_router] - 80+ MCP tools
     ├── allowed: AllowedDirs - path whitelist
     ├── allow_symlink_escape: bool - security flag
     └── process_manager: ProcessManager - background tasks
@@ -60,6 +60,8 @@ User Path → resolve_path() → Validated Path
 - `tools/archive.rs` - ZIP/TAR/TAR.GZ extract/create
 - `tools/json_reader.rs` - JSON read with JSONPath query
 - `tools/pdf_reader.rs` - PDF text extraction
+- `tools/xlsx.rs` - Excel file reading (calamine: .xlsx, .xls, .ods)
+- `tools/docx.rs` - Word document reading (docx-lite)
 
 ### Media
 - `tools/screenshot.rs` - Screenshot capture + clipboard output
@@ -68,9 +70,27 @@ User Path → resolve_path() → Validated Path
 - `tools/http_tools.rs` - HTTP/HTTPS requests + batch downloads
 - `tools/s3_tools.rs` - AWS S3 list/get/put/delete/copy/presign + batch ops
 
+### AI/LLM
+- `tools/llm/` - LLM provider integrations
+  - `config.rs` - Configuration from env vars
+  - `providers/gemini.rs` - Google Gemini API
+  - `providers/cerebras.rs` - Cerebras API
+  - `providers/openai.rs` - OpenAI API
+  - `transform.rs` - Message format transformations
+  - `model_mapping.rs` - Model alias resolution
+
+### Wave2 System Utilities
+- `tools/wave2/net.rs` - Network: port_users, net_connections, port_available
+- `tools/wave2/proc.rs` - Process: proc_tree, proc_env, proc_files
+- `tools/wave2/sys.rs` - System: disk_usage, sys_info
+- `tools/wave2/file.rs` - File: file_diff (unified diff), file_touch
+- `tools/wave2/util.rs` - Utility: clipboard_read/write, env_get/set/remove/list, which
+
 ### Runtime
 - `tools/process.rs` - Command execution, process management
 - `tools/watch.rs` - File watching, tail -f functionality
+- `tools/thinking/` - Sequential thinking tools
+- `tools/memory/` - Persistent memory/knowledge graph
 - `core/logging.rs` - Tracing setup
 - `core/format.rs` - JSON Schema draft conversion (2020-12 → Draft-07)
 
@@ -144,3 +164,49 @@ CLI flags:
 
 Environment:
 - `RUST_LOG` - Tracing log level
+- `FS_MCP_HTTP_ALLOW_LIST` - HTTP allowlist domains
+- `FS_MCP_S3_ALLOW_LIST` - S3 allowlist buckets
+- `FS_MCP_MEMORY_DB` - Memory database path
+- `LLM_MCP_*` - LLM provider configuration (see README.md)
+
+## Testing
+
+222 unit tests covering all modules:
+
+```
+cargo test --all-features
+```
+
+### Test Coverage by Module
+
+| Module | Tests | Coverage |
+|--------|-------|----------|
+| archive | 2 | create/extract |
+| binary | 10 | read/write/patch |
+| bulk_edit | 7 | regex, multi-file |
+| compare | 6 | files, directories |
+| docx | 3 | error handling |
+| duplicates | 2 | content/size match |
+| edit | 4 | literal/regex |
+| grep | 6 | patterns, modes |
+| hash | 12 | algorithms, partial |
+| json_reader | 10 | JSONPath |
+| line_edit | 5 | insert/delete |
+| llm | 5 | transform, mapping |
+| process | 14 | run, timeout, env |
+| search | 5 | filters |
+| stats | 4 | recursive |
+| watch | 5 | tail, follow |
+| wave2 | 29 | net, proc, sys, file, util |
+| xlsx | 6 | read, unicode |
+
+### Unicode Support
+
+All modules support Unicode (UTF-8):
+- File paths with non-ASCII characters
+- File content in any language
+- Environment variables
+- Excel/Word documents
+- Clipboard operations
+
+Tested with: Russian (Привет), Chinese (你好), Emoji (🦀)

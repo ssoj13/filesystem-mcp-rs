@@ -727,13 +727,17 @@ cargo test --test http_transport  # HTTP transport only
 ```
 
 Tests:
-- **158 unit tests** (+193% from v0.1.8):
-  - New: hash (12), compare (18), duplicates (8), watch (6), json_reader (10), pdf_reader (10), archive (4), stats (4)
-  - Enhanced: grep (+3), search (+5)
-  - New: process (11)
-  - Existing: line_edit, bulk_edit, binary, fs_ops, edit
+- **222 unit tests** (was 158):
+  - Core: hash (12), compare (18), duplicates (8), watch (6), json_reader (10), pdf_reader (10), archive (4), stats (4), process (14)
+  - Text: line_edit (5), bulk_edit (7), edit (4), grep (6), search (5)
+  - Binary: binary (10)
+  - **New - wave2** (29): net (6), proc (5), sys (5), file (7), util (6)
+  - **New - xlsx** (6): read, info, unicode support
+  - **New - docx** (3): error handling
+  - **New - llm** (5): transform, model mapping
 - **39 integration tests**: file operations, search, grep, extract, binary, pagination
 - **4 HTTP transport tests**: server startup, health, MCP endpoint
+- **Unicode tested**: Russian (Привет), Chinese (你好), Emoji (🦀)
 
 ## Development
 

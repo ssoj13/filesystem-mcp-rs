@@ -30,6 +30,11 @@
 
 ### Tests
 - Added relaxed bulk edit test for no-match behavior
+- **Wave2 tests** (29 new): network (port_available, port_users, net_connections), process (proc_tree, proc_env, proc_files), system (disk_usage, sys_info), file (file_diff, file_touch), utility (env_*, which, clipboard)
+- **XLSX tests** (6 new): xlsx_info, xlsx_sheets, xlsx_read with headers/pagination/unicode
+- **DOCX tests** (3 new): error handling for missing/invalid files
+- **Unicode coverage**: All new tests verify UTF-8 support (Russian, Chinese, Emoji 🦀)
+- Total: 222 unit tests (+38 from wave2/xlsx/docx)
 
 ## [0.1.10] - 2026-01-17
 
