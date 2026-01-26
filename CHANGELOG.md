@@ -3,6 +3,15 @@
 ## [Unreleased]
 
 ### Added
+- **Wave2 tools** (always on) - cross-platform system utilities:
+  - **Network**: `port_users` (find processes using a port), `net_connections` (list network connections), `port_available` (check if port is free)
+  - **Process**: `proc_tree` (process tree with parent-child relationships), `proc_env` (environment variables of a process), `proc_files` (open files/handles of a process)
+  - **System**: `disk_usage` (disk space info), `sys_info` (CPU, RAM, swap, OS info)
+  - **File**: `file_diff` (unified diff using `similar` crate, git-compatible format), `file_touch` (create file or update timestamp)
+  - **Utility**: `clipboard_read`/`clipboard_write` (requires screenshot-tools feature), `env_get`/`env_set`/`env_remove`/`env_list` (environment variables), `which` (find executable in PATH)
+- **LLM tools** (always on, needs API keys): `ai_messages_gemini`, `ai_messages_cerebras`, `ai_messages_openai`, `ai_count_tokens_*` - integrated from llm-mcp-rs
+- **XLSX tools** (always on): `xlsx_read`, `xlsx_info` - read Excel spreadsheets via calamine
+- **DOCX tools** (always on): `docx_read`, `docx_info` - read Word documents via docx-lite
 - **HTTP tools (feature flag)**: `http_request`, `http_request_batch`, `http_download`, `http_download_batch` (supports headers/cookies/query/body)
 - **S3 tools (feature flag)**: `s3_list`, `s3_stat`, `s3_get`, `s3_put`, `s3_delete`, `s3_copy`, `s3_presign`, plus batch ops
 - **Context-aware grep**: `grep_context` for matches that require nearby terms within word/char windows

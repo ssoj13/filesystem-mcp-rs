@@ -28,6 +28,47 @@ Rust port of the [official JavaScript filesystem MCP server](https://github.com/
 - S3 (feature): `s3_list_buckets`, `s3_list`, `s3_stat`, `s3_get`, `s3_put`, `s3_delete`, `s3_copy`, `s3_presign`, batch ops
 - Screenshot (feature): `screenshot_list_monitors`, `screenshot_list_windows`, `screenshot_capture_screen`, `screenshot_capture_window`, `screenshot_capture_region`, `screenshot_copy_to_clipboard`
 - Safety: allowlist/roots validation, escape protection, optional `--allow_symlink_escape`
+- Wave2: `port_users`, `net_connections`, `port_available`, `proc_tree`, `proc_env`, `proc_files`, `disk_usage`, `sys_info`, `file_diff`, `file_touch`, `clipboard_*`, `env_*`, `which`
+- Document: `xlsx_read`, `xlsx_info` (Excel), `docx_read`, `docx_info` (Word)
+- AI/LLM: `ai_messages_gemini`, `ai_messages_cerebras`, `ai_messages_openai`, `ai_count_tokens_*` (needs API keys)
+
+## Environment Variables
+
+### Core
+| Variable | Description |
+|----------|-------------|
+| `FS_MCP_HTTP_ALLOW_LIST` | HTTP allowlist domains (comma/semicolon/whitespace separated). Use `*` to allow all |
+| `FS_MCP_S3_ALLOW_LIST` | S3 allowlist buckets (comma/semicolon/whitespace separated). Use `*` to allow all |
+| `FS_MCP_MEMORY_DB` | Memory database path (default: system data dir) |
+| `DISABLE_THOUGHT_LOGGING` | Set to `true` to disable thought logging |
+
+### LLM API Keys
+| Variable | Description |
+|----------|-------------|
+| `LLM_MCP_GEMINI_API_KEY` | Gemini API key (or use `GEMINI_API_KEY`) |
+| `LLM_MCP_CEREBRAS_API_KEY` | Cerebras API key (or use `CEREBRAS_API_KEY`) |
+| `LLM_MCP_OPENAI_API_KEY` | OpenAI API key (or use `OPENAI_API_KEY`) |
+
+### LLM Configuration
+| Variable | Description |
+|----------|-------------|
+| `LLM_MCP_PROVIDERS` | Comma-separated list of enabled providers |
+| `LLM_MCP_PROVIDER` | Default provider name |
+| `LLM_MCP_PROVIDER_ENDPOINT` | Custom API endpoint URL |
+| `LLM_MCP_PROVIDER_API_KEY` | Generic API key (for custom providers) |
+| `LLM_MCP_PROVIDER_API_KEY_HEADER` | Custom header name for API key (default: `Authorization`) |
+| `LLM_MCP_PROVIDER_API_KEY_PREFIX` | API key prefix (default: `Bearer `) |
+| `LLM_MCP_MODEL_MAPPING` | Model name mappings (JSON format) |
+| `LLM_MCP_BIG_MODEL` | Alias for "big" model |
+| `LLM_MCP_SMALL_MODEL` | Alias for "small" model |
+| `LLM_MCP_MAX_TOKENS_LIMIT` | Maximum tokens limit |
+| `LLM_MCP_REQUEST_TIMEOUT` | Request timeout in seconds |
+| `LLM_MCP_MAX_RETRIES` | Maximum retry attempts |
+| `LLM_MCP_MAX_STREAMING_RETRIES` | Maximum streaming retry attempts |
+| `LLM_MCP_RETRY_BACKOFF_MS` | Retry backoff in milliseconds |
+| `LLM_MCP_STREAMING_RETRY_BACKOFF_MS` | Streaming retry backoff in milliseconds |
+| `LLM_MCP_FORCE_DISABLE_STREAMING` | Set to `true` to disable streaming |
+| `LLM_MCP_EMERGENCY_DISABLE_STREAMING` | Emergency streaming disable flag |
 
 ## Feature Flags
 
@@ -67,6 +108,144 @@ Tools: `screenshot_list_monitors`, `screenshot_list_windows`, `screenshot_captur
 
 // Copy an existing PNG to clipboard
 {"tool": "screenshot_copy_to_clipboard", "arguments": {"path": "C:/temp/region.png"}}
+```
+
+## Wave2 Tools (System Utilities)
+
+Cross-platform tools for network, process, system info, and utilities.
+
+### Network Tools
+
+#### `port_users` - Find Processes Using a Port
+```json
+{"tool": "port_users", "arguments": {"port": 8080}}
+// Returns: [{"pid": 1234, "name": "node", "local_addr": "127.0.0.1:8080", ...}]
+```
+
+#### `net_connections` - List Network Connections
+```json
+{"tool": "net_connections", "arguments": {}}
+{"tool": "net_connections", "arguments": {"pid": 1234}}  // Filter by process
+```
+
+#### `port_available` - Check if Port is Free
+```json
+{"tool": "port_available", "arguments": {"port": 3000}}
+// Returns: {"port": 3000, "available": true}
+```
+
+### Process Tools
+
+#### `proc_tree` - Process Tree
+```json
+{"tool": "proc_tree", "arguments": {}}  // Full tree
+{"tool": "proc_tree", "arguments": {"root_pid": 1234}}  // Subtree from PID
+```
+
+#### `proc_env` - Process Environment Variables
+```json
+{"tool": "proc_env", "arguments": {"pid": 1234}}
+```
+
+#### `proc_files` - Open Files by Process
+```json
+{"tool": "proc_files", "arguments": {"pid": 1234}}
+// Linux: /proc/pid/fd, macOS: lsof, Windows: limited info
+```
+
+### System Tools
+
+#### `disk_usage` - Disk Space Info
+```json
+{"tool": "disk_usage", "arguments": {}}  // All disks
+{"tool": "disk_usage", "arguments": {"path": "C:/"}}  // Specific mount
+```
+
+#### `sys_info` - System Information
+```json
+{"tool": "sys_info", "arguments": {}}
+// Returns: CPU cores, total/used RAM, swap, OS name/version, hostname, uptime
+```
+
+### File Tools
+
+#### `file_diff` - Compare Files (Unified Diff)
+Compare two files using the `similar` crate. Returns git-compatible unified diff:
+```json
+{"tool": "file_diff", "arguments": {"path1": "old.txt", "path2": "new.txt"}}
+{"tool": "file_diff", "arguments": {"path1": "a.rs", "path2": "b.rs", "context": 5}}
+```
+Returns:
+- `unified_diff`: Standard unified diff format (can be applied with `patch -p0`)
+- `hunks`: Structured JSON with changes (type: insert/delete/context, line numbers)
+- `additions`, `deletions`: Change counts
+
+#### `file_touch` - Create/Update File Timestamp
+```json
+{"tool": "file_touch", "arguments": {"path": "marker.txt"}}
+{"tool": "file_touch", "arguments": {"path": "deep/nested/file.txt", "create_parents": true}}
+```
+
+### Utility Tools
+
+#### `clipboard_read` / `clipboard_write`
+Requires `screenshot-tools` feature (uses arboard crate):
+```json
+{"tool": "clipboard_read", "arguments": {}}
+{"tool": "clipboard_write", "arguments": {"text": "Hello clipboard"}}
+```
+
+#### `env_get` / `env_set` / `env_remove` / `env_list`
+Environment variables (current process only):
+```json
+{"tool": "env_get", "arguments": {"name": "PATH"}}
+{"tool": "env_set", "arguments": {"name": "MY_VAR", "value": "hello"}}
+{"tool": "env_remove", "arguments": {"name": "MY_VAR"}}
+{"tool": "env_list", "arguments": {}}
+```
+
+#### `which` - Find Executable in PATH
+```json
+{"tool": "which", "arguments": {"command": "python"}}
+// Returns: {"command": "python", "found": true, "path": "/usr/bin/python", "all_matches": [...]}
+```
+
+## Document Tools
+
+### `xlsx_read` / `xlsx_info` - Excel Files
+Read Excel spreadsheets via calamine (supports .xlsx, .xls, .ods):
+```json
+{"tool": "xlsx_info", "arguments": {"path": "data.xlsx"}}
+// Returns: sheet names, row/column counts
+
+{"tool": "xlsx_read", "arguments": {"path": "data.xlsx"}}
+{"tool": "xlsx_read", "arguments": {"path": "data.xlsx", "sheet": "Sheet2", "range": "A1:D10"}}
+```
+
+### `docx_read` / `docx_info` - Word Documents
+Read Word documents via docx-lite:
+```json
+{"tool": "docx_info", "arguments": {"path": "doc.docx"}}
+{"tool": "docx_read", "arguments": {"path": "doc.docx"}}
+```
+
+## AI/LLM Tools
+
+Integrated from llm-mcp-rs. Requires API keys via environment variables.
+
+### Providers
+- **Gemini**: `GEMINI_API_KEY` or `LLM_MCP_GEMINI_API_KEY`
+- **Cerebras**: `CEREBRAS_API_KEY` or `LLM_MCP_CEREBRAS_API_KEY`
+- **OpenAI**: `OPENAI_API_KEY` or `LLM_MCP_OPENAI_API_KEY`
+
+### Tools
+```json
+// Send messages to LLM
+{"tool": "ai_messages_gemini", "arguments": {"model": "gemini-pro", "messages": "Hello", "max_tokens": 1000}}
+{"tool": "ai_messages_openai", "arguments": {"model": "gpt-4", "messages": [...], "max_tokens": 2000}}
+
+// Count tokens
+{"tool": "ai_count_tokens_gemini", "arguments": {"model": "gemini-pro", "messages": "Text to count"}}
 ```
 
 ## Advanced Editing Tools
@@ -585,7 +764,16 @@ src/
 │   ├── s3_tools.rs    - AWS S3 operations + batch
 │   ├── stats.rs       - File/directory statistics
 │   ├── duplicates.rs  - Duplicate file detection
-│   └── process.rs     - Process execution and management
+│   ├── process.rs     - Process execution and management
+│   ├── xlsx.rs        - Excel file reading (calamine)
+│   ├── docx.rs        - Word document reading (docx-lite)
+│   ├── llm/           - LLM provider integrations (Gemini, Cerebras, OpenAI)
+│   └── wave2/         - System utilities:
+│       ├── net.rs     - Network tools (port_users, net_connections, port_available)
+│       ├── proc.rs    - Process tools (proc_tree, proc_env, proc_files)
+│       ├── sys.rs     - System info (disk_usage, sys_info)
+│       ├── file.rs    - File tools (file_diff, file_touch)
+│       └── util.rs    - Utilities (clipboard, env_*, which)
 
 tests/
 ├── integration.rs     - MCP tool integration tests

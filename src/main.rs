@@ -9,15 +9,15 @@ use async_recursion::async_recursion;
 use clap::Parser;
 use futures::future::join_all;
 use rmcp::{
-    ErrorData as McpError, ServerHandler, ServiceExt,
+    ErrorData as McpError, RoleServer, ServerHandler, ServiceExt,
     handler::server::{router::tool::ToolRouter, wrapper::Parameters},
     model::AnnotateAble,
     model::{
-        CallToolResult, Content, Implementation,
+        CallToolResult, Content, Implementation, Meta,
         ListRootsRequest, ServerCapabilities, ServerInfo, ServerRequest,
     },
     serde::{Deserialize, Serialize},
-    service::ServiceError,
+    service::{Peer, ServiceError},
     tool, tool_handler, tool_router,
     transport::stdio,
 };
@@ -25,7 +25,7 @@ use schemars::JsonSchema;
 use serde_json::{Value, json};
 use tokio::fs;
 use tokio::sync::OnceCell;
-use tracing::warn;
+use tracing::{info, warn};
 
 use crate::core::allowed::AllowedDirs;
 use crate::core::format;
@@ -64,6 +64,8 @@ use crate::tools::s3_tools::{
 use crate::tools::screenshot;
 #[cfg(feature = "screenshot-tools")]
 use image::RgbaImage;
+use crate::tools::thinking::{ThinkingState, ThoughtInput};
+use crate::tools::memory::{Entity, Relation, ObservationInput, ObservationDeletion, KnowledgeGraphManager};
 
 mod core;
 mod tools;
@@ -108,6 +110,14 @@ struct Args {
     #[cfg(feature = "s3-tools")]
     #[arg(long = "s3-allowlist-bucket", value_name = "BUCKET", action = clap::ArgAction::Append)]
     s3_allowlist_buckets: Vec<String>,
+
+    /// List enabled features and exit
+    #[arg(long = "list-features", short = 'L', action = clap::ArgAction::SetTrue)]
+    list_features: bool,
+
+    /// Memory database path (default: system data dir/filesystem-mcp-rs/memory.db)
+    #[arg(long = "memory-db", value_name = "PATH")]
+    memory_db: Option<PathBuf>,
 }
 
 #[derive(Clone)]
@@ -126,6 +136,9 @@ struct FileSystemServer {
     s3_allowlist_buckets: Vec<String>,
     #[cfg(feature = "s3-tools")]
     s3_client: Arc<OnceCell<aws_sdk_s3::Client>>,
+    thinking_state: Arc<ThinkingState>,
+    memory_manager: Option<Arc<KnowledgeGraphManager>>,
+    llm_server: Option<tools::llm::LlmMcpServer>,
 }
 
 impl FileSystemServer {
@@ -153,7 +166,15 @@ impl FileSystemServer {
             s3_allowlist_buckets: Vec::new(),
             #[cfg(feature = "s3-tools")]
             s3_client: Arc::new(OnceCell::new()),
+            thinking_state: Arc::new(ThinkingState::new()),
+            memory_manager: None,
+            llm_server: None,
         }
+    }
+
+    fn require_llm(&self) -> Result<&tools::llm::LlmMcpServer, McpError> {
+        self.llm_server.as_ref()
+            .ok_or_else(|| McpError::internal_error("LLM server not initialized (missing API keys?)", None))
     }
 
     fn server_info(&self) -> ServerInfo {
@@ -1449,6 +1470,188 @@ struct CaptureRegionArgs {
 #[derive(Debug, Deserialize, JsonSchema)]
 struct CopyToClipboardArgs {
     path: String,
+}
+
+// ==================== MEMORY TOOL ARGS ====================
+
+#[derive(Debug, Deserialize, JsonSchema)]
+struct MemCreateEntitiesArgs {
+    entities: Vec<Entity>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+struct MemCreateRelationsArgs {
+    relations: Vec<Relation>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+struct MemAddObservationsArgs {
+    observations: Vec<ObservationInput>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+struct MemDeleteEntitiesArgs {
+    entity_names: Vec<String>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+struct MemDeleteObservationsArgs {
+    deletions: Vec<ObservationDeletion>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+struct MemDeleteRelationsArgs {
+    relations: Vec<Relation>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+struct MemSearchNodesArgs {
+    query: Option<String>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+struct MemOpenNodesArgs {
+    names: Vec<String>,
+}
+
+// ==================== XLSX TOOL ARGS ====================
+
+#[derive(Debug, Deserialize, JsonSchema)]
+struct XlsxInfoArgs {
+    path: String,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+struct XlsxSheetsArgs {
+    path: String,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+struct XlsxReadArgs {
+    path: String,
+    /// Sheet name (default: first sheet)
+    sheet: Option<String>,
+    /// Treat first row as headers (default: false)
+    #[serde(default)]
+    headers: bool,
+    /// Max rows to return
+    max_rows: Option<u32>,
+    /// Skip first N data rows
+    offset: Option<u32>,
+}
+
+// ==================== DOCX TOOL ARGS ====================
+
+#[derive(Debug, Deserialize, JsonSchema)]
+struct DocxReadArgs {
+    path: String,
+    /// Include document structure (paragraphs, tables) instead of plain text
+    #[serde(default)]
+    include_structure: bool,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+struct DocxInfoArgs {
+    path: String,
+}
+
+// ==================== WAVE2 TOOL ARGS ====================
+
+#[derive(Debug, Deserialize, JsonSchema)]
+struct PortUsersArgs {
+    /// Port number to check
+    port: u16,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+struct NetConnectionsArgs {
+    /// Filter by process ID (optional)
+    pid: Option<u32>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+struct PortAvailableArgs {
+    /// Port number to check
+    port: u16,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+struct ProcTreeArgs {
+    /// Root process ID (optional, shows all if not specified)
+    pid: Option<u32>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+struct ProcEnvArgs {
+    /// Process ID
+    pid: u32,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+struct ProcFilesArgs {
+    /// Process ID
+    pid: u32,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+struct DiskUsageArgs {
+    /// Path to check (optional, shows all disks if not specified)
+    path: Option<String>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+struct FileDiffArgs {
+    /// First file path
+    path1: String,
+    /// Second file path
+    path2: String,
+    /// Context lines around changes (default: 3)
+    #[serde(default = "default_context_lines")]
+    context: usize,
+}
+
+fn default_context_lines() -> usize { 3 }
+
+#[derive(Debug, Deserialize, JsonSchema)]
+struct FileTouchArgs {
+    /// File path to touch
+    path: String,
+    /// Create parent directories if needed
+    #[serde(default)]
+    create_parents: bool,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+struct ClipboardWriteArgs {
+    /// Text to write to clipboard
+    text: String,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+struct EnvGetArgs {
+    /// Environment variable name
+    name: String,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+struct EnvSetArgs {
+    /// Environment variable name
+    name: String,
+    /// Value to set
+    value: String,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+struct EnvRemoveArgs {
+    /// Environment variable name to remove
+    name: String,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+struct WhichArgs {
+    /// Command name to find
+    command: String,
 }
 
 #[tool_router]
@@ -4771,6 +4974,821 @@ USE CASES: Patch executables, fix binary data, search-replace in non-text files.
             meta: None,
         })
     }
+
+    // ==================== THINKING TOOLS ====================
+
+    #[tool(
+        name = "seq_think",
+        description = "Sequential thinking for structured problem-solving.\n\n\
+            Helps analyze problems through a flexible thinking process that can adapt and evolve.\n\
+            Each thought can build on, question, or revise previous insights.\n\n\
+            When to use:\n\
+            - Breaking down complex problems into steps\n\
+            - Planning and design with room for revision\n\
+            - Analysis that might need course correction\n\
+            - Multi-step solutions requiring context\n\n\
+            Parameters:\n\
+            - thought: Current thinking step content\n\
+            - nextThoughtNeeded: Whether another step is needed\n\
+            - thoughtNumber: Current number (1-based)\n\
+            - totalThoughts: Estimated total (adjustable)\n\
+            - isRevision: If revising previous thinking\n\
+            - revisesThought: Which thought being reconsidered\n\
+            - branchFromThought: Branching point number\n\
+            - branchId: Branch identifier\n\
+            - needsMoreThoughts: If more needed beyond estimate"
+    )]
+    async fn seq_think(
+        &self,
+        Parameters(input): Parameters<ThoughtInput>,
+    ) -> Result<CallToolResult, McpError> {
+        let output = self.thinking_state.process(input);
+        let text = serde_json::to_string_pretty(&output).unwrap_or_else(|_| "{}".to_string());
+        Ok(CallToolResult {
+            content: vec![Content::text(text)],
+            structured_content: Some(json!(output)),
+            is_error: Some(false),
+            meta: None,
+        })
+    }
+
+    // ==================== MEMORY TOOLS ====================
+
+    fn require_memory(&self) -> Result<&KnowledgeGraphManager, McpError> {
+        self.memory_manager.as_ref().map(|m| m.as_ref())
+            .ok_or_else(|| McpError::internal_error("Memory manager not initialized", None))
+    }
+
+    #[tool(
+        name = "mem_entities_create",
+        description = "Create entities in knowledge graph.\n\n\
+            Input: { \"entities\": [{ \"name\": \"id\", \"entityType\": \"type\", \"observations\": [\"fact1\"] }] }\n\
+            Returns only newly created entities (duplicates ignored)."
+    )]
+    async fn mem_entities_create(
+        &self,
+        Parameters(args): Parameters<MemCreateEntitiesArgs>,
+    ) -> Result<CallToolResult, McpError> {
+        let manager = self.require_memory()?;
+        let created = manager.create_entities(args.entities).await
+            .map_err(|e| McpError::internal_error(e.to_string(), None))?;
+        let summary = format!("{} entities created", created.len());
+        Ok(CallToolResult {
+            content: vec![Content::text(&summary)],
+            structured_content: Some(json!({"entities": created})),
+            is_error: Some(false),
+            meta: None,
+        })
+    }
+
+    #[tool(
+        name = "mem_relations_create",
+        description = "Create relations between entities.\n\n\
+            Input: { \"relations\": [{ \"from\": \"entity1\", \"to\": \"entity2\", \"relationType\": \"knows\" }] }\n\
+            Both entities must exist. Returns only newly created relations."
+    )]
+    async fn mem_relations_create(
+        &self,
+        Parameters(args): Parameters<MemCreateRelationsArgs>,
+    ) -> Result<CallToolResult, McpError> {
+        let manager = self.require_memory()?;
+        let created = manager.create_relations(args.relations).await
+            .map_err(|e| McpError::internal_error(e.to_string(), None))?;
+        let summary = format!("{} relations created", created.len());
+        Ok(CallToolResult {
+            content: vec![Content::text(&summary)],
+            structured_content: Some(json!({"relations": created})),
+            is_error: Some(false),
+            meta: None,
+        })
+    }
+
+    #[tool(
+        name = "mem_observations_add",
+        description = "Add observations to existing entities.\n\n\
+            Input: { \"observations\": [{ \"entityName\": \"name\", \"contents\": [\"fact1\", \"fact2\"] }] }\n\
+            Entity must exist. Duplicate observations are ignored."
+    )]
+    async fn mem_observations_add(
+        &self,
+        Parameters(args): Parameters<MemAddObservationsArgs>,
+    ) -> Result<CallToolResult, McpError> {
+        let manager = self.require_memory()?;
+        let results = manager.add_observations(args.observations).await
+            .map_err(|e| McpError::internal_error(e.to_string(), None))?;
+        let summary = format!("Added observations to {} entities", results.len());
+        Ok(CallToolResult {
+            content: vec![Content::text(&summary)],
+            structured_content: Some(json!({"results": results})),
+            is_error: Some(false),
+            meta: None,
+        })
+    }
+
+    #[tool(
+        name = "mem_entities_delete",
+        description = "Delete entities and their relations.\n\n\
+            Input: { \"entityNames\": [\"name1\", \"name2\"] }\n\
+            Relations involving deleted entities are auto-removed."
+    )]
+    async fn mem_entities_delete(
+        &self,
+        Parameters(args): Parameters<MemDeleteEntitiesArgs>,
+    ) -> Result<CallToolResult, McpError> {
+        let manager = self.require_memory()?;
+        let count = manager.delete_entities(args.entity_names).await
+            .map_err(|e| McpError::internal_error(e.to_string(), None))?;
+        Ok(CallToolResult::success(vec![Content::text(format!("{} entities deleted", count))]))
+    }
+
+    #[tool(
+        name = "mem_observations_delete",
+        description = "Delete specific observations from entities.\n\n\
+            Input: { \"deletions\": [{ \"entityName\": \"name\", \"observations\": [\"exact text\"] }] }\n\
+            Observation text must match exactly."
+    )]
+    async fn mem_observations_delete(
+        &self,
+        Parameters(args): Parameters<MemDeleteObservationsArgs>,
+    ) -> Result<CallToolResult, McpError> {
+        let manager = self.require_memory()?;
+        manager.delete_observations(args.deletions).await
+            .map_err(|e| McpError::internal_error(e.to_string(), None))?;
+        Ok(CallToolResult::success(vec![Content::text("Observations deleted")]))
+    }
+
+    #[tool(
+        name = "mem_relations_delete",
+        description = "Delete specific relations.\n\n\
+            Input: { \"relations\": [{ \"from\": \"e1\", \"to\": \"e2\", \"relationType\": \"type\" }] }\n\
+            All three fields must match exactly."
+    )]
+    async fn mem_relations_delete(
+        &self,
+        Parameters(args): Parameters<MemDeleteRelationsArgs>,
+    ) -> Result<CallToolResult, McpError> {
+        let manager = self.require_memory()?;
+        let count = manager.delete_relations(args.relations).await
+            .map_err(|e| McpError::internal_error(e.to_string(), None))?;
+        Ok(CallToolResult::success(vec![Content::text(format!("{} relations deleted", count))]))
+    }
+
+    #[tool(
+        name = "mem_graph_read",
+        description = "Read entire knowledge graph.\n\n\
+            Input: {} (empty object)\n\
+            Returns all entities and relations."
+    )]
+    async fn mem_graph_read(&self) -> Result<CallToolResult, McpError> {
+        let manager = self.require_memory()?;
+        let graph = manager.read_graph().await
+            .map_err(|e| McpError::internal_error(e.to_string(), None))?;
+        let summary = format!("{} entities, {} relations", graph.entities.len(), graph.relations.len());
+        Ok(CallToolResult {
+            content: vec![Content::text(&summary)],
+            structured_content: Some(json!(graph)),
+            is_error: Some(false),
+            meta: None,
+        })
+    }
+
+    #[tool(
+        name = "mem_nodes_search",
+        description = "Search nodes using full-text search.\n\n\
+            Input: { \"query\": \"search terms\" } or { \"query\": null } for all\n\
+            Searches entity names, types, and observations."
+    )]
+    async fn mem_nodes_search(
+        &self,
+        Parameters(args): Parameters<MemSearchNodesArgs>,
+    ) -> Result<CallToolResult, McpError> {
+        let manager = self.require_memory()?;
+        let result = manager.search_nodes(args.query).await
+            .map_err(|e| McpError::internal_error(e.to_string(), None))?;
+        let summary = format!("Found {} entities, {} relations", result.entities.len(), result.relations.len());
+        Ok(CallToolResult {
+            content: vec![Content::text(&summary)],
+            structured_content: Some(json!(result)),
+            is_error: Some(false),
+            meta: None,
+        })
+    }
+
+    #[tool(
+        name = "mem_nodes_open",
+        description = "Open specific nodes by names.\n\n\
+            Input: { \"names\": [\"entity1\", \"entity2\"] }\n\
+            Returns requested entities with their relations."
+    )]
+    async fn mem_nodes_open(
+        &self,
+        Parameters(args): Parameters<MemOpenNodesArgs>,
+    ) -> Result<CallToolResult, McpError> {
+        let manager = self.require_memory()?;
+        let result = manager.open_nodes(args.names).await
+            .map_err(|e| McpError::internal_error(e.to_string(), None))?;
+        let summary = format!("Retrieved {} entities, {} relations", result.entities.len(), result.relations.len());
+        Ok(CallToolResult {
+            content: vec![Content::text(&summary)],
+            structured_content: Some(json!(result)),
+            is_error: Some(false),
+            meta: None,
+        })
+    }
+
+    // ==================== XLSX TOOLS ====================
+
+    #[tool(
+        name = "xlsx_info",
+        description = "Get XLSX workbook metadata.\n\n\
+            Returns sheet names and dimensions."
+    )]
+    async fn xlsx_info(
+        &self,
+        Parameters(args): Parameters<XlsxInfoArgs>,
+    ) -> Result<CallToolResult, McpError> {
+        let path = self.resolve(&args.path).await?;
+        let info = crate::tools::xlsx::xlsx_info(&path)
+            .map_err(|e| McpError::internal_error(e, None))?;
+        Ok(CallToolResult {
+            content: vec![Content::text(serde_json::to_string_pretty(&info).unwrap_or_default())],
+            structured_content: Some(info),
+            is_error: Some(false),
+            meta: None,
+        })
+    }
+
+    #[tool(
+        name = "xlsx_sheets",
+        description = "List sheet names in XLSX workbook."
+    )]
+    async fn xlsx_sheets(
+        &self,
+        Parameters(args): Parameters<XlsxSheetsArgs>,
+    ) -> Result<CallToolResult, McpError> {
+        let path = self.resolve(&args.path).await?;
+        let sheets = crate::tools::xlsx::xlsx_sheets(&path)
+            .map_err(|e| McpError::internal_error(e, None))?;
+        Ok(CallToolResult {
+            content: vec![Content::text(sheets.join(", "))],
+            structured_content: Some(json!({"sheets": sheets})),
+            is_error: Some(false),
+            meta: None,
+        })
+    }
+
+    #[tool(
+        name = "xlsx_read",
+        description = "Read XLSX sheet data as JSON.\n\n\
+            Args: path, sheet (optional), headers (bool), max_rows, offset.\n\
+            With headers=true, returns array of objects using first row as keys."
+    )]
+    async fn xlsx_read(
+        &self,
+        Parameters(args): Parameters<XlsxReadArgs>,
+    ) -> Result<CallToolResult, McpError> {
+        let path = self.resolve(&args.path).await?;
+        let data = crate::tools::xlsx::xlsx_read(
+            &path,
+            args.sheet.as_deref(),
+            args.headers,
+            args.max_rows,
+            args.offset,
+        ).map_err(|e| McpError::internal_error(e, None))?;
+        
+        let summary = format!(
+            "Read {} rows from sheet '{}'",
+            data.get("returned").and_then(|v| v.as_u64()).unwrap_or(0),
+            data.get("sheet").and_then(|v| v.as_str()).unwrap_or("?")
+        );
+        Ok(CallToolResult {
+            content: vec![Content::text(&summary)],
+            structured_content: Some(data),
+            is_error: Some(false),
+            meta: None,
+        })
+    }
+
+    // ==================== DOCX TOOLS ====================
+
+    #[tool(
+        name = "docx_read",
+        description = "Read DOCX document content.\n\n\
+            Args: path, include_structure (bool).\n\
+            With include_structure=false (default): returns plain text.\n\
+            With include_structure=true: returns paragraphs and tables as JSON."
+    )]
+    async fn docx_read(
+        &self,
+        Parameters(args): Parameters<DocxReadArgs>,
+    ) -> Result<CallToolResult, McpError> {
+        let path = self.resolve(&args.path).await?;
+        let data = crate::tools::docx::docx_read(&path, args.include_structure)
+            .map_err(|e| McpError::internal_error(e, None))?;
+        
+        let summary = if args.include_structure {
+            format!(
+                "Read {} paragraphs, {} tables",
+                data.get("paragraph_count").and_then(|v| v.as_u64()).unwrap_or(0),
+                data.get("table_count").and_then(|v| v.as_u64()).unwrap_or(0)
+            )
+        } else {
+            format!(
+                "Extracted {} characters",
+                data.get("length").and_then(|v| v.as_u64()).unwrap_or(0)
+            )
+        };
+        Ok(CallToolResult {
+            content: vec![Content::text(&summary)],
+            structured_content: Some(data),
+            is_error: Some(false),
+            meta: None,
+        })
+    }
+
+    #[tool(
+        name = "docx_info",
+        description = "Get DOCX document metadata.\n\n\
+            Returns paragraph count, table count, total characters."
+    )]
+    async fn docx_info(
+        &self,
+        Parameters(args): Parameters<DocxInfoArgs>,
+    ) -> Result<CallToolResult, McpError> {
+        let path = self.resolve(&args.path).await?;
+        let info = crate::tools::docx::docx_info(&path)
+            .map_err(|e| McpError::internal_error(e, None))?;
+        Ok(CallToolResult {
+            content: vec![Content::text(serde_json::to_string_pretty(&info).unwrap_or_default())],
+            structured_content: Some(info),
+            is_error: Some(false),
+            meta: None,
+        })
+    }
+
+    // ==================== LLM TOOLS ====================
+
+    #[tool(
+        name = "ai_messages",
+        description = "Claude Messages API-compatible conversation tool.\n\n\
+            Supports tools, tool_choice, and streaming via progress notifications.\n\
+            Request: { model, max_tokens, messages:[{role, content}], system?, tools?, stream? }.\n\
+            Response: Anthropic-style message with content blocks and stop_reason."
+    )]
+    async fn ai_messages(
+        &self,
+        Parameters(request): Parameters<tools::llm::model::MessagesRequest>,
+        meta: Meta,
+        client: Peer<RoleServer>,
+    ) -> Result<CallToolResult, McpError> {
+        let llm = self.require_llm()?;
+        let provider = llm.state().config.primary_provider();
+        llm.messages_for_provider(&provider, request, meta, client).await
+    }
+
+    #[tool(
+        name = "ai_messages_gemini",
+        description = "Claude Messages API-compatible conversation tool backed by Gemini."
+    )]
+    async fn ai_messages_gemini(
+        &self,
+        Parameters(request): Parameters<tools::llm::model::MessagesRequest>,
+        meta: Meta,
+        client: Peer<RoleServer>,
+    ) -> Result<CallToolResult, McpError> {
+        let llm = self.require_llm()?;
+        llm.messages_for_provider("gemini", request, meta, client).await
+    }
+
+    #[tool(
+        name = "ai_messages_openai",
+        description = "Claude Messages API-compatible conversation tool backed by OpenAI."
+    )]
+    async fn ai_messages_openai(
+        &self,
+        Parameters(request): Parameters<tools::llm::model::MessagesRequest>,
+        meta: Meta,
+        client: Peer<RoleServer>,
+    ) -> Result<CallToolResult, McpError> {
+        let llm = self.require_llm()?;
+        llm.messages_for_provider("openai", request, meta, client).await
+    }
+
+    #[tool(
+        name = "ai_messages_cerebras",
+        description = "Claude Messages API-compatible conversation tool backed by Cerebras."
+    )]
+    async fn ai_messages_cerebras(
+        &self,
+        Parameters(request): Parameters<tools::llm::model::MessagesRequest>,
+        meta: Meta,
+        client: Peer<RoleServer>,
+    ) -> Result<CallToolResult, McpError> {
+        let llm = self.require_llm()?;
+        llm.messages_for_provider("cerebras", request, meta, client).await
+    }
+
+    #[tool(
+        name = "ai_count_tokens",
+        description = "Claude Messages API-compatible token counting.\n\n\
+            Returns input_tokens based on provider usage."
+    )]
+    async fn ai_count_tokens(
+        &self,
+        Parameters(request): Parameters<tools::llm::model::TokenCountRequest>,
+    ) -> Result<CallToolResult, McpError> {
+        let llm = self.require_llm()?;
+        let provider = llm.state().config.primary_provider();
+        llm.count_tokens_for_provider(&provider, request).await
+    }
+
+    #[tool(
+        name = "ai_count_tokens_gemini",
+        description = "Token counting backed by Gemini."
+    )]
+    async fn ai_count_tokens_gemini(
+        &self,
+        Parameters(request): Parameters<tools::llm::model::TokenCountRequest>,
+    ) -> Result<CallToolResult, McpError> {
+        let llm = self.require_llm()?;
+        llm.count_tokens_for_provider("gemini", request).await
+    }
+
+    #[tool(
+        name = "ai_count_tokens_openai",
+        description = "Token counting backed by OpenAI."
+    )]
+    async fn ai_count_tokens_openai(
+        &self,
+        Parameters(request): Parameters<tools::llm::model::TokenCountRequest>,
+    ) -> Result<CallToolResult, McpError> {
+        let llm = self.require_llm()?;
+        llm.count_tokens_for_provider("openai", request).await
+    }
+
+    #[tool(
+        name = "ai_count_tokens_cerebras",
+        description = "Token counting backed by Cerebras."
+    )]
+    async fn ai_count_tokens_cerebras(
+        &self,
+        Parameters(request): Parameters<tools::llm::model::TokenCountRequest>,
+    ) -> Result<CallToolResult, McpError> {
+        let llm = self.require_llm()?;
+        llm.count_tokens_for_provider("cerebras", request).await
+    }
+
+    // ==================== WAVE2 TOOLS ====================
+
+    #[tool(
+        name = "port_users",
+        description = "Find processes using a specific port.\n\n\
+            Returns list of processes with PID, name, protocol, and connection state."
+    )]
+    async fn port_users(
+        &self,
+        Parameters(args): Parameters<PortUsersArgs>,
+    ) -> Result<CallToolResult, McpError> {
+        let users = tools::wave2::net::port_users(args.port)
+            .map_err(|e| McpError::internal_error(e, None))?;
+        let count = users.len();
+        Ok(CallToolResult {
+            content: vec![Content::text(format!("{} process(es) using port {}", count, args.port))],
+            structured_content: Some(json!({"port": args.port, "count": count, "processes": users})),
+            is_error: Some(false),
+            meta: None,
+        })
+    }
+
+    #[tool(
+        name = "net_connections",
+        description = "List network connections.\n\n\
+            Optionally filter by process ID. Shows protocol, addresses, ports, and state."
+    )]
+    async fn net_connections(
+        &self,
+        Parameters(args): Parameters<NetConnectionsArgs>,
+    ) -> Result<CallToolResult, McpError> {
+        let conns = tools::wave2::net::net_connections(args.pid)
+            .map_err(|e| McpError::internal_error(e, None))?;
+        let count = conns.len();
+        let summary = match args.pid {
+            Some(pid) => format!("{} connection(s) for PID {}", count, pid),
+            None => format!("{} total connection(s)", count),
+        };
+        Ok(CallToolResult {
+            content: vec![Content::text(&summary)],
+            structured_content: Some(json!({"count": count, "connections": conns})),
+            is_error: Some(false),
+            meta: None,
+        })
+    }
+
+    #[tool(
+        name = "port_available",
+        description = "Check if a port is available (not in use)."
+    )]
+    async fn port_available(
+        &self,
+        Parameters(args): Parameters<PortAvailableArgs>,
+    ) -> Result<CallToolResult, McpError> {
+        let available = tools::wave2::net::port_available(args.port);
+        let msg = if available {
+            format!("Port {} is available", args.port)
+        } else {
+            format!("Port {} is in use", args.port)
+        };
+        Ok(CallToolResult {
+            content: vec![Content::text(&msg)],
+            structured_content: Some(json!({"port": args.port, "available": available})),
+            is_error: Some(false),
+            meta: None,
+        })
+    }
+
+    #[tool(
+        name = "proc_tree",
+        description = "Get process tree with parent-child relationships.\n\n\
+            Shows PID, name, CPU%, memory, and children for each process."
+    )]
+    async fn proc_tree(
+        &self,
+        Parameters(args): Parameters<ProcTreeArgs>,
+    ) -> Result<CallToolResult, McpError> {
+        let tree = tools::wave2::proc::proc_tree(args.pid)
+            .map_err(|e| McpError::internal_error(e, None))?;
+        let summary = match args.pid {
+            Some(pid) => format!("Process tree for PID {}", pid),
+            None => "Full process tree".to_string(),
+        };
+        Ok(CallToolResult {
+            content: vec![Content::text(&summary)],
+            structured_content: Some(tree),
+            is_error: Some(false),
+            meta: None,
+        })
+    }
+
+    #[tool(
+        name = "proc_env",
+        description = "Get environment variables of a process."
+    )]
+    async fn proc_env(
+        &self,
+        Parameters(args): Parameters<ProcEnvArgs>,
+    ) -> Result<CallToolResult, McpError> {
+        let env = tools::wave2::proc::proc_env(args.pid)
+            .map_err(|e| McpError::internal_error(e, None))?;
+        let count = env.get("env_count").and_then(|v| v.as_u64()).unwrap_or(0);
+        Ok(CallToolResult {
+            content: vec![Content::text(format!("{} environment variables for PID {}", count, args.pid))],
+            structured_content: Some(env),
+            is_error: Some(false),
+            meta: None,
+        })
+    }
+
+    #[tool(
+        name = "proc_files",
+        description = "Get open files of a process.\n\n\
+            Full support on Linux/macOS. Limited info on Windows."
+    )]
+    async fn proc_files(
+        &self,
+        Parameters(args): Parameters<ProcFilesArgs>,
+    ) -> Result<CallToolResult, McpError> {
+        let files = tools::wave2::proc::proc_files(args.pid)
+            .map_err(|e| McpError::internal_error(e, None))?;
+        let count = files.get("file_count").and_then(|v| v.as_u64()).unwrap_or(0);
+        Ok(CallToolResult {
+            content: vec![Content::text(format!("{} open file(s) for PID {}", count, args.pid))],
+            structured_content: Some(files),
+            is_error: Some(false),
+            meta: None,
+        })
+    }
+
+    #[tool(
+        name = "disk_usage",
+        description = "Get disk usage information.\n\n\
+            Shows total, used, available space for a path or all disks."
+    )]
+    async fn disk_usage(
+        &self,
+        Parameters(args): Parameters<DiskUsageArgs>,
+    ) -> Result<CallToolResult, McpError> {
+        let path = args.path.as_ref().map(std::path::Path::new);
+        let usage = tools::wave2::sys::disk_usage(path)
+            .map_err(|e| McpError::internal_error(e, None))?;
+        let summary = match &args.path {
+            Some(p) => format!("Disk usage for {}", p),
+            None => "All disks".to_string(),
+        };
+        Ok(CallToolResult {
+            content: vec![Content::text(&summary)],
+            structured_content: Some(usage),
+            is_error: Some(false),
+            meta: None,
+        })
+    }
+
+    #[tool(
+        name = "sys_info",
+        description = "Get system information.\n\n\
+            Returns CPU, memory, swap, uptime, OS info, and load average."
+    )]
+    async fn sys_info(&self) -> Result<CallToolResult, McpError> {
+        let info = tools::wave2::sys::sys_info();
+        let hostname = info.get("hostname").and_then(|v| v.as_str()).unwrap_or("unknown");
+        Ok(CallToolResult {
+            content: vec![Content::text(format!("System info for {}", hostname))],
+            structured_content: Some(info),
+            is_error: Some(false),
+            meta: None,
+        })
+    }
+
+    #[tool(
+        name = "file_diff",
+        description = "Compare two files and show differences.\n\n\
+            Returns unified diff with additions, deletions, and context."
+    )]
+    async fn file_diff(
+        &self,
+        Parameters(args): Parameters<FileDiffArgs>,
+    ) -> Result<CallToolResult, McpError> {
+        let path1 = self.resolve(&args.path1).await?;
+        let path2 = self.resolve(&args.path2).await?;
+        let diff = tools::wave2::file::file_diff(&path1, &path2, args.context)
+            .map_err(|e| McpError::internal_error(e, None))?;
+        let identical = diff.get("identical").and_then(|v| v.as_bool()).unwrap_or(false);
+        let adds = diff.get("additions").and_then(|v| v.as_u64()).unwrap_or(0);
+        let dels = diff.get("deletions").and_then(|v| v.as_u64()).unwrap_or(0);
+        let summary = if identical {
+            "Files are identical".to_string()
+        } else {
+            format!("+{} -{} lines", adds, dels)
+        };
+        Ok(CallToolResult {
+            content: vec![Content::text(&summary)],
+            structured_content: Some(diff),
+            is_error: Some(false),
+            meta: None,
+        })
+    }
+
+    #[tool(
+        name = "file_touch",
+        description = "Create file or update its timestamp (like touch command)."
+    )]
+    async fn file_touch(
+        &self,
+        Parameters(args): Parameters<FileTouchArgs>,
+    ) -> Result<CallToolResult, McpError> {
+        let path = self.resolve(&args.path).await?;
+        let result = tools::wave2::file::file_touch(&path, args.create_parents)
+            .map_err(|e| McpError::internal_error(e, None))?;
+        let created = result.get("created").and_then(|v| v.as_bool()).unwrap_or(false);
+        let summary = if created { "File created" } else { "Timestamp updated" };
+        Ok(CallToolResult {
+            content: vec![Content::text(summary)],
+            structured_content: Some(result),
+            is_error: Some(false),
+            meta: None,
+        })
+    }
+
+    #[tool(
+        name = "clipboard_read",
+        description = "Read text from system clipboard."
+    )]
+    async fn clipboard_read(&self) -> Result<CallToolResult, McpError> {
+        let text = tools::wave2::util::clipboard_read()
+            .map_err(|e| McpError::internal_error(e, None))?;
+        let len = text.len();
+        Ok(CallToolResult {
+            content: vec![Content::text(&text)],
+            structured_content: Some(json!({"text": text, "length": len})),
+            is_error: Some(false),
+            meta: None,
+        })
+    }
+
+    #[tool(
+        name = "clipboard_write",
+        description = "Write text to system clipboard."
+    )]
+    async fn clipboard_write(
+        &self,
+        Parameters(args): Parameters<ClipboardWriteArgs>,
+    ) -> Result<CallToolResult, McpError> {
+        tools::wave2::util::clipboard_write(&args.text)
+            .map_err(|e| McpError::internal_error(e, None))?;
+        Ok(CallToolResult {
+            content: vec![Content::text(format!("Wrote {} characters to clipboard", args.text.len()))],
+            structured_content: Some(json!({"success": true, "length": args.text.len()})),
+            is_error: Some(false),
+            meta: None,
+        })
+    }
+
+    #[tool(
+        name = "env_get",
+        description = "Get environment variable value."
+    )]
+    async fn env_get(
+        &self,
+        Parameters(args): Parameters<EnvGetArgs>,
+    ) -> Result<CallToolResult, McpError> {
+        match tools::wave2::util::env_get(&args.name) {
+            Some(value) => Ok(CallToolResult {
+                content: vec![Content::text(&value)],
+                structured_content: Some(json!({"name": args.name, "value": value, "found": true})),
+                is_error: Some(false),
+                meta: None,
+            }),
+            None => Ok(CallToolResult {
+                content: vec![Content::text(format!("Environment variable '{}' not found", args.name))],
+                structured_content: Some(json!({"name": args.name, "found": false})),
+                is_error: Some(false),
+                meta: None,
+            }),
+        }
+    }
+
+    #[tool(
+        name = "env_set",
+        description = "Set environment variable (current process only)."
+    )]
+    async fn env_set(
+        &self,
+        Parameters(args): Parameters<EnvSetArgs>,
+    ) -> Result<CallToolResult, McpError> {
+        tools::wave2::util::env_set(&args.name, &args.value);
+        Ok(CallToolResult {
+            content: vec![Content::text(format!("Set {}={}", args.name, args.value))],
+            structured_content: Some(json!({"name": args.name, "value": args.value, "success": true})),
+            is_error: Some(false),
+            meta: None,
+        })
+    }
+
+    /// Remove an environment variable (current process only)
+    #[tool(name = "env_remove")]
+    async fn env_remove(
+        &self,
+        Parameters(args): Parameters<EnvRemoveArgs>,
+    ) -> Result<CallToolResult, McpError> {
+        tools::wave2::util::env_remove(&args.name);
+        Ok(CallToolResult {
+            content: vec![Content::text(format!("Removed {}", args.name))],
+            structured_content: Some(json!({"name": args.name, "success": true})),
+            is_error: Some(false),
+            meta: None,
+        })
+    }
+
+    #[tool(
+        name = "env_list",
+        description = "List all environment variables."
+    )]
+    async fn env_list(&self) -> Result<CallToolResult, McpError> {
+        let list = tools::wave2::util::env_list();
+        let count = list.get("count").and_then(|v| v.as_u64()).unwrap_or(0);
+        Ok(CallToolResult {
+            content: vec![Content::text(format!("{} environment variables", count))],
+            structured_content: Some(list),
+            is_error: Some(false),
+            meta: None,
+        })
+    }
+
+    #[tool(
+        name = "which",
+        description = "Find executable in PATH (like 'which' command)."
+    )]
+    async fn which(
+        &self,
+        Parameters(args): Parameters<WhichArgs>,
+    ) -> Result<CallToolResult, McpError> {
+        match tools::wave2::util::which(&args.command) {
+            Ok(result) => {
+                let path = result.get("path").and_then(|v| v.as_str()).unwrap_or("");
+                Ok(CallToolResult {
+                    content: vec![Content::text(path)],
+                    structured_content: Some(result),
+                    is_error: Some(false),
+                    meta: None,
+                })
+            }
+            Err(e) => Ok(CallToolResult {
+                content: vec![Content::text(&e)],
+                structured_content: Some(json!({"command": args.command, "found": false, "error": e})),
+                is_error: Some(false),
+                meta: None,
+            }),
+        }
+    }
 }
 
 #[tool_handler]
@@ -4841,6 +5859,12 @@ async fn run_stream_mode(
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args = Args::parse();
 
+    // Handle --list-features
+    if args.list_features {
+        print_features();
+        return Ok(());
+    }
+
     // Determine transport mode
     let mode = if args.stream_mode {
         TransportMode::Stream
@@ -4869,6 +5893,32 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         allowlist.extend(parse_allowlist_env("FS_MCP_S3_ALLOW_LIST"));
         server.s3_allowlist_buckets = allowlist;
     }
+    {
+        let db_path = args.memory_db
+            .or_else(|| std::env::var("FS_MCP_MEMORY_DB").ok().map(PathBuf::from))
+            .unwrap_or_else(|| {
+                let mut path = dirs::data_local_dir().unwrap_or_else(|| PathBuf::from("."));
+                path.push("filesystem-mcp-rs");
+                path.push("memory.db");
+                path
+            });
+        match KnowledgeGraphManager::new(db_path) {
+            Ok(manager) => server.memory_manager = Some(Arc::new(manager)),
+            Err(e) => warn!("Failed to initialize memory manager: {}", e),
+        }
+    }
+
+    // Initialize LLM server (if API keys are available)
+    {
+        match tools::llm::build_state() {
+            Ok(state) => {
+                let llm = tools::llm::LlmMcpServer::new(state);
+                info!("LLM server initialized with providers: {:?}", llm.available_providers());
+                server.llm_server = Some(llm);
+            }
+            Err(e) => info!("LLM server not initialized: {}", e),
+        }
+    }
 
     // Run in selected mode
     match mode {
@@ -4887,6 +5937,33 @@ fn internal_err<T: ToString>(message: &'static str) -> impl FnOnce(T) -> McpErro
             Some(json!({ "error": details }))
         )
     }
+}
+
+fn print_features() {
+    println!("filesystem-mcp-rs v{}", env!("CARGO_PKG_VERSION"));
+    println!("Enabled features:");
+    
+    #[cfg(feature = "http-tools")]
+    println!("  + http-tools");
+    #[cfg(not(feature = "http-tools"))]
+    println!("  - http-tools");
+    
+    #[cfg(feature = "s3-tools")]
+    println!("  + s3-tools");
+    #[cfg(not(feature = "s3-tools"))]
+    println!("  - s3-tools");
+    
+    #[cfg(feature = "screenshot-tools")]
+    println!("  + screenshot-tools");
+    #[cfg(not(feature = "screenshot-tools"))]
+    println!("  - screenshot-tools");
+    
+    println!("  + thinking-tools (always on)");
+    println!("  + memory-tools (always on)");
+    println!("  + xlsx-tools (always on)");
+    println!("  + docx-tools (always on)");
+    println!("  + llm-tools (always on, needs API keys)");
+    println!("  + wave2-tools (always on) - port_users, net_connections, proc_tree, disk_usage, etc.");
 }
 
 fn parse_allowlist_env(var_name: &str) -> Vec<String> {

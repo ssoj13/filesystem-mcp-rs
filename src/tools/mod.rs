@@ -25,3 +25,10 @@ pub mod http_tools;
 pub mod s3_tools;
 #[cfg(feature = "screenshot-tools")]
 pub mod screenshot;
+pub mod thinking;
+pub mod memory;
+pub mod xlsx;
+pub mod docx;
+#[allow(dead_code, unused_imports)]
+pub mod llm;
+pub mod wave2;
