@@ -5910,7 +5910,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Initialize LLM server (if API keys are available)
     {
-        match tools::llm::build_state() {
+        match tools::llm::build_state().await {
             Ok(state) => {
                 let llm = tools::llm::LlmMcpServer::new(state);
                 info!("LLM server initialized with providers: {:?}", llm.available_providers());

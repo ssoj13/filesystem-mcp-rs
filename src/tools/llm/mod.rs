@@ -919,14 +919,12 @@ impl WithStructured for CallToolResult {
     }
 }
 
-pub fn build_state() -> Result<AppState, String> {
-    let handle = tokio::runtime::Handle::current();
-    handle.block_on(build_state_with_options(None, None, false))
+pub async fn build_state() -> Result<AppState, String> {
+    build_state_with_options(None, None, false).await
 }
 
-pub fn build_state_with_overrides(timeout_seconds: Option<u64>) -> Result<AppState, String> {
-    let handle = tokio::runtime::Handle::current();
-    handle.block_on(build_state_with_options(timeout_seconds, None, false))
+pub async fn build_state_with_overrides(timeout_seconds: Option<u64>) -> Result<AppState, String> {
+    build_state_with_options(timeout_seconds, None, false).await
 }
 
 pub async fn build_state_with_options(
