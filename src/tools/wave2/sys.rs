@@ -157,3 +157,59 @@ fn format_duration(seconds: u64) -> String {
         format!("{}s", secs)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_sys_info() {
+        let info = sys_info();
+        assert!(info.get("hostname").is_some());
+        assert!(info.get("os").is_some());
+        assert!(info.get("cpu").is_some());
+        assert!(info.get("memory").is_some());
+        assert!(info["cpu"]["count"].as_u64().unwrap() > 0);
+        assert!(info["memory"]["total_bytes"].as_u64().unwrap() > 0);
+    }
+
+    #[test]
+    fn test_disk_usage_all() {
+        let result = disk_usage(None);
+        assert!(result.is_ok());
+        let json = result.unwrap();
+        assert!(json.get("disk_count").is_some());
+        assert!(json.get("disks").is_some());
+    }
+
+    #[test]
+    fn test_disk_usage_specific() {
+        // Use absolute path to current directory
+        let path = std::env::current_dir().unwrap();
+        let result = disk_usage(Some(&path));
+        // May fail if path doesn't match any mount point
+        if let Ok(json) = result {
+            assert!(json.get("total_bytes").is_some());
+            assert!(json.get("available_bytes").is_some());
+        }
+    }
+
+    #[test]
+    fn test_format_bytes() {
+        assert_eq!(format_bytes(0), "0 B");
+        assert_eq!(format_bytes(1023), "1023 B");
+        assert_eq!(format_bytes(1024), "1.00 KB");
+        assert_eq!(format_bytes(1024 * 1024), "1.00 MB");
+        assert_eq!(format_bytes(1024 * 1024 * 1024), "1.00 GB");
+    }
+
+    #[test]
+    fn test_format_duration() {
+        assert_eq!(format_duration(0), "0s");
+        assert_eq!(format_duration(59), "59s");
+        assert_eq!(format_duration(60), "1m 0s");
+        assert_eq!(format_duration(3600), "1h 0m 0s");
+        assert_eq!(format_duration(86400), "1d 0h 0m 0s");
+        assert_eq!(format_duration(90061), "1d 1h 1m 1s");
+    }
+}

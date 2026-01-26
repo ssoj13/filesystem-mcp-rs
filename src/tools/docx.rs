@@ -76,3 +76,36 @@ pub fn docx_info(path: &Path) -> Result<Value, String> {
         "total_characters": total_chars
     }))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::path::PathBuf;
+
+    #[test]
+    fn test_docx_read_not_found() {
+        let path = PathBuf::from("nonexistent.docx");
+        let result = docx_read(&path, false);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_docx_info_not_found() {
+        let path = PathBuf::from("nonexistent.docx");
+        let result = docx_info(&path);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_docx_read_invalid_file() {
+        use tempfile::NamedTempFile;
+        use std::io::Write;
+        
+        // Create a non-docx file
+        let mut temp = NamedTempFile::with_suffix(".docx").unwrap();
+        temp.write_all(b"not a docx file").unwrap();
+        
+        let result = docx_read(temp.path(), false);
+        assert!(result.is_err());
+    }
+}

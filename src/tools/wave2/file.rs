@@ -176,3 +176,98 @@ pub fn file_touch(path: &Path, create_parents: bool) -> Result<Value, String> {
             .map(|d| d.as_secs())
     }))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tempfile::TempDir;
+
+    #[test]
+    fn test_file_diff_identical() {
+        let dir = TempDir::new().unwrap();
+        let file1 = dir.path().join("a.txt");
+        let file2 = dir.path().join("b.txt");
+        
+        fs::write(&file1, "hello\nworld\n").unwrap();
+        fs::write(&file2, "hello\nworld\n").unwrap();
+        
+        let result = file_diff(&file1, &file2, 3).unwrap();
+        assert_eq!(result["identical"], true);
+        assert_eq!(result["additions"], 0);
+        assert_eq!(result["deletions"], 0);
+    }
+
+    #[test]
+    fn test_file_diff_changes() {
+        let dir = TempDir::new().unwrap();
+        let file1 = dir.path().join("a.txt");
+        let file2 = dir.path().join("b.txt");
+        
+        fs::write(&file1, "line1\nline2\nline3\n").unwrap();
+        fs::write(&file2, "line1\nmodified\nline3\nnew line\n").unwrap();
+        
+        let result = file_diff(&file1, &file2, 3).unwrap();
+        assert_eq!(result["identical"], false);
+        assert!(result["additions"].as_u64().unwrap() > 0);
+        assert!(result["deletions"].as_u64().unwrap() > 0);
+        assert!(result["unified_diff"].as_str().unwrap().contains("---"));
+        assert!(result["unified_diff"].as_str().unwrap().contains("+++"));
+    }
+
+    #[test]
+    fn test_file_diff_unicode() {
+        let dir = TempDir::new().unwrap();
+        let file1 = dir.path().join("a.txt");
+        let file2 = dir.path().join("b.txt");
+        
+        fs::write(&file1, "Привет\n世界\n").unwrap();
+        fs::write(&file2, "Привет\n世界\n🦀\n").unwrap();
+        
+        let result = file_diff(&file1, &file2, 3).unwrap();
+        assert_eq!(result["additions"], 1);
+        assert!(result["unified_diff"].as_str().unwrap().contains("🦀"));
+    }
+
+    #[test]
+    fn test_file_touch_create() {
+        let dir = TempDir::new().unwrap();
+        let file = dir.path().join("new_file.txt");
+        
+        assert!(!file.exists());
+        let result = file_touch(&file, false).unwrap();
+        assert!(file.exists());
+        assert_eq!(result["created"], true);
+        assert_eq!(result["updated"], false);
+    }
+
+    #[test]
+    fn test_file_touch_update() {
+        let dir = TempDir::new().unwrap();
+        let file = dir.path().join("existing.txt");
+        fs::write(&file, "content").unwrap();
+        
+        let result = file_touch(&file, false).unwrap();
+        assert_eq!(result["created"], false);
+        assert_eq!(result["updated"], true);
+    }
+
+    #[test]
+    fn test_file_touch_create_parents() {
+        let dir = TempDir::new().unwrap();
+        let file = dir.path().join("deep").join("nested").join("file.txt");
+        
+        let result = file_touch(&file, true).unwrap();
+        assert!(file.exists());
+        assert_eq!(result["created"], true);
+    }
+
+    #[test]
+    fn test_file_touch_unicode_path() {
+        let dir = TempDir::new().unwrap();
+        let file = dir.path().join("файл_🦀.txt");
+        
+        let result = file_touch(&file, false).unwrap();
+        assert!(file.exists());
+        assert!(result["path"].as_str().unwrap().contains("🦀"));
+    }
+}

@@ -145,3 +145,100 @@ fn cell_to_value(cell: Option<&Data>) -> Value {
         Some(Data::Empty) | None => Value::Null,
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tempfile::NamedTempFile;
+
+    fn create_test_xlsx() -> NamedTempFile {
+        use rust_xlsxwriter::Workbook;
+        
+        let temp = NamedTempFile::with_suffix(".xlsx").unwrap();
+        let mut workbook = Workbook::new();
+        let sheet = workbook.add_worksheet();
+        
+        // Headers
+        sheet.write_string(0, 0, "Name").unwrap();
+        sheet.write_string(0, 1, "Value").unwrap();
+        sheet.write_string(0, 2, "Описание").unwrap(); // Unicode header
+        
+        // Data
+        sheet.write_string(1, 0, "Alpha").unwrap();
+        sheet.write_number(1, 1, 42.0).unwrap();
+        sheet.write_string(1, 2, "Привет 🦀").unwrap();
+        
+        sheet.write_string(2, 0, "Beta").unwrap();
+        sheet.write_number(2, 1, 3.14).unwrap();
+        sheet.write_string(2, 2, "世界").unwrap();
+        
+        workbook.save(temp.path()).unwrap();
+        temp
+    }
+
+    #[test]
+    fn test_xlsx_info() {
+        let temp = create_test_xlsx();
+        let result = xlsx_info(temp.path());
+        assert!(result.is_ok());
+        let json = result.unwrap();
+        assert_eq!(json["sheet_count"], 1);
+        assert!(json["sheets"].as_array().unwrap().len() > 0);
+    }
+
+    #[test]
+    fn test_xlsx_sheets() {
+        let temp = create_test_xlsx();
+        let result = xlsx_sheets(temp.path());
+        assert!(result.is_ok());
+        let sheets = result.unwrap();
+        assert!(!sheets.is_empty());
+    }
+
+    #[test]
+    fn test_xlsx_read_with_headers() {
+        let temp = create_test_xlsx();
+        let result = xlsx_read(temp.path(), None, true, None, None);
+        assert!(result.is_ok());
+        let json = result.unwrap();
+        assert!(json.get("headers").is_some());
+        assert!(json.get("data").is_some());
+        
+        // Check Unicode header
+        let headers = json["headers"].as_array().unwrap();
+        assert!(headers.iter().any(|h| h.as_str().unwrap().contains("Описание")));
+    }
+
+    #[test]
+    fn test_xlsx_read_unicode_data() {
+        let temp = create_test_xlsx();
+        let result = xlsx_read(temp.path(), None, true, None, None);
+        assert!(result.is_ok());
+        let json = result.unwrap();
+        
+        // Check Unicode data is preserved
+        let data = json["data"].as_array().unwrap();
+        let first_row = &data[0];
+        assert!(first_row["Описание"].as_str().unwrap().contains("🦀"));
+    }
+
+    #[test]
+    fn test_xlsx_read_pagination() {
+        let temp = create_test_xlsx();
+        let result = xlsx_read(temp.path(), None, true, Some(1), Some(0));
+        assert!(result.is_ok());
+        let json = result.unwrap();
+        assert_eq!(json["returned"], 1);
+    }
+
+    #[test]
+    fn test_xlsx_read_no_headers() {
+        let temp = create_test_xlsx();
+        let result = xlsx_read(temp.path(), None, false, None, None);
+        assert!(result.is_ok());
+        let json = result.unwrap();
+        // Data should be array of arrays
+        let data = json["data"].as_array().unwrap();
+        assert!(data[0].is_array());
+    }
+}

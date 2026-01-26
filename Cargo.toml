@@ -91,6 +91,7 @@ dirs = "6.0"
 [dev-dependencies]
 tempfile = "3.24.0"
 serial_test = "3.2"
+rust_xlsxwriter = "0.92"
 
 [features]
 default = ["http-tools", "s3-tools", "screenshot-tools"]

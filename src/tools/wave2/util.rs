@@ -141,3 +141,74 @@ pub fn which(command: &str) -> Result<Value, String> {
         }))
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_env_get_set_remove() {
+        let key = "TEST_WAVE2_ENV_VAR";
+        let value = "test_value_123";
+        
+        // Initially not set
+        assert!(env_get(key).is_none());
+        
+        // Set and get
+        env_set(key, value);
+        assert_eq!(env_get(key), Some(value.to_string()));
+        
+        // Remove
+        env_remove(key);
+        assert!(env_get(key).is_none());
+    }
+
+    #[test]
+    fn test_env_unicode() {
+        let key = "TEST_WAVE2_UNICODE";
+        let value = "Привет мир 你好世界 🦀";
+        
+        env_set(key, value);
+        assert_eq!(env_get(key), Some(value.to_string()));
+        env_remove(key);
+    }
+
+    #[test]
+    fn test_env_list() {
+        let result = env_list();
+        assert!(result.get("count").is_some());
+        assert!(result.get("variables").is_some());
+        let count = result["count"].as_u64().unwrap();
+        assert!(count > 0);
+    }
+
+    #[test]
+    fn test_which_cargo() {
+        // cargo should be in PATH for Rust projects
+        let result = which("cargo");
+        assert!(result.is_ok());
+        let json = result.unwrap();
+        assert_eq!(json["command"], "cargo");
+        assert_eq!(json["found"], true);
+        assert!(json["path"].as_str().is_some());
+    }
+
+    #[test]
+    fn test_which_not_found() {
+        let result = which("nonexistent_command_12345");
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("not found"));
+    }
+
+    #[test]
+    #[cfg(feature = "screenshot-tools")]
+    fn test_clipboard_roundtrip() {
+        let text = "Test clipboard text 🦀 Привет";
+        // This test may fail in CI without display
+        if clipboard_write(text).is_ok() {
+            if let Ok(read) = clipboard_read() {
+                assert_eq!(read, text);
+            }
+        }
+    }
+}

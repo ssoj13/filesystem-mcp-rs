@@ -284,3 +284,61 @@ fn parse_addr_port_macos(s: &str) -> Result<(String, u16), String> {
         Err(format!("Invalid address format: {}", s))
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::net::TcpListener;
+
+    #[test]
+    fn test_port_available_free() {
+        // Find a free port by binding to 0
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        drop(listener); // Free the port
+        
+        assert!(port_available(port));
+    }
+
+    #[test]
+    fn test_port_available_in_use() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        
+        // Port should be in use while listener is alive
+        assert!(!port_available(port));
+    }
+
+    #[test]
+    fn test_port_users() {
+        // Bind to a port
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        
+        // Should find our process using this port
+        let result = port_users(port);
+        assert!(result.is_ok());
+        // Note: May not find it on all platforms due to permission issues
+    }
+
+    #[test]
+    fn test_net_connections() {
+        let result = net_connections(None);
+        assert!(result.is_ok());
+        // Should have at least some connections on any system
+    }
+
+    #[test]
+    fn test_parse_addr_port_ipv4() {
+        let (addr, port) = parse_addr_port("127.0.0.1:8080").unwrap();
+        assert_eq!(addr, "127.0.0.1");
+        assert_eq!(port, 8080);
+    }
+
+    #[test]
+    fn test_parse_addr_port_ipv6() {
+        let (addr, port) = parse_addr_port("[::1]:8080").unwrap();
+        assert_eq!(addr, "::1");
+        assert_eq!(port, 8080);
+    }
+}

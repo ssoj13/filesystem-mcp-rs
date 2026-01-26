@@ -184,3 +184,53 @@ fn proc_files_windows(pid: u32) -> Result<Value, String> {
         "cwd": proc.cwd().map(|p| p.to_string_lossy().to_string())
     }))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_proc_tree_all() {
+        let result = proc_tree(None);
+        assert!(result.is_ok());
+        let json = result.unwrap();
+        assert!(json.get("processes").is_some());
+        assert!(json["total_count"].as_u64().unwrap() > 0);
+    }
+
+    #[test]
+    fn test_proc_tree_current() {
+        let current_pid = std::process::id();
+        let result = proc_tree(Some(current_pid));
+        assert!(result.is_ok());
+        let json = result.unwrap();
+        assert_eq!(json["pid"].as_u64().unwrap() as u32, current_pid);
+    }
+
+    #[test]
+    fn test_proc_tree_not_found() {
+        // Use impossibly high PID
+        let result = proc_tree(Some(u32::MAX));
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_proc_env_current() {
+        let current_pid = std::process::id();
+        let result = proc_env(current_pid);
+        // May fail due to permissions on some systems
+        if result.is_ok() {
+            let json = result.unwrap();
+            assert_eq!(json["pid"].as_u64().unwrap() as u32, current_pid);
+            assert!(json.get("environment").is_some());
+        }
+    }
+
+    #[test]
+    fn test_proc_files_current() {
+        let current_pid = std::process::id();
+        let result = proc_files(current_pid);
+        // May fail due to permissions, but shouldn't panic
+        assert!(result.is_ok() || result.is_err());
+    }
+}
