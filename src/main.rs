@@ -456,19 +456,19 @@ impl FileSystemServer {
 struct ReadTextFileArgs {
     path: String,
     /// Return first N lines only (like Unix head)
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, deserialize_with = "crate::core::serde::option_number_or_string")]
     head: Option<u32>,
     /// Return last N lines only (like Unix tail)
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, deserialize_with = "crate::core::serde::option_number_or_string")]
     tail: Option<u32>,
     /// Start reading from line N (1-indexed, for pagination)
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, deserialize_with = "crate::core::serde::option_number_or_string")]
     offset: Option<u32>,
     /// Read at most N lines (use with offset for pagination)
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, deserialize_with = "crate::core::serde::option_number_or_string")]
     limit: Option<u32>,
     /// Maximum characters to return (truncates with "[truncated]" marker)
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, deserialize_with = "crate::core::serde::option_number_or_string")]
     max_chars: Option<usize>,
 }
 
@@ -591,10 +591,10 @@ struct SearchArgs {
     #[serde(skip_serializing_if = "Option::is_none")]
     file_type: Option<String>,
     /// Minimum file size in bytes
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, deserialize_with = "crate::core::serde::option_number_or_string")]
     min_size: Option<u64>,
     /// Maximum file size in bytes
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, deserialize_with = "crate::core::serde::option_number_or_string")]
     max_size: Option<u64>,
     /// Modified after (RFC3339 or duration, e.g. "2024-01-01T00:00:00Z" or "7d")
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -626,13 +626,13 @@ struct GrepFilesArgs {
     #[serde(default)]
     case_insensitive: bool,
     /// Number of context lines before match
-    #[serde(default)]
+    #[serde(default, deserialize_with = "crate::core::serde::number_or_string")]
     context_before: usize,
     /// Number of context lines after match
-    #[serde(default)]
+    #[serde(default, deserialize_with = "crate::core::serde::number_or_string")]
     context_after: usize,
     /// Maximum number of matches to return (0 = unlimited, default 100)
-    #[serde(default = "default_max_matches")]
+    #[serde(default = "default_max_matches", deserialize_with = "crate::core::serde::number_or_string")]
     max_matches: usize,
     /// Invert match: show lines NOT matching the pattern
     #[serde(default)]
@@ -659,13 +659,13 @@ struct GrepContextArgs {
     #[serde(default)]
     case_insensitive: bool,
     /// Number of context lines before match
-    #[serde(default)]
+    #[serde(default, deserialize_with = "crate::core::serde::number_or_string")]
     context_before: usize,
     /// Number of context lines after match
-    #[serde(default)]
+    #[serde(default, deserialize_with = "crate::core::serde::number_or_string")]
     context_after: usize,
     /// Maximum number of matches to return (0 = unlimited, default 100)
-    #[serde(default = "default_max_matches")]
+    #[serde(default = "default_max_matches", deserialize_with = "crate::core::serde::number_or_string")]
     max_matches: usize,
     /// Output mode: "content" (default), "count", "files_with_matches", "files_without_match"
     #[serde(default)]
@@ -683,10 +683,10 @@ struct GrepContextArgs {
     #[serde(default)]
     nearby_direction: Option<String>,
     /// Window size in words (optional)
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, deserialize_with = "crate::core::serde::option_number_or_string")]
     nearby_window_words: Option<usize>,
     /// Window size in characters (optional)
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, deserialize_with = "crate::core::serde::option_number_or_string")]
     nearby_window_chars: Option<usize>,
     /// Match mode for multiple nearby patterns: "any" (default) or "all"
     #[serde(default)]
@@ -839,7 +839,7 @@ struct S3ListArgs {
     prefix: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     delimiter: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, deserialize_with = "crate::core::serde::option_number_or_string")]
     max_keys: Option<i32>,
     #[serde(skip_serializing_if = "Option::is_none")]
     continuation_token: Option<String>,
@@ -981,10 +981,10 @@ struct FileHashArgs {
     #[serde(default)]
     algorithm: Option<String>,
     /// Byte offset to start hashing from (0-indexed, default: 0)
-    #[serde(default)]
+    #[serde(default, deserialize_with = "crate::core::serde::option_number_or_string")]
     offset: Option<u64>,
     /// Number of bytes to hash (default: entire file from offset)
-    #[serde(default)]
+    #[serde(default, deserialize_with = "crate::core::serde::option_number_or_string")]
     length: Option<u64>,
 }
 
@@ -1051,16 +1051,16 @@ struct TailFileArgs {
     /// Path to file
     path: String,
     /// Number of lines to read (default: 10)
-    #[serde(default = "default_tail_lines")]
+    #[serde(default = "default_tail_lines", deserialize_with = "crate::core::serde::number_or_string")]
     lines: usize,
     /// Alternative: number of bytes to read
-    #[serde(default)]
+    #[serde(default, deserialize_with = "crate::core::serde::option_number_or_string")]
     bytes: Option<usize>,
     /// Follow mode: wait for new content
     #[serde(default)]
     follow: bool,
     /// Timeout in ms for follow mode (default: 5000)
-    #[serde(default = "default_follow_timeout")]
+    #[serde(default = "default_follow_timeout", deserialize_with = "crate::core::serde::number_or_string")]
     timeout_ms: u64,
 }
 
@@ -1073,7 +1073,7 @@ struct WatchFileArgs {
     /// Path to file or directory to watch
     path: String,
     /// Timeout in ms (default: 30000)
-    #[serde(default = "default_watch_timeout")]
+    #[serde(default = "default_watch_timeout", deserialize_with = "crate::core::serde::number_or_string")]
     timeout_ms: u64,
     /// Events to watch: modify, create, delete (default: all)
     #[serde(default)]
@@ -1153,7 +1153,7 @@ struct FindDuplicatesArgs {
     /// Directory to search
     path: String,
     /// Minimum file size in bytes (default: 1, skip empty files)
-    #[serde(default)]
+    #[serde(default, deserialize_with = "crate::core::serde::option_number_or_string")]
     min_size: Option<u64>,
     /// Compare by content hash (default: true). False = compare by size only
     #[serde(default = "default_true")]
@@ -1175,9 +1175,10 @@ enum LineEditOperation {
 #[serde(rename_all = "camelCase")]
 struct LineEditInstruction {
     /// Line number to edit (1-indexed)
+    #[serde(deserialize_with = "crate::core::serde::number_or_string")]
     line: usize,
     /// End line for range operations (1-indexed, inclusive). If omitted, operates on single line
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, deserialize_with = "crate::core::serde::option_number_or_string")]
     end_line: Option<usize>,
     /// Operation: "replace", "insert_before", "insert_after", "delete"
     operation: LineEditOperation,
@@ -1243,9 +1244,10 @@ struct ExtractLinesArgs {
     /// Path to file
     path: String,
     /// Start line number (1-indexed)
+    #[serde(deserialize_with = "crate::core::serde::number_or_string")]
     line: usize,
     /// End line number (1-indexed, inclusive). If omitted, extracts single line
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, deserialize_with = "crate::core::serde::option_number_or_string")]
     end_line: Option<usize>,
     /// Dry run mode - return content without removing from file
     #[serde(default)]
