@@ -1,0 +1,10 @@
+[mcp_servers.filesystem]
+command = "filesystem-mcp-rs.exe"
+args = ["C:/", "D:/"]
+
+[mcp_servers.filesystem.env]
+FS_MCP_HTTP_ALLOW_LIST = "*"
+FS_MCP_S3_ALLOW_LIST = "*"
+AWS_ACCESS_KEY_ID = "xxx"
+AWS_SECRET_ACCESS_KEY = "yyy"
+AWS_DEFAULT_REGION = "us-west-1"

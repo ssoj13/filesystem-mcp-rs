@@ -1,0 +1,12 @@
+{
+  "mcpServers": {
+    "filesystem": {
+      "command": "filesystem-mcp-rs.exe",
+      "args": ["C:\\"],
+      "env": {
+        "FS_MCP_HTTP_ALLOW_LIST": "*",
+        "FS_MCP_S3_ALLOW_LIST": "*"
+      }
+    }
+  }
+}

@@ -1,0 +1,16 @@
+# Rust
+/target/
+/target-test/
+*.log
+
+# IDE
+.vscode/
+.idea/
+
+# Certificate export files (sensitive data)
+apple_*
+*.txt
+*.cmd
+.bughunt
+.cursor
+.omc

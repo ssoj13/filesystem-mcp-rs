@@ -1,0 +1,123 @@
+name: macos-code-sign
+description: Sign and notarize macOS binaries (matching playa secrets).
+
+inputs:
+  target:
+    description: Rust compilation target triple (e.g. aarch64-apple-darwin).
+    required: true
+  binary-name:
+    description: Name of the binary to sign.
+    required: true
+    default: filesystem-mcp-rs
+  apple-certificate:
+    description: Base64-encoded Apple signing certificate (P12).
+    required: true
+  apple-certificate-password:
+    description: Password for the signing certificate.
+    required: true
+  apple-id:
+    description: Apple ID for notarization.
+    required: true
+  apple-password:
+    description: App-specific password for notarization.
+    required: true
+  apple-team-id:
+    description: Apple Developer Team ID.
+    required: true
+
+runs:
+  using: composite
+  steps:
+    - name: Import certificate and configure keychain
+      shell: bash
+      env:
+        APPLE_CERTIFICATE: ${{ inputs.apple-certificate }}
+        APPLE_CERTIFICATE_PASSWORD: ${{ inputs.apple-certificate-password }}
+      run: |
+        set -euo pipefail
+
+        if [ -z "$APPLE_CERTIFICATE" ]; then
+          echo "No APPLE_CERTIFICATE provided, skipping code signing"
+          exit 0
+        fi
+
+        CERTIFICATE_PATH=$RUNNER_TEMP/certificate.p12
+        KEYCHAIN_PATH=$RUNNER_TEMP/app-signing.keychain-db
+
+        echo -n "$APPLE_CERTIFICATE" | base64 --decode -o $CERTIFICATE_PATH
+
+        security create-keychain -p "" $KEYCHAIN_PATH
+        security set-keychain-settings -lut 21600 $KEYCHAIN_PATH
+        security unlock-keychain -p "" $KEYCHAIN_PATH
+
+        security import $CERTIFICATE_PATH -P "$APPLE_CERTIFICATE_PASSWORD" -A -t cert -f pkcs12 -k $KEYCHAIN_PATH
+        security list-keychain -d user -s $KEYCHAIN_PATH $(security list-keychains -d user | sed s/\"//g)
+        security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "" $KEYCHAIN_PATH
+
+        IDENTITY=$(security find-identity -v -p codesigning $KEYCHAIN_PATH \
+          | grep "Developer ID Application" | head -n 1 | sed 's/.*"\(.*\)"/\1/')
+
+        if [ -n "$IDENTITY" ]; then
+          echo "APPLE_SIGNING_IDENTITY=$IDENTITY" >> $GITHUB_ENV
+          echo "APPLE_CODESIGN_KEYCHAIN=$KEYCHAIN_PATH" >> $GITHUB_ENV
+          echo "::add-mask::$IDENTITY"
+        else
+          echo "No Developer ID Application found in keychain"
+          security find-identity -v -p codesigning $KEYCHAIN_PATH || true
+          exit 1
+        fi
+
+        rm -f $CERTIFICATE_PATH
+
+    - name: Sign binary
+      shell: bash
+      run: |
+        set -euo pipefail
+        binary="target/${{ inputs.target }}/release/${{ inputs.binary-name }}"
+
+        if [ -z "${APPLE_SIGNING_IDENTITY:-}" ]; then
+          echo "No signing identity, skipping"
+          exit 0
+        fi
+
+        codesign --force --options runtime --timestamp \
+          --sign "$APPLE_SIGNING_IDENTITY" \
+          --keychain "$APPLE_CODESIGN_KEYCHAIN" \
+          "$binary"
+
+        echo "Signed: $binary"
+
+    - name: Notarize binary
+      shell: bash
+      env:
+        APPLE_ID: ${{ inputs.apple-id }}
+        APPLE_PASSWORD: ${{ inputs.apple-password }}
+        APPLE_TEAM_ID: ${{ inputs.apple-team-id }}
+      run: |
+        set -euo pipefail
+
+        if [ -z "$APPLE_ID" ] || [ -z "$APPLE_PASSWORD" ] || [ -z "$APPLE_TEAM_ID" ]; then
+          echo "Notarization credentials missing, skipping"
+          exit 0
+        fi
+
+        binary="target/${{ inputs.target }}/release/${{ inputs.binary-name }}"
+        archive="${RUNNER_TEMP}/${{ inputs.binary-name }}.zip"
+
+        ditto -c -k --keepParent "$binary" "$archive"
+
+        xcrun notarytool submit "$archive" \
+          --apple-id "$APPLE_ID" \
+          --password "$APPLE_PASSWORD" \
+          --team-id "$APPLE_TEAM_ID" \
+          --wait
+
+        echo "Notarization complete"
+
+    - name: Cleanup keychain
+      if: always()
+      shell: bash
+      run: |
+        if [ -n "${APPLE_CODESIGN_KEYCHAIN:-}" ] && [ -f "${APPLE_CODESIGN_KEYCHAIN:-}" ]; then
+          security delete-keychain "$APPLE_CODESIGN_KEYCHAIN" || true
+        fi

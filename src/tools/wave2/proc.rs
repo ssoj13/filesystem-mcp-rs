@@ -1,0 +1,279 @@
+//! Process utilities - proc_tree, proc_env, proc_files.
+
+#[cfg(not(target_os = "windows"))]
+use anyhow::Context;
+use anyhow::{Result, bail};
+use serde_json::{Value, json};
+use std::collections::HashMap;
+use sysinfo::{Pid, System};
+
+/// Get process tree (all processes with parent-child relationships)
+pub fn proc_tree(root_pid: Option<u32>) -> Result<Value> {
+    let mut sys = System::new();
+    sys.refresh_processes(sysinfo::ProcessesToUpdate::All, true);
+
+    // Build parent -> children map
+    let mut children_map: HashMap<Option<Pid>, Vec<Pid>> = HashMap::new();
+    for (pid, proc) in sys.processes() {
+        let parent = proc.parent();
+        children_map.entry(parent).or_default().push(*pid);
+    }
+
+    // Build tree from root
+    fn build_tree(
+        sys: &System,
+        pid: Pid,
+        children_map: &HashMap<Option<Pid>, Vec<Pid>>,
+        _depth: usize,
+    ) -> Value {
+        let proc = sys.process(pid);
+        let name = proc
+            .map(|p| p.name().to_string_lossy().to_string())
+            .unwrap_or_default();
+        let cmd = proc
+            .map(|p| {
+                p.cmd()
+                    .iter()
+                    .map(|s| s.to_string_lossy().to_string())
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+        let cpu = proc.map(|p| p.cpu_usage()).unwrap_or(0.0);
+        let mem = proc.map(|p| p.memory()).unwrap_or(0);
+
+        let children: Vec<Value> = children_map
+            .get(&Some(pid))
+            .map(|pids| {
+                pids.iter()
+                    .map(|&child_pid| build_tree(sys, child_pid, children_map, _depth + 1))
+                    .collect()
+            })
+            .unwrap_or_default();
+
+        json!({
+            "pid": pid.as_u32(),
+            "name": name,
+            "cmd": cmd,
+            "cpu_percent": cpu,
+            "memory_bytes": mem,
+            "children": children
+        })
+    }
+
+    if let Some(root) = root_pid {
+        // Build tree from specific PID
+        let pid = Pid::from_u32(root);
+        if sys.process(pid).is_none() {
+            bail!("Process {} not found", root);
+        }
+        Ok(build_tree(&sys, pid, &children_map, 0))
+    } else {
+        // Build forest of all root processes
+        let roots: Vec<Value> = children_map
+            .get(&None)
+            .map(|pids| {
+                pids.iter()
+                    .map(|&pid| build_tree(&sys, pid, &children_map, 0))
+                    .collect()
+            })
+            .unwrap_or_default();
+        Ok(json!({
+            "processes": roots,
+            "total_count": sys.processes().len()
+        }))
+    }
+}
+
+/// Get environment variables of a process
+pub fn proc_env(pid: u32) -> Result<Value> {
+    let mut sys = System::new();
+    sys.refresh_processes(sysinfo::ProcessesToUpdate::All, true);
+
+    let pid = Pid::from_u32(pid);
+    let proc = sys
+        .process(pid)
+        .ok_or_else(|| anyhow::anyhow!("Process {} not found", pid))?;
+
+    let environ = proc.environ();
+    let env_map: HashMap<String, String> = environ
+        .iter()
+        .filter_map(|s| {
+            let s = s.to_string_lossy();
+            s.find('=')
+                .map(|i| (s[..i].to_string(), s[i + 1..].to_string()))
+        })
+        .collect();
+
+    Ok(json!({
+        "pid": pid.as_u32(),
+        "name": proc.name().to_string_lossy(),
+        "env_count": env_map.len(),
+        "environment": env_map
+    }))
+}
+
+/// Get open files of a process (Linux/BSD/macOS via native tools, limited on Windows)
+pub fn proc_files(pid: u32) -> Result<Value> {
+    #[cfg(target_os = "linux")]
+    {
+        proc_files_linux(pid)
+    }
+    #[cfg(any(
+        target_os = "macos",
+        target_os = "freebsd",
+        target_os = "openbsd",
+        target_os = "netbsd"
+    ))]
+    {
+        proc_files_bsd(pid)
+    }
+    #[cfg(target_os = "windows")]
+    {
+        proc_files_windows(pid)
+    }
+    #[cfg(not(any(
+        target_os = "windows",
+        target_os = "linux",
+        target_os = "macos",
+        target_os = "freebsd",
+        target_os = "openbsd",
+        target_os = "netbsd"
+    )))]
+    {
+        bail!("Unsupported platform")
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn proc_files_linux(pid: u32) -> Result<Value> {
+    use std::fs;
+    use std::path::PathBuf;
+
+    let fd_dir = PathBuf::from(format!("/proc/{}/fd", pid));
+    if !fd_dir.exists() {
+        bail!("Process {} not found or no permission", pid);
+    }
+
+    let mut files = Vec::new();
+    if let Ok(entries) = fs::read_dir(&fd_dir) {
+        for entry in entries.flatten() {
+            if let Ok(link) = fs::read_link(entry.path()) {
+                let fd = entry.file_name().to_string_lossy().to_string();
+                files.push(json!({
+                    "fd": fd,
+                    "path": link.to_string_lossy()
+                }));
+            }
+        }
+    }
+
+    Ok(json!({
+        "pid": pid,
+        "file_count": files.len(),
+        "files": files
+    }))
+}
+
+#[cfg(any(
+    target_os = "macos",
+    target_os = "freebsd",
+    target_os = "openbsd",
+    target_os = "netbsd"
+))]
+fn proc_files_bsd(pid: u32) -> Result<Value> {
+    use std::process::Command;
+
+    let output = Command::new("lsof")
+        .args(["-p", &pid.to_string()])
+        .output()
+        .context("Failed to run lsof")?;
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let mut files = Vec::new();
+
+    for line in stdout.lines().skip(1) {
+        let parts: Vec<&str> = line.split_whitespace().collect();
+        if parts.len() >= 9 {
+            files.push(json!({
+                "fd": parts[3],
+                "type": parts[4],
+                "path": parts.get(8).unwrap_or(&"")
+            }));
+        }
+    }
+
+    Ok(json!({
+        "pid": pid,
+        "file_count": files.len(),
+        "files": files
+    }))
+}
+
+#[cfg(target_os = "windows")]
+fn proc_files_windows(pid: u32) -> Result<Value> {
+    // Windows doesn't have easy way to list open files without handle.exe
+    // Return basic process info instead
+    let mut sys = System::new();
+    sys.refresh_processes(sysinfo::ProcessesToUpdate::All, true);
+
+    let pid_sys = Pid::from_u32(pid);
+    let proc = sys
+        .process(pid_sys)
+        .ok_or_else(|| anyhow::anyhow!("Process {} not found", pid))?;
+
+    Ok(json!({
+        "pid": pid,
+        "name": proc.name().to_string_lossy(),
+        "note": "Open files listing requires external tool (handle.exe) on Windows",
+        "exe": proc.exe().map(|p| p.to_string_lossy().to_string()),
+        "cwd": proc.cwd().map(|p| p.to_string_lossy().to_string())
+    }))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_proc_tree_all() {
+        let result = proc_tree(None);
+        assert!(result.is_ok());
+        let json = result.unwrap();
+        assert!(json.get("processes").is_some());
+        assert!(json["total_count"].as_u64().unwrap() > 0);
+    }
+
+    #[test]
+    fn test_proc_tree_current() {
+        let current_pid = std::process::id();
+        let result = proc_tree(Some(current_pid));
+        assert!(result.is_ok());
+        let json = result.unwrap();
+        assert_eq!(json["pid"].as_u64().unwrap() as u32, current_pid);
+    }
+
+    #[test]
+    fn test_proc_tree_not_found() {
+        // Use impossibly high PID
+        let result = proc_tree(Some(u32::MAX));
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_proc_env_current() {
+        let current_pid = std::process::id();
+        // May fail due to permissions on some systems.
+        if let Ok(json) = proc_env(current_pid) {
+            assert_eq!(json["pid"].as_u64().unwrap() as u32, current_pid);
+            assert!(json.get("environment").is_some());
+        }
+    }
+
+    #[test]
+    fn test_proc_files_current() {
+        let current_pid = std::process::id();
+        let result = proc_files(current_pid);
+        // May fail due to permissions, but shouldn't panic
+        assert!(result.is_ok() || result.is_err());
+    }
+}

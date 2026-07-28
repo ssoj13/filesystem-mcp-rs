@@ -1,0 +1,133 @@
+{
+  "version": "1.0.0",
+  "lastScanned": 1784037494972,
+  "projectRoot": "C:\\projects\\projects.rust.cg\\cgprojs\\filesystem-mcp-rs",
+  "techStack": {
+    "languages": [
+      {
+        "name": "Rust",
+        "version": null,
+        "confidence": "high",
+        "markers": [
+          "Cargo.toml"
+        ]
+      }
+    ],
+    "frameworks": [
+      {
+        "name": "axum",
+        "version": null,
+        "category": "backend"
+      }
+    ],
+    "packageManager": "cargo",
+    "runtime": null
+  },
+  "build": {
+    "buildCommand": "rm -f src/mcp_setup/VENDOR_COMMIT && cargo build --message-format=short 2>&1 | grep -E '^(error|warning|src)' | head -30; echo \"EXIT=${PIPESTATUS[0]}\"",
+    "testCommand": "git add -A && git status --short && git commit -q -m \"build: vendor mcp-setup-rs into src/mcp_setup to unblock crates.io publishing\n\ncargo publish rejects git dependencies: every dependency of a published crate\nmust itself exist on crates.io (the git spec is stripped at publish time), and\nmcp-setup-rs is a private repo. So 0c14371 -- which replaced the in-tree\nsrc/mcp_setup/ with a git dependency -- silently broke releases; cargo release\npatch fails on 'all dependencies must have a version requirement specified'.\n\nA path dependency would not have fixed it either (same registry-resolution\nrule). Code that ships inside a published crate has to live inside it.\n\n- vendor the crate verbatim into src/mcp_setup/ (pinned at upstream 5b802d0),\n  the only edit being the mechanical crate:: -> crate::mcp_setup:: rewrite;\n  the upstream 'cli' cargo feature is dropped since this host always builds it\n- carry over the upstream roundtrip suite as a #[cfg(test)] submodule (25 tests)\n- mirror the upstream deps: toml_edit, jsonc-parser (the rest were present)\n- VENDOR.md records the pin, the rationale and the resync procedure; fixes go\n  upstream in the private repo, never into the vendored copy\n- the unused upstream API surface is allowed at the module boundary rather than\n  deleted, so the copy stays byte-comparable with upstream on resync\n\nThe private ssh repo stays the upstream and source of truth; the other MCP\nservers that consume it over git are unaffected (they are not published).\n\nVerified: cargo publish --dry-run packages and verifies; clippy --all-targets\nclean; cargo test 404 + 4 + 55 passed, 0 failed.\" && git push origin main && git log --oneline -1",
+    "lintCommand": "cargo clippy",
+    "devCommand": "cargo run",
+    "scripts": {}
+  },
+  "conventions": {
+    "namingStyle": null,
+    "importStyle": null,
+    "testPattern": null,
+    "fileOrganization": null
+  },
+  "structure": {
+    "isMonorepo": false,
+    "workspaces": [],
+    "mainDirectories": [
+      "src",
+      "tests"
+    ],
+    "gitBranches": {
+      "defaultBranch": "main",
+      "branchingStrategy": null
+    }
+  },
+  "customNotes": [],
+  "directoryMap": {
+    "cfg": {
+      "path": "cfg",
+      "purpose": null,
+      "fileCount": 0,
+      "lastAccessed": 1784037494926,
+      "keyFiles": []
+    },
+    "src": {
+      "path": "src",
+      "purpose": "Source code",
+      "fileCount": 2,
+      "lastAccessed": 1784037494927,
+      "keyFiles": [
+        "main.rs",
+        "setup.rs"
+      ]
+    },
+    "target": {
+      "path": "target",
+      "purpose": null,
+      "fileCount": 2,
+      "lastAccessed": 1784037494927,
+      "keyFiles": [
+        "CACHEDIR.TAG"
+      ]
+    },
+    "tests": {
+      "path": "tests",
+      "purpose": "Test files",
+      "fileCount": 2,
+      "lastAccessed": 1784037494928,
+      "keyFiles": [
+        "http_transport.rs",
+        "integration.rs"
+      ]
+    },
+    "src\\docs": {
+      "path": "src\\docs",
+      "purpose": "Documentation",
+      "fileCount": 2,
+      "lastAccessed": 1784037494929,
+      "keyFiles": [
+        "mcp_policy.md",
+        "mcp_workflows.md"
+      ]
+    }
+  },
+  "hotPaths": [
+    {
+      "path": "src/mcp_setup/mod.rs",
+      "accessCount": 3,
+      "lastAccessed": 1784048606412,
+      "type": "file"
+    },
+    {
+      "path": "src/main.rs",
+      "accessCount": 3,
+      "lastAccessed": 1784048769940,
+      "type": "file"
+    },
+    {
+      "path": "Cargo.toml",
+      "accessCount": 2,
+      "lastAccessed": 1784048615318,
+      "type": "file"
+    },
+    {
+      "path": "src/setup.rs",
+      "accessCount": 2,
+      "lastAccessed": 1784048638597,
+      "type": "file"
+    },
+    {
+      "path": "src/mcp_setup/VENDOR.md",
+      "accessCount": 1,
+      "lastAccessed": 1784048662952,
+      "type": "file"
+    }
+  ],
+  "userDirectives": []
+}
