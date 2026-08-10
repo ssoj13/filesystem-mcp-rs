@@ -2,6 +2,7 @@
 
 #[cfg(test)]
 mod tests {
+    use crate::core::content_plane::ContentRef;
     use crate::core::serde::{
         FlexBool, FlexU64, FlexUsize, ShellArg, ShellKind, default_flex_true,
         option_object_or_json_string, vec_or_string,
@@ -42,10 +43,7 @@ mod tests {
         stdout_file: Option<String>,
         #[serde(alias = "stderr_file")]
         stderr_file: Option<String>,
-        #[serde(alias = "stdin_file")]
-        stdin_file: Option<String>,
-        #[serde(alias = "stdin_data")]
-        stdin_data: Option<String>,
+        stdin: Option<ContentRef>,
         #[serde(default, alias = "stdout_head")]
         stdout_head: FlexUsize,
         #[serde(default, alias = "stdout_tail")]
@@ -184,5 +182,18 @@ mod tests {
         }))
         .unwrap();
         assert_eq!(args.mode.as_deref(), Some("managed"));
+    }
+    #[test]
+    fn stdin_accepts_content_ref() {
+        let args: RunCommandArgsFixture = serde_json::from_value(json!({
+            "command": "cat",
+            "args": [],
+            "stdin": {"kind": "inline", "text": "hi"}
+        }))
+        .unwrap();
+        match args.stdin {
+            Some(ContentRef::Inline { text }) => assert_eq!(text, "hi"),
+            other => panic!("unexpected stdin: {other:?}"),
+        }
     }
 }

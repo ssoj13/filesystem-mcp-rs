@@ -1,5 +1,6 @@
 pub mod agent_policy;
 pub mod allowed;
+pub mod content_plane;
 pub mod format;
 pub mod glob;
 pub mod logging;

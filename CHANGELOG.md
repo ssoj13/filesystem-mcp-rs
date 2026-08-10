@@ -2,6 +2,19 @@
 
 ## [Unreleased]
 
+### Breaking — Content Plane SSOT
+
+- **Payload ingress is unified behind `ContentRef`** (`src/core/content_plane.rs`). `write_file.content`, `edit_file` / `bulk_edits` `oldText`/`newText`, `write_binary.data`, and `run_command.stdin` are ContentRef objects (`inline` / `base64` / `path` / `blob`), not bare strings. Inline/base64 hard-capped at 8 KiB.
+- **New tools:** `blob_begin`, `blob_append`, `blob_finalize`, `blob_stat` for chunked staging of large agent-authored content. Pass `{kind:blob,id}` into write/edit/run.
+- **Removed:** `run_command.stdinData` / `stdinFile` (use `stdin` ContentRef). Bare-string `write_file.content` / base64-string `write_binary.data`.
+- **Why:** Hosts mangle or abort mid-flight on large nested UTF-8 in tool-argument JSON; agents then fall back to `python -c` and corrupt files. Control plane stays small; bytes move via path or blob sessions.
+
+### `read_pdf` quality contract (BUG2-001)
+
+- Default **`normalize=true`**: treat ZWSP runs as word separators and join short spaced glyph fragments (`Ta ble` + ZWSP → `Table of`).
+- Structured **`quality`**: `score`, `warnings`, `suspiciousTokens`, density ratios. Low score / `extraction_quality_degraded` / `suspicious_encoding_tokens` means agents must not treat the extract as source of truth (broken ToUnicode maps are not reconstructible).
+- Optional **`includeRaw`** returns unnormalized `rawText`.
+
 ### Fixes — correctness audit (BH-07 … BH-33)
 
 A systematic bug hunt over the whole tool surface. The common theme is **silent data loss reported as success**: a tool returned `exitCode: 0` / `identical: true` / an empty-but-clean result while it had actually dropped, corrupted, or fabricated data. Each item below is a real defect that a caller could not have detected from the response.

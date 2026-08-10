@@ -24,6 +24,22 @@
 
 Also: `minSize` / `maxSize` (bytes), `fileType` (`file` | `dir` | `symlink` | `any`). Matches include `modified` (unix seconds).
 
+
+#### Content Plane — large writes
+
+Do not put large source into JSON args. Stage bytes, then reference them:
+
+1. `blob_begin` → `sessionId`
+2. `blob_append` with `text` or `dataBase64` (max 8 KiB per call)
+3. `blob_finalize` → `{id, sha256, bytes}`
+4. `write_file` / `edit_file` / `run_command.stdin` with `{ "kind": "blob", "id": "<sha256>" }`
+
+Small text: `{ "kind": "inline", "text": "..." }` (hard max 8 KiB). Already on disk: `{ "kind": "path", "path": "..." }`.
+
+#### `read_pdf` — extraction quality
+
+Default `normalize: true` collapses zero-width spaces and spaced glyph clusters when ZWSP marks word boundaries. Structured result includes `quality.score`, `quality.warnings`, and `suspiciousTokens`. If score is low or warnings include `extraction_quality_degraded` / `suspicious_encoding_tokens`, **do not treat the text as source of truth** (broken ToUnicode maps cannot be repaired by normalization). Set `includeRaw: true` to also get `rawText`.
+
 #### `grep_files` — regex in file contents
 
 ```json

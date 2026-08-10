@@ -6,6 +6,9 @@
 ### Do NOT use on allowed paths
 Built-in or generic: `Read`, `Write`, `Edit`, `StrReplace`, `Grep`, `Glob`, `Delete`, `Shell` / `run_terminal_cmd`, or ad-hoc `cat` / `find` / `rg` when an MCP tool exists.
 
+### CallMcpTool wiring (host)
+Every MCP tool invocation must pass top-level **`server`** and **`toolName`** (required by the host). Omitting them yields intermittent errors like `server: Required` / `toolName: Required` — that is host/agent wiring, not a filesystem-mcp-rs bug. Never put those keys only inside `arguments`.
+
 ### Use instead
 | Task | MCP tool |
 |------|----------|
@@ -15,6 +18,15 @@ Built-in or generic: `Read`, `Write`, `Edit`, `StrReplace`, `Grep`, `Glob`, `Del
 | Find paths / recent files | `search_files` (e.g. `modifiedAfter`: `"17m 20s"`) |
 | Search in contents | `grep_files`, `grep_context` |
 | Shell / build | `run_command` (+ `tail_file` / `read_text_file` for logs) |
+
+
+### Content Plane (large payloads)
+Do **not** put large source into JSON tool args. Use:
+1. `blob_begin` → `blob_append` (≤8 KiB chunks) → `blob_finalize` → `{kind:"blob", id}`
+2. Or `{kind:"path", path}` for an allowlisted file already on disk
+3. Small text only: `{kind:"inline", text}` (hard max 8 KiB)
+
+`write_file` / `edit_file` / `run_command.stdin` / `write_binary` all take **ContentRef** objects — never bare mega-strings. Never patch large files via `python -c`.
 
 ### Engineering discipline
 - **Do not guess the code. Re-check everything** — read, grep, search, or run before asserting paths, APIs, or behavior.

@@ -13,6 +13,28 @@ use tokio::process::{Child, Command};
 use tokio::sync::{Mutex, mpsc, oneshot};
 use uuid::Uuid;
 
+fn content_inline(s: &str) -> serde_json::Value {
+    json!({ "kind": "inline", "text": s })
+}
+
+fn content_blob(id: &str) -> serde_json::Value {
+    json!({ "kind": "blob", "id": id })
+}
+
+fn content_path(path: &Path) -> serde_json::Value {
+    json!({ "kind": "path", "path": path })
+}
+
+fn content_base64(bytes: &[u8]) -> serde_json::Value {
+    json!({ "kind": "base64", "data": STANDARD.encode(bytes) })
+}
+
+fn sha256_hex(bytes: &[u8]) -> String {
+    use sha2::{Digest, Sha256};
+    let dig = Sha256::digest(bytes);
+    dig.iter().map(|b| format!("{b:02x}")).collect()
+}
+
 /// Spawn the filesystem MCP server binary with given args.
 async fn spawn_server(args: &[&str]) -> Result<ServerHandle> {
     let mut cmd = Command::new(assert_cmd());
@@ -271,7 +293,7 @@ async fn write_and_read_text_full_head_tail() -> Result<()> {
 
     srv.call_tool(
         "write_file",
-        json!({ "path": &file_path, "content": "one\ntwo\nthree" }),
+        json!({ "path": &file_path, "content": content_inline("one\ntwo\nthree") }),
     )
     .await?;
 
@@ -343,7 +365,7 @@ async fn read_text_file_pagination_utf8() -> Result<()> {
     // Create file with UTF-8 content
     srv.call_tool(
         "write_file",
-        json!({ "path": &file_path, "content": "Erste\nZweite\nDritte" }),
+        json!({ "path": &file_path, "content": content_inline("Erste\nZweite\nDritte") }),
     )
     .await?;
 
@@ -389,7 +411,7 @@ async fn read_text_file_pagination_full_coverage() -> Result<()> {
         .join("\n");
     srv.call_tool(
         "write_file",
-        json!({ "path": &file_path, "content": &content }),
+        json!({ "path": &file_path, "content": content_inline(&content) }),
     )
     .await?;
 
@@ -487,7 +509,7 @@ async fn read_text_file_line_numbers_offset_limit() -> Result<()> {
 
     srv.call_tool(
         "write_file",
-        json!({ "path": &file_path, "content": "a\nb\nc\nd" }),
+        json!({ "path": &file_path, "content": content_inline("a\nb\nc\nd") }),
     )
     .await?;
 
@@ -531,7 +553,7 @@ async fn read_text_file_line_numbers_tail() -> Result<()> {
         .join("\n");
     srv.call_tool(
         "write_file",
-        json!({ "path": &file_path, "content": &content }),
+        json!({ "path": &file_path, "content": content_inline(&content) }),
     )
     .await?;
 
@@ -564,7 +586,7 @@ async fn read_text_file_pagination_edge_cases() -> Result<()> {
     // Single line file
     srv.call_tool(
         "write_file",
-        json!({ "path": &file_path, "content": "only one line" }),
+        json!({ "path": &file_path, "content": content_inline("only one line") }),
     )
     .await?;
 
@@ -594,7 +616,7 @@ async fn read_text_file_pagination_edge_cases() -> Result<()> {
 
     // Empty file
     let empty_path = tmp.path().join("empty.txt");
-    srv.call_tool("write_file", json!({ "path": &empty_path, "content": "" }))
+    srv.call_tool("write_file", json!({ "path": &empty_path, "content": content_inline("") }))
         .await?;
 
     let empty_res = srv
@@ -635,7 +657,7 @@ async fn read_text_file_max_chars_variations() -> Result<()> {
     let content = "a".repeat(100);
     srv.call_tool(
         "write_file",
-        json!({ "path": &file_path, "content": &content }),
+        json!({ "path": &file_path, "content": content_inline(&content) }),
     )
     .await?;
 
@@ -690,7 +712,7 @@ async fn read_text_file_mutually_exclusive_modes() -> Result<()> {
 
     srv.call_tool(
         "write_file",
-        json!({ "path": &file_path, "content": "line1\nline2\nline3" }),
+        json!({ "path": &file_path, "content": content_inline("line1\nline2\nline3") }),
     )
     .await?;
 
@@ -754,7 +776,7 @@ async fn edit_file_dry_run_and_apply() -> Result<()> {
             json!({
                 "path": &file_path,
                 "dryRun": true,
-                "edits": [{ "oldText": "b", "newText": "B" }]
+                "edits": [{ "oldText": content_inline("b"), "newText": content_inline("B") }]
             }),
         )
         .await?;
@@ -766,7 +788,7 @@ async fn edit_file_dry_run_and_apply() -> Result<()> {
             json!({
                 "path": &file_path,
                 "dryRun": false,
-                "edits": [{ "oldText": "c", "newText": "C" }]
+                "edits": [{ "oldText": content_inline("c"), "newText": content_inline("C") }]
             }),
         )
         .await?;
@@ -794,7 +816,7 @@ async fn edit_file_json_string_edits() -> Result<()> {
             "edit_file",
             json!({
                 "path": &file_path,
-                "edits": [r#"{"oldText":"b","newText":"B"}"#]
+                "edits": [r#"{"oldText":{"kind":"inline","text":"b"},"newText":{"kind":"inline","text":"B"}}"#]
             }),
         )
         .await?;
@@ -853,7 +875,7 @@ async fn bulk_edits_json_string_edits() -> Result<()> {
             json!({
                 "path": tmp.path(),
                 "filePattern": "**/*.txt",
-                "edits": [r#"{"oldText":"foo","newText":"bar","replaceAll":true}"#]
+                "edits": [r#"{"oldText":{"kind":"inline","text":"foo"},"newText":{"kind":"inline","text":"bar"},"replaceAll":true}"#]
             }),
         )
         .await?;
@@ -1078,7 +1100,7 @@ async fn operations_outside_allowed_are_rejected() -> Result<()> {
     let res = srv
         .call_tool(
             "write_file",
-            json!({ "path": outside.to_string_lossy(), "content": "x" }),
+            json!({ "path": outside.to_string_lossy(), "content": content_inline("x") }),
         )
         .await?;
     assert_err(&res);
@@ -1608,7 +1630,7 @@ async fn write_binary_replace_mode() -> Result<()> {
     let res = srv
         .call_tool(
             "write_binary",
-            json!({ "path": &file, "offset": 7, "data": data, "mode": "replace" }),
+            json!({ "path": &file, "offset": 7, "data": {"kind":"base64","data": data}, "mode": "replace" }),
         )
         .await?;
     assert_ok(&res);
@@ -1632,7 +1654,7 @@ async fn write_binary_insert_mode() -> Result<()> {
     let res = srv
         .call_tool(
             "write_binary",
-            json!({ "path": &file, "offset": 5, "data": data, "mode": "insert" }),
+            json!({ "path": &file, "offset": 5, "data": {"kind":"base64","data": data}, "mode": "insert" }),
         )
         .await?;
     assert_ok(&res);
@@ -1795,7 +1817,7 @@ async fn session_footer_appended_by_default() -> Result<()> {
 
     srv.call_tool(
         "write_file",
-        json!({ "path": &file_path, "content": "probe" }),
+        json!({ "path": &file_path, "content": content_inline("probe") }),
     )
     .await?;
 
@@ -1935,6 +1957,303 @@ async fn run_command_spawn_failure_includes_operator_hint() -> Result<()> {
     assert!(
         msg.contains("shell") && msg.contains("hint"),
         "spawn-failure error should include the shell-operator hint, got: {msg}"
+    );
+
+    srv.kill().await;
+    Ok(())
+}
+
+#[tokio::test]
+async fn content_plane_blob_write_cyrillic() -> Result<()> {
+    let tmp = TempDir::new()?;
+    let srv = start_server(tmp.path()).await?;
+    let file_path = tmp.path().join("cyr.txt");
+
+    let begin = srv.call_tool("blob_begin", json!({})).await?;
+    assert_ok(&begin);
+    let session_id = begin["result"]["structuredContent"]["sessionId"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    let chunk = "\u{0440}\u{0430}\u{0432}\u{043d}\u{0438}\u{043d}\u{0430}\nline2\n";
+    assert_eq!(&chunk.as_bytes()[..2], &[0xd1, 0x80]);
+    let append = srv
+        .call_tool(
+            "blob_append",
+            json!({ "sessionId": &session_id, "text": chunk }),
+        )
+        .await?;
+    assert_ok(&append);
+
+    let fin = srv
+        .call_tool(
+            "blob_finalize",
+            json!({ "sessionId": &session_id }),
+        )
+        .await?;
+    assert_ok(&fin);
+    let blob_id = fin["result"]["structuredContent"]["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    let write = srv
+        .call_tool(
+            "write_file",
+            json!({ "path": &file_path, "content": content_blob(&blob_id) }),
+        )
+        .await?;
+    assert_ok(&write);
+
+    let text = std::fs::read_to_string(&file_path)?;
+    assert_eq!(text, chunk);
+
+    srv.kill().await;
+    Ok(())
+}
+
+#[tokio::test]
+async fn content_plane_inline_too_large() -> Result<()> {
+    let tmp = TempDir::new()?;
+    let srv = start_server(tmp.path()).await?;
+    let file_path = tmp.path().join("big.txt");
+    let big = "x".repeat(8 * 1024 + 1);
+
+    let res = srv
+        .call_tool(
+            "write_file",
+            json!({ "path": &file_path, "content": content_inline(&big) }),
+        )
+        .await?;
+    assert_err(&res);
+    let msg = res["error"]["message"].as_str().unwrap_or("");
+    assert!(
+        msg.contains("inline_too_large"),
+        "expected inline_too_large, got: {msg}"
+    );
+
+    srv.kill().await;
+    Ok(())
+}
+
+#[tokio::test]
+async fn content_plane_run_command_stdin_inline() -> Result<()> {
+    let tmp = TempDir::new()?;
+    let srv = start_server(tmp.path()).await?;
+
+    #[cfg(windows)]
+    let args = json!({
+        "command": "cmd",
+        "args": ["/C", "findstr ."],
+        "stdin": { "kind": "inline", "text": "hello-stdin" }
+    });
+    #[cfg(unix)]
+    let args = json!({
+        "command": "cat",
+        "args": [],
+        "stdin": { "kind": "inline", "text": "hello-stdin" }
+    });
+
+    let res = srv.call_tool("run_command", args).await?;
+    assert_ok(&res);
+    let stdout = res["result"]["structuredContent"]["stdout"]
+        .as_str()
+        .unwrap_or("");
+    assert!(
+        stdout.contains("hello-stdin"),
+        "stdout missing stdin payload: {stdout}"
+    );
+
+    srv.kill().await;
+    Ok(())
+}
+
+#[tokio::test]
+async fn content_plane_path_ref_write() -> Result<()> {
+    let tmp = TempDir::new()?;
+    let srv = start_server(tmp.path()).await?;
+    let src = tmp.path().join("src.txt");
+    let dst = tmp.path().join("dst.txt");
+    std::fs::write(&src, b"from-path-ref\n")?;
+
+    let res = srv
+        .call_tool(
+            "write_file",
+            json!({ "path": &dst, "content": content_path(&src) }),
+        )
+        .await?;
+    assert_ok(&res);
+    assert_eq!(std::fs::read_to_string(&dst)?, "from-path-ref\n");
+
+    srv.kill().await;
+    Ok(())
+}
+
+#[tokio::test]
+async fn content_plane_expect_sha256_ok_and_mismatch() -> Result<()> {
+    let tmp = TempDir::new()?;
+    let srv = start_server(tmp.path()).await?;
+    let path = tmp.path().join("hashed.txt");
+    let body = b"expect-sha-body";
+    let good = sha256_hex(body);
+
+    let ok = srv
+        .call_tool(
+            "write_file",
+            json!({
+                "path": &path,
+                "content": content_inline(std::str::from_utf8(body)?),
+                "expectSha256": &good,
+            }),
+        )
+        .await?;
+    assert_ok(&ok);
+    assert_eq!(std::fs::read(&path)?, body);
+
+    let bad = srv
+        .call_tool(
+            "write_file",
+            json!({
+                "path": &path,
+                "content": content_inline("other"),
+                "expectSha256": &good,
+            }),
+        )
+        .await?;
+    assert_err(&bad);
+    let msg = format!("{bad}");
+    assert!(
+        msg.contains("hash_mismatch"),
+        "expected hash_mismatch, got: {msg}"
+    );
+
+    srv.kill().await;
+    Ok(())
+}
+
+#[tokio::test]
+async fn content_plane_nul_rejected_in_text_mode() -> Result<()> {
+    let tmp = TempDir::new()?;
+    let srv = start_server(tmp.path()).await?;
+    let path = tmp.path().join("nul.txt");
+    let payload = b"hello\0world";
+
+    let res = srv
+        .call_tool(
+            "write_file",
+            json!({ "path": &path, "content": content_base64(payload) }),
+        )
+        .await?;
+    assert_err(&res);
+    let msg = format!("{res}");
+    assert!(
+        msg.contains("nul_in_text"),
+        "expected nul_in_text, got: {msg}"
+    );
+
+    srv.kill().await;
+    Ok(())
+}
+
+#[tokio::test]
+async fn content_plane_blob_stat() -> Result<()> {
+    let tmp = TempDir::new()?;
+    let srv = start_server(tmp.path()).await?;
+
+    let begin = srv.call_tool("blob_begin", json!({})).await?;
+    assert_ok(&begin);
+    let session_id = begin["result"]["structuredContent"]["sessionId"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    let chunk = "stat-me";
+    let append = srv
+        .call_tool(
+            "blob_append",
+            json!({ "sessionId": &session_id, "text": chunk }),
+        )
+        .await?;
+    assert_ok(&append);
+
+    let fin = srv
+        .call_tool("blob_finalize", json!({ "sessionId": &session_id }))
+        .await?;
+    assert_ok(&fin);
+    let blob_id = fin["result"]["structuredContent"]["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let expected_sha = sha256_hex(chunk.as_bytes());
+    assert_eq!(blob_id, expected_sha);
+
+    let st = srv
+        .call_tool("blob_stat", json!({ "id": &blob_id }))
+        .await?;
+    assert_ok(&st);
+    let sc = &st["result"]["structuredContent"];
+    assert_eq!(sc["bytes"].as_u64().unwrap(), chunk.len() as u64);
+    assert_eq!(sc["sha256"].as_str().unwrap(), expected_sha);
+
+    let missing = srv
+        .call_tool(
+            "blob_stat",
+            json!({ "id": "0000000000000000000000000000000000000000000000000000000000000000" }),
+        )
+        .await?;
+    assert_err(&missing);
+
+    srv.kill().await;
+    Ok(())
+}
+
+#[tokio::test]
+async fn read_pdf_cryptomatte_quality_contract() -> Result<()> {
+    let fixture = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/fixtures/cryptomatte_specification.pdf");
+    if !fixture.is_file() {
+        eprintln!("skip: missing fixture {}", fixture.display());
+        return Ok(());
+    }
+    let tmp = TempDir::new()?;
+    let local = tmp.path().join("cryptomatte_specification.pdf");
+    std::fs::copy(&fixture, &local)?;
+    let srv = start_server(tmp.path()).await?;
+
+    let res = srv
+        .call_tool(
+            "read_pdf",
+            json!({
+                "path": &local,
+                "maxChars": 80000,
+                "normalize": true,
+                "includeRaw": true,
+            }),
+        )
+        .await?;
+    assert_ok(&res);
+    let sc = &res["result"]["structuredContent"];
+    let text = sc["text"].as_str().unwrap_or("");
+    assert!(
+        text.contains("Table of Contents"),
+        "normalized TOC missing: {:?}",
+        text.chars().take(160).collect::<String>()
+    );
+    assert!(!text.contains("Ta ble"));
+    let score = sc["quality"]["score"].as_f64().unwrap_or(1.0);
+    assert!(score < 0.85, "expected degraded score, got {score}");
+    let warnings = sc["quality"]["warnings"].as_array().cloned().unwrap_or_default();
+    assert!(
+        warnings.iter().any(|w| {
+            matches!(
+                w.as_str(),
+                Some("extraction_quality_degraded")
+                    | Some("suspicious_encoding_tokens")
+                    | Some("zero_width_chars_present")
+            )
+        }),
+        "expected quality warnings, got {warnings:?}"
     );
 
     srv.kill().await;

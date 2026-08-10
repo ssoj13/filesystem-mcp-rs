@@ -31,6 +31,10 @@ use tracing::{info, warn};
 
 use crate::core::agent_policy;
 use crate::core::allowed::AllowedDirs;
+use crate::core::content_plane::{
+    ContentError, ContentMode, ContentPlane, ContentRef,
+    sha256_hex,
+};
 use crate::core::format;
 use crate::core::path::resolve_validated_path;
 use crate::core::schema::normalize_tool_schemas;
@@ -196,6 +200,7 @@ struct FileSystemServer {
     memory_store: Option<Arc<SqliteMemoryStore>>,
     llm_server: Option<tools::llm::LlmMcpServer>,
     session_footer: bool,
+    content_plane: ContentPlane,
 }
 
 impl FileSystemServer {
@@ -239,6 +244,7 @@ impl FileSystemServer {
             memory_store: None,
             llm_server: None,
             session_footer: true,
+            content_plane: ContentPlane::new().expect("content plane temp dir"),
         }
     }
 
@@ -281,7 +287,7 @@ impl FileSystemServer {
               For long builds (cargo build, etc), use mode='managed' to get progress with output snippets. \
               Use outputFilter with include/exclude regex to get only relevant lines (errors/warnings). \
               Use shell=true for pipes and complex shell commands. \
-              Supports stdinData, envPrepend/envAppend, stdoutHead/stderrHead, process tree kill on timeout.\n\
+              Supports stdin ContentRef, envPrepend/envAppend, stdoutHead/stderrHead, process tree kill on timeout.\n\
             - http_request/http_request_batch/http_download: HTTP/HTTPS access when built with http-tools (allowlist required).\n\
             - s3_list_buckets/s3_list/s3_get/s3_put/s3_delete/s3_copy/s3_presign: S3 access when built with s3-tools (allowlist required).\n\
             - screenshot_list_monitors/screenshot_list_windows/screenshot_capture_screen/screenshot_capture_window/screenshot_capture_region/screenshot_copy_to_clipboard: Screenshot capture when built with screenshot-tools.\n\
@@ -297,6 +303,7 @@ impl FileSystemServer {
             installed via mcp-setup also embed Karpathy rules + MCP policy at session start.\n\n\
             These tools are optimized for LLM workflows: UTF-8 safe, pagination for token limits, \
             detailed error messages, and consistent JSON responses.\n\n\
+            CONTENT PLANE: blob_* + ContentRef for large payloads; write/edit/run/write_binary use ContentRef.\n\n\
             NESTED ARGS: pass structs/maps/arrays as JSON objects/arrays, not as escaped JSON strings. \
             If a client double-serializes, the server still accepts object-or-string and array-or-string forms.\n\n\
             == PLANNING & MEMORY WORKFLOW ==\n\
@@ -334,6 +341,58 @@ impl FileSystemServer {
                     Some(json!({ "error": details })),
                 )
             })
+    }
+
+    fn content_err(e: ContentError) -> McpError {
+        McpError::invalid_params(e.to_string(), Some(e.to_json()))
+    }
+
+    async fn resolve_content(
+        &self,
+        content: &ContentRef,
+        mode: ContentMode,
+    ) -> Result<Vec<u8>, McpError> {
+        match content {
+            ContentRef::Path { path } => {
+                let p = self.resolve(path).await?;
+                let bytes = fs::read(&p).await.map_err(|e| {
+                    McpError::internal_error(
+                        format!("Failed to read content path {}: {}", p.display(), e),
+                        None,
+                    )
+                })?;
+                crate::core::content_plane::check_mode(&bytes, mode).map_err(Self::content_err)?;
+                Ok(bytes)
+            }
+            other => self
+                .content_plane
+                .resolve(other, mode, |_| async {
+                    Err(ContentError::Io(
+                        "internal: path ContentRef should be handled above".into(),
+                    ))
+                })
+                .await
+                .map_err(Self::content_err),
+        }
+    }
+
+    async fn resolve_content_checked(
+        &self,
+        content: &ContentRef,
+        mode: ContentMode,
+        expect_sha256: Option<&str>,
+    ) -> Result<Vec<u8>, McpError> {
+        let bytes = self.resolve_content(content, mode).await?;
+        if let Some(expected) = expect_sha256 {
+            let got = sha256_hex(&bytes);
+            if !expected.eq_ignore_ascii_case(&got) {
+                return Err(Self::content_err(ContentError::HashMismatch {
+                    expected: expected.to_string(),
+                    got,
+                }));
+            }
+        }
+        Ok(bytes)
     }
 
     #[cfg(feature = "http-tools")]
@@ -594,7 +653,36 @@ struct ReadMultipleArgs {
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 struct WriteFileArgs {
     path: String,
-    content: String,
+    /// Content via Content Plane (inline / base64 / path / blob).
+    content: ContentRef,
+    /// Optional sha256 hex of the resolved bytes (integrity check).
+    #[serde(default, rename = "expectSha256", alias = "expect_sha256")]
+    expect_sha256: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+struct BlobAppendArgs {
+    session_id: String,
+    /// UTF-8 text chunk (max INLINE/CHUNK limit).
+    text: Option<String>,
+    /// Base64-encoded chunk (alternative to text).
+    #[serde(alias = "data_base64")]
+    data_base64: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+struct BlobFinalizeArgs {
+    session_id: String,
+    #[serde(default, alias = "expect_sha256")]
+    expect_sha256: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+struct BlobStatArgs {
+    /// Finalized blob id (sha256 hex).
+    id: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
@@ -602,9 +690,9 @@ struct EditOperation {
     // Accept camelCase (schema) and snake_case (LLM habit). Optional flags
     // used to default-false when the snake key was silently dropped.
     #[serde(rename = "oldText", alias = "old_text")]
-    old_text: String,
+    old_text: ContentRef,
     #[serde(rename = "newText", alias = "new_text")]
-    new_text: String,
+    new_text: ContentRef,
     /// Use regex pattern instead of literal text match (default: false)
     #[serde(default, rename = "isRegex", alias = "is_regex")]
     is_regex: FlexBool,
@@ -1352,6 +1440,12 @@ struct ReadPdfArgs {
     /// Maximum characters to return (default: 50000)
     #[serde(default = "default_max_chars")]
     max_chars: usize,
+    /// Collapse ZWSP / spaced glyph artifacts (default: true)
+    #[serde(default = "default_flex_true")]
+    normalize: FlexBool,
+    /// Also return unnormalized extract as rawText (default: false)
+    #[serde(default)]
+    include_raw: FlexBool,
 }
 
 fn default_max_chars() -> usize {
@@ -1596,8 +1690,8 @@ struct WriteBinaryArgs {
     path: String,
     /// Byte offset to write at (0-indexed)
     offset: RU64,
-    /// Base64-encoded data to write
-    data: String,
+    /// Bytes via Content Plane (binary mode).
+    data: ContentRef,
     /// Write mode: "replace" overwrites bytes, "insert" shifts existing content
     #[serde(default = "default_write_mode")]
     mode: WriteBinaryMode,
@@ -1886,12 +1980,8 @@ struct RunCommandArgs {
     /// Redirect stderr to this file
     #[serde(alias = "stderr_file")]
     stderr_file: Option<String>,
-    /// Read stdin from this file
-    #[serde(alias = "stdin_file")]
-    stdin_file: Option<String>,
-    /// Pipe this string directly to stdin
-    #[serde(alias = "stdin_data")]
-    stdin_data: Option<String>,
+    /// Stdin via Content Plane (inline/base64/path/blob). Large scripts: write file then exec.
+    stdin: Option<ContentRef>,
     /// Return first N lines of stdout
     #[serde(default, alias = "stdout_head")]
     stdout_head: FlexUsize,
@@ -2459,14 +2549,29 @@ impl FileSystemServer {
 
     #[tool(
         name = "write_file",
-        description = "PREFERRED over built-in Write. Create or overwrite file with content.\n\n\
-            **Why use this:** Path validation, UTF-8 safe, consistent error handling, allowlist protection."
+        description = "PREFERRED over built-in Write. Create/overwrite via Content Plane.
+
+            content is a ContentRef object (NOT a bare string):
+            - {kind:inline, text} max 8KiB UTF-8
+            - {kind:base64, data} max 8KiB decoded
+            - {kind:path, path} allowlisted file
+            - {kind:blob, id} from blob_begin/append/finalize
+
+            Large files: blob_begin -> blob_append chunks -> blob_finalize -> write_file {kind:blob,id}.
+            Never python -c for large content. Optional expectSha256."
     )]
     async fn write_file(
         &self,
-        Parameters(WriteFileArgs { path, content }): Parameters<WriteFileArgs>,
+        Parameters(WriteFileArgs {
+            path,
+            content,
+            expect_sha256,
+        }): Parameters<WriteFileArgs>,
     ) -> Result<CallToolResult, McpError> {
-        info!(target_path = %path, content_len = content.len(), "write_file: start");
+        let bytes = self
+            .resolve_content_checked(&content, ContentMode::Text, expect_sha256.as_deref())
+            .await?;
+        info!(target_path = %path, content_len = bytes.len(), "write_file: start");
 
         let path = self.resolve(&path).await?;
         info!(resolved_path = %path.display(), "write_file: path resolved");
@@ -2478,11 +2583,6 @@ impl FileSystemServer {
                 .map_err(internal_err("Failed to create parent directories"))?;
         }
 
-        // Unique temp sibling: a name derived only from the target stem collides
-        // when two writes to different files share a stem (e.g. config.json +
-        // config.yaml), letting one write's bytes land under the other's name.
-        // Disambiguate by pid + a per-process counter so concurrent writes never
-        // reuse the same staging path.
         static WRITE_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
         let seq = WRITE_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let tmp_name = format!(
@@ -2493,29 +2593,125 @@ impl FileSystemServer {
         );
         let tmp_path = path.with_file_name(tmp_name);
         info!(tmp_path = %tmp_path.display(), "write_file: writing temp file");
-        fs::write(&tmp_path, content.as_bytes())
+        fs::write(&tmp_path, &bytes)
             .await
             .map_err(internal_err("Failed to write temp file"))?;
 
         info!("write_file: renaming temp to target");
         if let Err(e) = fs::rename(&tmp_path, &path).await {
-            // Never leave the staging file behind on failure.
             let _ = fs::remove_file(&tmp_path).await;
             return Err(internal_err("Failed to move temp file into place")(e));
         }
 
         info!(path = %path.display(), "write_file: success");
         Ok(CallToolResult::success(vec![ContentBlock::text(format!(
-            "Successfully wrote to {}",
+            "Successfully wrote {} bytes to {}",
+            bytes.len(),
             path.display()
-        ))]))
+        ))])
+        .with_structured(json!({
+            "path": path.display().to_string(),
+            "bytesWritten": bytes.len(),
+            "sha256": sha256_hex(&bytes),
+        })))
+    }
+
+
+    #[tool(
+        name = "blob_begin",
+        description = "Open a Content Plane staging session for large payloads.\n\n\
+            Returns {sessionId}. Append with blob_append (max 8KiB/chunk), then blob_finalize\n\
+            to get {id,sha256,bytes}. Pass {kind:blob,id} to write_file / edit_file / run_command.stdin."
+    )]
+    async fn blob_begin(&self) -> Result<CallToolResult, McpError> {
+        let session_id = self.content_plane.begin().map_err(Self::content_err)?;
+        Ok(CallToolResult::success(vec![ContentBlock::text(format!(
+            "blob session {session_id}"
+        ))])
+        .with_structured(json!({ "sessionId": session_id })))
+    }
+
+    #[tool(
+        name = "blob_append",
+        description = "Append a chunk to a blob session (max 8KiB). Provide text OR dataBase64."
+    )]
+    async fn blob_append(
+        &self,
+        Parameters(BlobAppendArgs {
+            session_id,
+            text,
+            data_base64,
+        }): Parameters<BlobAppendArgs>,
+    ) -> Result<CallToolResult, McpError> {
+        let chunk = ContentPlane::decode_chunk(text.as_deref(), data_base64.as_deref())
+            .map_err(Self::content_err)?;
+        self.content_plane
+            .append(&session_id, &chunk)
+            .map_err(Self::content_err)?;
+        Ok(CallToolResult::success(vec![ContentBlock::text(format!(
+            "appended {} bytes to session {}",
+            chunk.len(),
+            session_id
+        ))])
+        .with_structured(json!({
+            "sessionId": session_id,
+            "bytesAppended": chunk.len(),
+        })))
+    }
+
+    #[tool(
+        name = "blob_finalize",
+        description = "Finalize a blob session into a content-addressed blob id (sha256 hex)."
+    )]
+    async fn blob_finalize(
+        &self,
+        Parameters(BlobFinalizeArgs {
+            session_id,
+            expect_sha256,
+        }): Parameters<BlobFinalizeArgs>,
+    ) -> Result<CallToolResult, McpError> {
+        let fin = self
+            .content_plane
+            .finalize(&session_id, expect_sha256.as_deref())
+            .map_err(Self::content_err)?;
+        Ok(CallToolResult::success(vec![ContentBlock::text(format!(
+            "blob {} ({} bytes)",
+            fin.id, fin.bytes
+        ))])
+        .with_structured(json!({
+            "id": fin.id,
+            "bytes": fin.bytes,
+            "sha256": fin.sha256,
+        })))
+    }
+
+    #[tool(
+        name = "blob_stat",
+        description = "Stat a finalized Content Plane blob by id (sha256 hex)."
+    )]
+    async fn blob_stat(
+        &self,
+        Parameters(BlobStatArgs { id }): Parameters<BlobStatArgs>,
+    ) -> Result<CallToolResult, McpError> {
+        let st = self.content_plane.stat(&id).map_err(Self::content_err)?;
+        Ok(CallToolResult::success(vec![ContentBlock::text(format!(
+            "blob {} ({} bytes)",
+            st.id, st.bytes
+        ))])
+        .with_structured(json!({
+            "id": st.id,
+            "bytes": st.bytes,
+            "sha256": st.sha256,
+        })))
     }
 
     #[tool(
         name = "edit_file",
-        description = "PREFERRED over built-in Edit/sed. Apply text edits with unified diff output.\n\n\
-            **Why use this:** Returns unified diff for verification, supports dry-run mode, regex with capture groups, replaceAll option.\n\n\
-            Each edit: oldText (literal or regex) -> newText. Set isRegex=true for patterns, replaceAll=true to replace all occurrences."
+        description = "PREFERRED over built-in Edit/sed. Apply text edits with unified diff.
+
+            Each edit: oldText/newText are ContentRef objects (inline/base64/path/blob), not bare strings.
+            Surgical edits: {kind:inline,text} (max 8KiB per side). Large rewrites: write_file + blob.
+            Set isRegex=true for patterns, replaceAll=true to replace all, dryRun to preview."
     )]
     async fn edit_file(
         &self,
@@ -2533,17 +2729,29 @@ impl FileSystemServer {
             .map_err(internal_err("Failed to read file"))?;
         tf.ensure_roundtrippable().map_err(internal_err("Cannot edit file"))?;
 
-        let edits: Vec<FileEdit> = edits
-            .into_iter()
-            .map(|e| FileEdit {
-                old_text: e.old_text,
-                new_text: e.new_text,
+        let mut resolved_edits = Vec::with_capacity(edits.len());
+        for e in edits {
+            let old_bytes = self
+                .resolve_content(&e.old_text, ContentMode::Text)
+                .await?;
+            let new_bytes = self
+                .resolve_content(&e.new_text, ContentMode::Text)
+                .await?;
+            let old_text = String::from_utf8(old_bytes).map_err(|err| {
+                Self::content_err(ContentError::InvalidUtf8(err.to_string()))
+            })?;
+            let new_text = String::from_utf8(new_bytes).map_err(|err| {
+                Self::content_err(ContentError::InvalidUtf8(err.to_string()))
+            })?;
+            resolved_edits.push(FileEdit {
+                old_text,
+                new_text,
                 is_regex: *e.is_regex,
                 replace_all: *e.replace_all,
-            })
-            .collect();
-        let outcome =
-            apply_edits(&tf.text, &edits).map_err(internal_err("Failed to apply edits"))?;
+            });
+        }
+        let outcome = apply_edits(&tf.text, &resolved_edits)
+            .map_err(internal_err("Failed to apply edits"))?;
 
         if !*dry_run {
             let bytes = tf
@@ -4414,17 +4622,24 @@ EXAMPLES:\n  1. Literal replace all occurrences:\n     {\"oldText\": \"use crate
     ) -> Result<CallToolResult, McpError> {
         self.ensure_allowed().await?;
 
-        // Convert to FileEdit format
-        let edits: Vec<FileEdit> = args
-            .edits
-            .into_iter()
-            .map(|e| FileEdit {
-                old_text: e.old_text,
-                new_text: e.new_text,
+        // Resolve ContentRefs then convert to FileEdit format
+        let mut edits = Vec::with_capacity(args.edits.len());
+        for e in args.edits {
+            let old_bytes = self.resolve_content(&e.old_text, ContentMode::Text).await?;
+            let new_bytes = self.resolve_content(&e.new_text, ContentMode::Text).await?;
+            let old_text = String::from_utf8(old_bytes).map_err(|err| {
+                Self::content_err(ContentError::InvalidUtf8(err.to_string()))
+            })?;
+            let new_text = String::from_utf8(new_bytes).map_err(|err| {
+                Self::content_err(ContentError::InvalidUtf8(err.to_string()))
+            })?;
+            edits.push(FileEdit {
+                old_text,
+                new_text,
                 is_regex: *e.is_regex,
                 replace_all: *e.replace_all,
-            })
-            .collect();
+            });
+        }
 
         let engine = match args.engine.as_deref() {
             None | Some("regex") => EditEngine::Regex,
@@ -4932,19 +5147,10 @@ USE CASES: Read binary headers, extract sections of images/executables, inspect 
 
     #[tool(
         name = "write_binary",
-        description = "Write bytes to a binary file. Data must be base64-encoded.
+        description = "Write bytes to a binary file via Content Plane.
 
-PARAMETERS:
-- path: File path
-- offset: Position to write at (0-indexed)
-- data: Base64-encoded bytes to write
-- mode: 'replace' (overwrite) or 'insert' (shift existing bytes)
-
-EXAMPLES:
-- Overwrite at pos 0: {path: 'file.bin', offset: 0, data: 'SGVsbG8=', mode: 'replace'}
-- Insert at pos 100: {path: 'file.bin', offset: 100, data: 'V29ybGQ=', mode: 'insert'}
-
-USE CASES: Patch executables, inject data into files, modify binary headers. Creates file if missing."
+            data is a ContentRef (binary mode): inline/base64/path/blob. Prefer base64 or blob.
+            PARAMETERS: path, offset, data (ContentRef), mode replace|insert."
     )]
     async fn write_binary(
         &self,
@@ -4952,8 +5158,9 @@ USE CASES: Patch executables, inject data into files, modify binary headers. Cre
     ) -> Result<CallToolResult, McpError> {
         let path = self.resolve(&args.path).await?;
 
-        let data = from_base64(&args.data)
-            .map_err(|e| McpError::invalid_params(format!("Invalid base64: {}", e), None))?;
+        let data = self
+            .resolve_content(&args.data, ContentMode::Binary)
+            .await?;
 
         let insert = matches!(args.mode, WriteBinaryMode::Insert);
 
@@ -5417,7 +5624,7 @@ USE CASES: Patch executables, fix binary data, search-replace in non-text files.
 
     #[tool(
         name = "read_pdf",
-        description = "Extract text from PDF file. Supports page ranges. Returns text, page count, charCount, and truncation info."
+        description = "Extract text from PDF. Default normalize=true collapses ZWSP/spaced glyphs. Returns quality.score, quality.warnings, suspiciousTokens when encoding maps look broken — do not treat low-score text as source of truth. Optional includeRaw for unnormalized extract."
     )]
     async fn read_pdf(
         &self,
@@ -5425,18 +5632,41 @@ USE CASES: Patch executables, fix binary data, search-replace in non-text files.
     ) -> Result<CallToolResult, McpError> {
         let path = self.resolve(&args.path).await?;
 
-        let result = pdf_reader::read_pdf(&path, args.pages.as_deref(), args.max_chars)
-            .await
-            .map_err(|e| McpError::internal_error(e.to_string(), None))?;
+        let result = pdf_reader::read_pdf(
+            &path,
+            args.pages.as_deref(),
+            args.max_chars,
+            pdf_reader::ReadPdfOptions {
+                normalize: *args.normalize,
+                include_raw: *args.include_raw,
+            },
+        )
+        .await
+        .map_err(|e| McpError::internal_error(e.to_string(), None))?;
+
+        let mut structured = json!({
+            "text": result.text,
+            "pagesCount": result.pages_count,
+            "pagesExtracted": result.pages_extracted,
+            "truncated": result.truncated,
+            "charCount": result.char_count,
+            "normalized": result.normalized,
+            "quality": {
+                "score": result.quality.score,
+                "warnings": result.quality.warnings,
+                "zeroWidthChars": result.quality.zero_width_chars,
+                "singleLetterTokenRatio": result.quality.single_letter_token_ratio,
+                "suspiciousTokenRatio": result.quality.suspicious_token_ratio,
+                "suspiciousTokens": result.quality.suspicious_tokens,
+            },
+        });
+        if let Some(raw) = result.raw_text {
+            structured["rawText"] = json!(raw);
+        }
 
         Ok(
-            CallToolResult::success(vec![ContentBlock::text(&result.text)]).with_structured(json!({
-                "text": result.text,
-                "pagesCount": result.pages_count,
-                "pagesExtracted": result.pages_extracted,
-                "truncated": result.truncated,
-                "charCount": result.char_count,
-            })),
+            CallToolResult::success(vec![ContentBlock::text(&result.text)])
+                .with_structured(structured),
         )
     }
 
@@ -5626,8 +5856,8 @@ USE CASES: Patch executables, fix binary data, search-replace in non-text files.
             - Multi-line cmd (newline-separated, shell:'cmd' or true/default on Windows) runs ALL lines via a temp .bat = BATCH semantics: %%i (not %i) in for, exit code = LAST line, a failing middle line does NOT stop the rest (use && for fail-fast).\n\
             - WINDOWS PATHS in `command`: JSON eats single backslashes (`\\r`/`\\t` become control chars). Double them (`\"C:\\\\dir\\\\file\"`) or use forward slashes; in shell mode the decoded line reaches cmd.exe verbatim.\n\
             - env/envPrepend/envAppend: Set, prepend, or append env vars.\n\
-            - stdinData: Pipe a string directly to command stdin.\n\
-            - $VAR GOTCHA: the MCP client may DELETE `$NAME` tokens from `command`/`args` before the shell runs (every `$var` -> empty, even defined ones like $HOME); silent, no error. For scripts that need shell variables, pass them via `stdinData` (NOT stripped) or write a script file and run it (`bash x.sh` / `pwsh -NoProfile -File x.ps1`) — stdinData and file contents reach the program verbatim.\n\
+            - stdin: ContentRef for command stdin (inline/base64/path/blob).\n\
+            - $VAR GOTCHA: the MCP client may DELETE `$NAME` tokens from `command`/`args` before the shell runs (every `$var` -> empty, even defined ones like $HOME); silent, no error. For scripts that need shell variables, pass them via `stdin` ContentRef (NOT stripped) or write a script file and run it (`bash x.sh` / `pwsh -NoProfile -File x.ps1`) — stdin ContentRef and file contents reach the program verbatim.\n\
             - cwd: optional working directory. Pass an absolute path with forward slashes as a plain JSON string value (e.g. `\"cwd\": \"C:/projects/repo\"`). Do NOT embed extra quote characters inside the path value itself.\n\
             - timeoutMs: Kill command (and all children) after N ms.\n\
             - Process tree kill: On timeout/cancel, kills all child processes too.\n\
@@ -5639,7 +5869,7 @@ USE CASES: Patch executables, fix binary data, search-replace in non-text files.
             - Shell pipes (unix dialect, any OS): {command: 'cat file.txt | grep error | head -20', shell: 'bash'}\n\
             - Background server: {command: 'npm', args: ['start'], mode: 'detached'}\n\
             - Managed build: {command: 'cargo', args: ['build'], mode: 'managed', timeoutMs: 600000}\n\
-            - Stdin pipe: {command: 'python', args: ['script.py'], stdinData: 'input data'}\n\n\
+            - Stdin pipe: {command: 'python', args: ['script.py'], stdin: {kind:'inline', text:'input data'}}\n\n\
             **Output tips:** Prefer machine-readable formats: cargo build --message-format=json, \n\
             cargo test -- --format=terse, npm --json, pylint --output-format=json."
     )]
@@ -5763,8 +5993,12 @@ USE CASES: Patch executables, fix binary data, search-replace in non-text files.
             kill_after_ms: args.kill_after_ms.get(),
             stdout_file: stdout_file.clone(),
             stderr_file: stderr_file.clone(),
-            stdin_file: args.stdin_file,
-            stdin_data: args.stdin_data,
+            stdin_bytes: match args.stdin.as_ref() {
+                Some(content) => Some(
+                    self.resolve_content(content, ContentMode::Text).await?,
+                ),
+                None => None,
+            },
             stdout_head: args.stdout_head.get(),
             stdout_tail: args.stdout_tail.get(),
             stderr_head: args.stderr_head.get(),

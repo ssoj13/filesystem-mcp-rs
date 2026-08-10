@@ -309,10 +309,8 @@ pub struct RunParams {
     pub stdout_file: Option<String>,
     /// Redirect stderr to file
     pub stderr_file: Option<String>,
-    /// Read stdin from file
-    pub stdin_file: Option<String>,
-    /// Pipe this string to stdin
-    pub stdin_data: Option<String>,
+    /// Raw stdin bytes (from Content Plane). None = no stdin pipe.
+    pub stdin_bytes: Option<Vec<u8>>,
     /// Return only first N lines of stdout
     pub stdout_head: Option<usize>,
     /// Return only last N lines of stdout
@@ -864,15 +862,9 @@ pub async fn run_command(
     }
 
     // Set up stdio
-    let stdin_data = if let Some(ref data) = params.stdin_data {
+    let stdin_bytes = if let Some(ref data) = params.stdin_bytes {
         cmd.stdin(Stdio::piped());
         Some(data.clone())
-    } else if let Some(ref stdin_file) = params.stdin_file {
-        let data = tokio::fs::read_to_string(stdin_file)
-            .await
-            .with_context(|| format!("Failed to read stdin file: {}", stdin_file))?;
-        cmd.stdin(Stdio::piped());
-        Some(data)
     } else {
         cmd.stdin(Stdio::null());
         None
@@ -889,10 +881,10 @@ pub async fn run_command(
     let pid = child.id();
 
     // Handle stdin
-    if let Some(data) = stdin_data
+    if let Some(data) = stdin_bytes
         && let Some(mut stdin) = child.stdin.take()
     {
-        stdin.write_all(data.as_bytes()).await?;
+        stdin.write_all(&data).await?;
         stdin.flush().await?;
         drop(stdin);
     }
@@ -1807,45 +1799,21 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_run_with_stdin_data() {
+    async fn test_run_with_stdin_bytes() {
         #[cfg(windows)]
         let (cmd, args) = ("cmd", vec!["/C", "findstr ."]);
         #[cfg(unix)]
         let (cmd, args) = ("cat", vec![]);
 
         let params = RunParams {
-            stdin_data: Some("hello from stdin_data".to_string()),
+            stdin_bytes: Some(b"hello from stdin_bytes".to_vec()),
             ..Default::default()
         };
 
         let result = run_command(cmd, &args, params, None, None, None)
             .await
             .unwrap();
-        assert!(result.stdout.contains("hello from stdin_data"));
-    }
-
-    #[tokio::test]
-    async fn test_run_with_stdin_file() {
-        let dir = tempdir().unwrap();
-        let stdin_path = dir.path().join("input.txt");
-        tokio::fs::write(&stdin_path, "hello from file")
-            .await
-            .unwrap();
-
-        #[cfg(windows)]
-        let (cmd, args) = ("cmd", vec!["/C", "findstr ."]);
-        #[cfg(unix)]
-        let (cmd, args) = ("cat", vec![]);
-
-        let params = RunParams {
-            stdin_file: Some(stdin_path.to_string_lossy().to_string()),
-            ..Default::default()
-        };
-
-        let result = run_command(cmd, &args, params, None, None, None)
-            .await
-            .unwrap();
-        assert!(result.stdout.contains("hello from file"));
+        assert!(result.stdout.contains("hello from stdin_bytes"));
     }
 
     #[tokio::test]

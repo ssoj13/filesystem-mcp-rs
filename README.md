@@ -11,6 +11,10 @@ It's not about "memory safety" or something like that, I'm doing that just becau
 
 To the bone:
 
+> **Breaking — Content Plane SSOT.** `write_file` / `edit_file` / `write_binary` / `run_command.stdin` take a **ContentRef** object (`inline` / `base64` / `path` / `blob`), not a bare mega-string. Large payloads: `blob_begin` → `blob_append` (≤8 KiB) → `blob_finalize` → `{kind:"blob",id}`. Never `python -c` to dodge JSON. See [CHANGELOG.md](CHANGELOG.md).
+>
+> **`read_pdf` tells you when extraction is junk.** Default `normalize=true` repairs ZWSP / spaced glyphs; structured `quality.score` / `warnings` / `suspiciousTokens` flag broken ToUnicode maps — low score means do not treat the text as source of truth.
+>
 > **`edit_lines` no longer mangles range replaces** — snake_case keys like `end_line` / `dry_run` are accepted alongside camelCase (`endLine`, `dryRun`); overlapping edits fail up front instead of leaving a broken tail. Same alias pattern on `edit_file` / `extract_*` / `bulk_edits`. See [CHANGELOG.md](CHANGELOG.md).
 >
 > **v0.1.17** — **Scoped memory is stricter.** Memory tools now use a clear, flat shape (`workspaceId`, `actorId`, `item`). Old shortcuts like `"scope": "my-project"` no longer work — update your calls once and you get predictable behavior. Summaries default to the whole workspace, so a simple recall call works without extra IDs.
@@ -33,10 +37,10 @@ To the bone:
 - **Memory v2 (0.1.17+)**: strict flat args — `workspaceId`, `actorId`, `item` object only; see [CHANGELOG.md](CHANGELOG.md) for migration
 
 ## Capabilities
-- Read: `read_text_file` (head/tail/offset/limit/max_chars/line_numbers), `read_media_file`, `read_multiple_files`, `read_json` (JSONPath), `read_pdf`
-- Write/Edit: `write_file`, `edit_file` (diff + dry-run), `edit_lines` (line-based edits), `bulk_edits` (mass search/replace)
+- Read: `read_text_file` (head/tail/offset/limit/max_chars/line_numbers), `read_media_file`, `read_multiple_files`, `read_json` (JSONPath), `read_pdf` (normalize + quality warnings)
+- Write/Edit: `write_file`, `edit_file` (ContentRef + diff/dry-run), `edit_lines`, `bulk_edits`; large payloads via `blob_begin`/`blob_append`/`blob_finalize`
 - Extract: `extract_lines` (cut lines), `extract_symbols` (cut characters)
-- Binary: `read_binary`, `write_binary`, `extract_binary`, `patch_binary` (all base64)
+- Binary: `read_binary`, `write_binary` (ContentRef), `extract_binary`, `patch_binary`
 - FS ops: `create_directory`, `move_file`, `copy_file` (files/dirs, overwrite), `delete_path` (recursive)
 - Hashing: `file_hash` (MD5/SHA1/SHA256/SHA512/XXH64/Murmur3/Spooky + offset/length), `file_hash_multiple` (batch + comparison)
 - Comparison: `compare_files` (binary diff), `compare_directories` (tree diff)
@@ -325,6 +329,24 @@ Integrated from llm-mcp-rs. Requires API keys via environment variables.
 
 ## Advanced Editing Tools
 
+### Content Plane (`ContentRef`) — required for write/edit payloads
+
+Large or nested UTF-8 must **not** ride inside MCP tool-argument JSON. Every write path takes a ContentRef object:
+
+| `kind` | Shape | Limit / notes |
+|--------|--------|----------------|
+| `inline` | `{ "kind": "inline", "text": "..." }` | max 8 KiB UTF-8 |
+| `base64` | `{ "kind": "base64", "data": "..." }` | max 8 KiB decoded |
+| `path` | `{ "kind": "path", "path": "..." }` | allowlisted file on disk |
+| `blob` | `{ "kind": "blob", "id": "<sha256>" }` | from `blob_finalize` |
+
+**Staging large content:** `blob_begin` → `blob_append` (≤8 KiB per chunk, `text` or `dataBase64`) → `blob_finalize` → pass `{kind:"blob",id}` to `write_file` / `edit_file` / `run_command.stdin` / `write_binary`. Optional `expectSha256` on `write_file` / finalize. `blob_stat` checks a finalized id.
+
+```json
+{"path": "notes.txt", "content": {"kind": "inline", "text": "hello"}}
+{"path": "big.rs", "content": {"kind": "blob", "id": "<sha256 from blob_finalize>"}}
+```
+
 ### `edit_lines` - Line-Based Surgical Edits
 Precise editing by line numbers (1-indexed). Perfect when you know exact locations:
 - **Operations**: `replace`, `insert_before`, `insert_after`, `delete`
@@ -485,7 +507,7 @@ Read bytes from a binary file at specified offset:
 
 ### `write_binary` - Write Bytes
 Write bytes to a binary file:
-- **Parameters**: `path`, `offset`, `data` (base64), `mode` (replace/insert)
+- **Parameters**: `path`, `offset`, `data` (ContentRef in binary mode), `mode` (replace/insert)
 - **Creates file if missing**
 - **Use cases**: Patch executables, inject data, modify headers
 
@@ -571,8 +593,9 @@ Read and query JSON files using JSONPath:
 
 ### `read_pdf` - Extract PDF Text
 Extract text content from PDF files:
-- **Parameters**: `path`, `pages` (e.g., "1-5", "1,3,5"), `max_chars`
-- **Returns**: `{text, pages_count, pages_extracted[], truncated}`
+- **Parameters**: `path`, `pages` (e.g., "1-5", "1,3,5"), `maxChars`, `normalize` (default true), `includeRaw` (default false)
+- **Returns**: `{text, pagesCount, pagesExtracted[], truncated, charCount, normalized, quality{score, warnings, suspiciousTokens, ...}}`
+- **Quality**: low `quality.score` or warnings like `extraction_quality_degraded` mean encoding maps failed — verify against a PDF viewer before trusting names/tables
 - **Use cases**: Read documentation, extract report content
 
 ## Archive Tools
@@ -618,7 +641,7 @@ Robust process execution for LLM workflows. Cross-platform (Windows/macOS/Linux)
 **Parameters:**
 - **Core**: `command`, `args[]`, `cwd`, `mode`, `shell`, `timeoutMs`, `killAfterMs`
 - **Environment**: `env{}` (set/override), `envPrepend{}` (prepend to existing), `envAppend{}` (append to existing), `clearEnv`
-- **Stdin**: `stdinFile`, `stdinData` (pipe string directly)
+- **Stdin**: `stdin` ContentRef (`inline`/`base64`/`path`/`blob`)
 - **Output files**: `stdoutFile`, `stderrFile`, `streamOutput` (default: true), `streamDir`
 - **Output control**: `stdoutHead`, `stdoutTail`, `stderrHead`, `stderrTail`
 - **Output filter**: `outputFilter: {include[], exclude[], context, contextBefore, contextAfter, maxLines}` (grep-like regex filtering)
@@ -656,7 +679,7 @@ Robust process execution for LLM workflows. Cross-platform (Windows/macOS/Linux)
 {"command": "python", "args": ["script.py"], "envPrepend": {"PATH": "C:/custom/bin;"}}
 
 // Pipe string to stdin
-{"command": "python", "args": ["script.py"], "stdinData": "input data"}
+{"command": "python", "args": ["script.py"], "stdin": {"kind": "inline", "text": "input data"}}
 
 // Head + tail (first 5 lines + last 10 lines)
 {"command": "cargo", "args": ["test"], "stdoutHead": 5, "stdoutTail": 10, "streamOutput": false}

@@ -13,6 +13,7 @@ graph TB
     subgraph Core["Core Modules"]
         allowed["allowed.rs — AllowedDirs"]
         path["path.rs — Path Resolution"]
+        content_plane["content_plane.rs — ContentRef / blobs"]
         fs_ops["fs_ops.rs — Read/Write/List"]
         edit["edit.rs — Text Editing"]
         diff["diff.rs — Unified Diff"]
@@ -65,6 +66,7 @@ graph TB
 
     main --> allowed
     main --> path
+    main --> content_plane
     main --> fs_ops
     main --> edit
     main --> search
@@ -153,6 +155,10 @@ mindmap
     Write
       write_file
       write_binary
+      blob_begin
+      blob_append
+      blob_finalize
+      blob_stat
       create_directory
       file_touch
     Edit
