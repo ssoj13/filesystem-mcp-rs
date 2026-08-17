@@ -861,6 +861,38 @@ async fn edit_lines_json_string_edits() -> Result<()> {
 }
 
 #[tokio::test]
+async fn edit_file_bare_strings_with_braces_and_two_edits() -> Result<()> {
+    let tmp = TempDir::new()?;
+    let srv = start_server(tmp.path()).await?;
+    let file_path = tmp.path().join("braces.rs");
+    std::fs::write(&file_path, "use crate::foo;\nlet x = 1;\n")?;
+
+    let res = srv
+        .call_tool(
+            "edit_file",
+            json!({
+                "path": &file_path,
+                "edits": [
+                    { "oldText": "use crate::foo;", "newText": "use crate::foo::{Bar};" },
+                    { "oldText": "let x = 1;", "newText": "let x = 2;" }
+                ]
+            }),
+        )
+        .await?;
+    assert_ok(&res);
+
+    let full = srv
+        .call_tool("read_text_file", json!({ "path": &file_path }))
+        .await?;
+    let text = full["result"]["content"][0]["text"].as_str().unwrap_or("");
+    assert!(text.contains("use crate::foo::{Bar};"), "{text}");
+    assert!(text.contains("let x = 2;"), "{text}");
+
+    srv.kill().await;
+    Ok(())
+}
+
+#[tokio::test]
 async fn bulk_edits_json_string_edits() -> Result<()> {
     let tmp = TempDir::new()?;
     let srv = start_server(tmp.path()).await?;

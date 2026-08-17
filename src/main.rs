@@ -32,7 +32,7 @@ use tracing::{info, warn};
 use crate::core::agent_policy;
 use crate::core::allowed::AllowedDirs;
 use crate::core::content_plane::{
-    ContentError, ContentMode, ContentPlane, ContentRef,
+    ContentError, ContentMode, ContentPlane, ContentRef, TextOrRef,
     sha256_hex,
 };
 use crate::core::format;
@@ -685,20 +685,53 @@ struct BlobStatArgs {
     id: String,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, Serialize, JsonSchema)]
 struct EditOperation {
-    // Accept camelCase (schema) and snake_case (LLM habit). Optional flags
-    // used to default-false when the snake key was silently dropped.
-    #[serde(rename = "oldText", alias = "old_text")]
-    old_text: ContentRef,
-    #[serde(rename = "newText", alias = "new_text")]
-    new_text: ContentRef,
-    /// Use regex pattern instead of literal text match (default: false)
+    // Strings preferred for short snippets (hosts drop nested ContentRef
+    // objects when `text` contains `{`). ContentRef still works for blobs.
+    #[serde(rename = "oldText", alias = "old_text", alias = "old")]
+    old_text: TextOrRef,
+    #[serde(rename = "newText", alias = "new_text", alias = "new", alias = "replacement")]
+    new_text: TextOrRef,
     #[serde(default, rename = "isRegex", alias = "is_regex")]
     is_regex: FlexBool,
-    /// Replace all occurrences instead of just the first one (default: false)
     #[serde(default, rename = "replaceAll", alias = "replace_all")]
     replace_all: FlexBool,
+}
+
+impl<'de> Deserialize<'de> for EditOperation {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        #[derive(Deserialize)]
+        struct Raw {
+            #[serde(rename = "oldText", alias = "old_text", alias = "old")]
+            old_text: Option<TextOrRef>,
+            #[serde(rename = "newText", alias = "new_text", alias = "new", alias = "replacement")]
+            new_text: Option<TextOrRef>,
+            #[serde(default, rename = "isRegex", alias = "is_regex")]
+            is_regex: FlexBool,
+            #[serde(default, rename = "replaceAll", alias = "replace_all")]
+            replace_all: FlexBool,
+        }
+        let raw = Raw::deserialize(deserializer)?;
+        let old_text = raw.old_text.ok_or_else(|| {
+            serde::de::Error::custom(
+                "edit missing oldText: send a UTF-8 string, or {kind:inline,text}",
+            )
+        })?;
+        let new_text = raw.new_text.ok_or_else(|| {
+            serde::de::Error::custom(
+                "edit missing newText: host may have dropped a ContentRef object; \
+                 send a UTF-8 string (preferred for short snippets), or {kind:inline,text}, \
+                 or {kind:blob,id}",
+            )
+        })?;
+        Ok(Self {
+            old_text,
+            new_text,
+            is_regex: raw.is_regex,
+            replace_all: raw.replace_all,
+        })
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
@@ -710,6 +743,99 @@ struct EditFileArgs {
     dry_run: FlexBool,
 }
 
+#[cfg(test)]
+mod edit_operation_serde_tests {
+    use super::*;
+
+    #[test]
+    fn bare_string_with_braces() {
+        let v: EditOperation = serde_json::from_value(serde_json::json!({
+            "oldText": "use crate::foo",
+            "newText": "use crate::foo::{Bar}"
+        }))
+        .expect("bare strings");
+        match v.new_text.into_ref() {
+            ContentRef::Inline { text } => assert_eq!(text, "use crate::foo::{Bar}"),
+            _ => panic!("expected inline"),
+        }
+    }
+
+    #[test]
+    fn two_edits_array_bare_strings() {
+        let edits: Vec<EditOperation> = serde_json::from_value(serde_json::json!([
+            {"oldText": "a", "newText": "A"},
+            {"oldText": "b", "newText": "B"}
+        ]))
+        .expect("two edits");
+        assert_eq!(edits.len(), 2);
+    }
+
+    #[test]
+    fn missing_new_text_names_the_contract() {
+        let err = serde_json::from_value::<EditOperation>(serde_json::json!({
+            "oldText": "a"
+        }))
+        .unwrap_err()
+        .to_string();
+        assert!(err.contains("missing newText"), "{err}");
+        assert!(err.contains("UTF-8 string"), "{err}");
+    }
+
+    #[test]
+    fn content_ref_object_still_works() {
+        let v: EditOperation = serde_json::from_value(serde_json::json!({
+            "oldText": {"kind": "inline", "text": "a"},
+            "newText": {"kind": "inline", "text": "b"}
+        }))
+        .expect("content ref");
+        match v.old_text.into_ref() {
+            ContentRef::Inline { text } => assert_eq!(text, "a"),
+            _ => panic!("expected inline"),
+        }
+    }
+}
+
+#[cfg(test)]
+mod grep_files_args_serde_tests {
+    use super::*;
+
+    #[test]
+    fn root_alias_fills_path() {
+        let v: GrepFilesArgs = serde_json::from_value(serde_json::json!({
+            "root": "C:/repo",
+            "pattern": "foo"
+        }))
+        .expect("root alias");
+        assert_eq!(v.path, "C:/repo");
+    }
+
+    #[test]
+    fn missing_path_is_empty_not_serde_missing_field() {
+        let v: GrepFilesArgs = serde_json::from_value(serde_json::json!({
+            "pattern": "foo"
+        }))
+        .expect("path default");
+        assert!(v.path.is_empty());
+    }
+
+    #[test]
+    fn file_pattern_camel_and_glob() {
+        let a: GrepFilesArgs = serde_json::from_value(serde_json::json!({
+            "path": ".",
+            "pattern": "x",
+            "filePattern": "*.rs"
+        }))
+        .unwrap();
+        assert_eq!(a.file_pattern.as_deref(), Some("*.rs"));
+        let b: GrepFilesArgs = serde_json::from_value(serde_json::json!({
+            "path": ".",
+            "pattern": "x",
+            "glob": "*.toml"
+        }))
+        .unwrap();
+        assert_eq!(b.file_pattern.as_deref(), Some("*.toml"));
+    }
+}
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 struct CreateDirArgs {
     path: String,
@@ -814,6 +940,7 @@ struct FileInfoArgs {
 #[serde(rename_all = "camelCase")]
 struct GrepFilesArgs {
     /// Root directory to search
+    #[serde(default, alias = "root", alias = "dir", alias = "directory")]
     path: String,
     /// Regex pattern to search for in file contents
     pattern: String,
@@ -889,6 +1016,7 @@ struct GrepFilesArgs {
 #[serde(rename_all = "camelCase")]
 struct GrepContextArgs {
     /// Root directory to search
+    #[serde(alias = "root", alias = "dir", alias = "directory")]
     path: String,
     /// Regex pattern to search for in file contents
     pattern: String,
@@ -2709,8 +2837,8 @@ impl FileSystemServer {
         name = "edit_file",
         description = "PREFERRED over built-in Edit/sed. Apply text edits with unified diff.
 
-            Each edit: oldText/newText are ContentRef objects (inline/base64/path/blob), not bare strings.
-            Surgical edits: {kind:inline,text} (max 8KiB per side). Large rewrites: write_file + blob.
+            Each edit: oldText/newText are UTF-8 strings (preferred for short snippets, including `{`).
+            ContentRef objects (inline/base64/path/blob) also work, max 8KiB per side. Large rewrites: write_file + blob.
             Set isRegex=true for patterns, replaceAll=true to replace all, dryRun to preview."
     )]
     async fn edit_file(
@@ -2731,12 +2859,10 @@ impl FileSystemServer {
 
         let mut resolved_edits = Vec::with_capacity(edits.len());
         for e in edits {
-            let old_bytes = self
-                .resolve_content(&e.old_text, ContentMode::Text)
-                .await?;
-            let new_bytes = self
-                .resolve_content(&e.new_text, ContentMode::Text)
-                .await?;
+            let old_ref = e.old_text.into_ref();
+            let new_ref = e.new_text.into_ref();
+            let old_bytes = self.resolve_content(&old_ref, ContentMode::Text).await?;
+            let new_bytes = self.resolve_content(&new_ref, ContentMode::Text).await?;
             let old_text = String::from_utf8(old_bytes).map_err(|err| {
                 Self::content_err(ContentError::InvalidUtf8(err.to_string()))
             })?;
@@ -3272,6 +3398,16 @@ impl FileSystemServer {
         client: Peer<RoleServer>,
     ) -> Result<CallToolResult, McpError> {
         self.ensure_allowed().await?;
+
+        if args.path.trim().is_empty() {
+            return Err(McpError::invalid_params(
+                "grep_files: missing or empty 'path' (root directory to search). \
+                 Accepted keys: path, root, dir, directory. If you sent one of these, \
+                 the host may have dropped it from the call — resend with a non-empty value."
+                    .to_string(),
+                None,
+            ));
+        }
 
         // Parse output mode
         let output_mode = match args.output_mode.as_deref() {
@@ -4625,8 +4761,10 @@ EXAMPLES:\n  1. Literal replace all occurrences:\n     {\"oldText\": \"use crate
         // Resolve ContentRefs then convert to FileEdit format
         let mut edits = Vec::with_capacity(args.edits.len());
         for e in args.edits {
-            let old_bytes = self.resolve_content(&e.old_text, ContentMode::Text).await?;
-            let new_bytes = self.resolve_content(&e.new_text, ContentMode::Text).await?;
+            let old_ref = e.old_text.into_ref();
+            let new_ref = e.new_text.into_ref();
+            let old_bytes = self.resolve_content(&old_ref, ContentMode::Text).await?;
+            let new_bytes = self.resolve_content(&new_ref, ContentMode::Text).await?;
             let old_text = String::from_utf8(old_bytes).map_err(|err| {
                 Self::content_err(ContentError::InvalidUtf8(err.to_string()))
             })?;

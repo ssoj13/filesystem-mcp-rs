@@ -2,9 +2,15 @@
 
 ## [Unreleased]
 
+### Fixes — `edit_file` / `grep_files` host-drop (bug.md)
+
+- **`edit_file` / `bulk_edits` `oldText`/`newText` accept a UTF-8 string again** (`TextOrRef`). ContentRef objects still work for blobs. Hosts (Grok) drop nested `{kind:inline,text}` — especially when `text` contains `{` — and the call died as `missing field newText`. Short snippets are strings; `write_file` / `stdin` stay ContentRef-only.
+- Missing `newText` now names the contract (send a string or ContentRef) instead of a bare serde missing-field.
+- **`grep_files.path`** defaults to empty and aliases `root` / `dir` / `directory`. Empty path is a readable `invalid_params`, not `missing field path`. `filePattern` / `glob` / `include` / `file_pattern` all bind.
+
 ### Breaking — Content Plane SSOT
 
-- **Payload ingress is unified behind `ContentRef`** (`src/core/content_plane.rs`). `write_file.content`, `edit_file` / `bulk_edits` `oldText`/`newText`, `write_binary.data`, and `run_command.stdin` are ContentRef objects (`inline` / `base64` / `path` / `blob`), not bare strings. Inline/base64 hard-capped at 8 KiB.
+- **Payload ingress is unified behind `ContentRef`** (`src/core/content_plane.rs`). `write_file.content`, `write_binary.data`, and `run_command.stdin` are ContentRef objects (`inline` / `base64` / `path` / `blob`), not bare strings. `edit_file` / `bulk_edits` snippets are `TextOrRef` (string **or** ContentRef). Inline/base64 hard-capped at 8 KiB.
 - **New tools:** `blob_begin`, `blob_append`, `blob_finalize`, `blob_stat` for chunked staging of large agent-authored content. Pass `{kind:blob,id}` into write/edit/run.
 - **Removed:** `run_command.stdinData` / `stdinFile` (use `stdin` ContentRef). Bare-string `write_file.content` / base64-string `write_binary.data`.
 - **Why:** Hosts mangle or abort mid-flight on large nested UTF-8 in tool-argument JSON; agents then fall back to `python -c` and corrupt files. Control plane stays small; bytes move via path or blob sessions.

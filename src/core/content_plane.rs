@@ -10,8 +10,9 @@ use std::sync::{Arc, Mutex};
 
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD as BASE64;
-use schemars::JsonSchema;
-use serde::{Deserialize, Serialize};
+use schemars::{JsonSchema, Schema, json_schema};
+use serde::de::Error as DeError;
+use serde::{Deserialize, Deserializer, Serialize};
 use sha2::{Digest, Sha256};
 use thiserror::Error;
 use uuid::Uuid;
@@ -43,6 +44,66 @@ pub enum ContentRef {
     Path { path: String },
     /// Finalized content-addressed blob id (sha256 hex).
     Blob { id: String },
+}
+
+/// Search/replace snippet for `edit_file` / `bulk_edits`.
+///
+/// [`ContentRef`] stays object-only so `write_file` / `stdin` cannot smuggle a
+/// megabyte through tool-argument JSON. Edit snippets are different: hosts
+/// (Grok) drop nested `{kind:inline,text}` objects — especially when `text`
+/// contains `{` — and the call dies as `missing field newText`. A bare string
+/// is the natural form for a 40-byte Rust replace and survives that parser.
+#[derive(Debug, Clone, Serialize)]
+#[serde(untagged)]
+pub enum TextOrRef {
+    Text(String),
+    Ref(ContentRef),
+}
+
+impl TextOrRef {
+    /// Owned [`ContentRef`] for the resolve path.
+    pub fn into_ref(self) -> ContentRef {
+        match self {
+            Self::Text(text) => ContentRef::Inline { text },
+            Self::Ref(r) => r,
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for TextOrRef {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let value = serde_json::Value::deserialize(deserializer)?;
+        match value {
+            serde_json::Value::String(text) => Ok(Self::Text(text)),
+            other => {
+                let r = ContentRef::deserialize(other).map_err(DeError::custom)?;
+                Ok(Self::Ref(r))
+            }
+        }
+    }
+}
+
+impl JsonSchema for TextOrRef {
+    fn schema_name() -> std::borrow::Cow<'static, str> {
+        std::borrow::Cow::Borrowed("TextOrRef")
+    }
+
+    fn schema_id() -> std::borrow::Cow<'static, str> {
+        std::borrow::Cow::Borrowed(concat!(module_path!(), "::TextOrRef"))
+    }
+
+    fn json_schema(generator: &mut schemars::SchemaGenerator) -> Schema {
+        let content = ContentRef::json_schema(generator);
+        json_schema!({
+            "anyOf": [
+                {
+                    "type": "string",
+                    "description": "UTF-8 search/replace text. Prefer this for short snippets (including `{` in Rust)."
+                },
+                content
+            ]
+        })
+    }
 }
 
 #[derive(Debug, Error)]
@@ -444,6 +505,28 @@ mod tests {
         match r {
             ContentRef::Blob { id } => assert_eq!(id, "abc"),
             _ => panic!("expected blob"),
+        }
+    }
+
+    #[test]
+    fn text_or_ref_accepts_string_with_braces() {
+        let r: TextOrRef = serde_json::from_value(serde_json::json!("use foo::{Bar};")).unwrap();
+        match r.into_ref() {
+            ContentRef::Inline { text } => assert_eq!(text, "use foo::{Bar};"),
+            _ => panic!("expected inline"),
+        }
+    }
+
+    #[test]
+    fn text_or_ref_accepts_content_ref_object() {
+        let r: TextOrRef = serde_json::from_value(serde_json::json!({
+            "kind": "inline",
+            "text": "hi"
+        }))
+        .unwrap();
+        match r {
+            TextOrRef::Ref(ContentRef::Inline { text }) => assert_eq!(text, "hi"),
+            _ => panic!("expected ref"),
         }
     }
 }
