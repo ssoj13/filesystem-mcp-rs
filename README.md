@@ -11,6 +11,8 @@ It's not about "memory safety" or something like that, I'm doing that just becau
 
 To the bone:
 
+> **`edit_file` / `bulk_edits` accept plain strings again.** `oldText`/`newText` take a UTF-8 string (ContentRef objects still work, e.g. for blobs) — fixes hosts that dropped a nested `{kind:inline,text}` object when the snippet contained `{`, which used to die as `missing field newText`. **`grep_files.path`** now defaults to empty and accepts `root` / `dir` / `directory`; a missing path is a readable error naming the accepted keys instead of a bare `missing field path`. See [CHANGELOG.md](CHANGELOG.md).
+>
 > **Breaking — Content Plane SSOT.** `write_file` / `edit_file` / `write_binary` / `run_command.stdin` take a **ContentRef** object (`inline` / `base64` / `path` / `blob`), not a bare mega-string. Large payloads: `blob_begin` → `blob_append` (≤8 KiB) → `blob_finalize` → `{kind:"blob",id}`. Never `python -c` to dodge JSON. See [CHANGELOG.md](CHANGELOG.md).
 >
 > **`read_pdf` tells you when extraction is junk.** Default `normalize=true` repairs ZWSP / spaced glyphs; structured `quality.score` / `warnings` / `suspiciousTokens` flag broken ToUnicode maps — low score means do not treat the text as source of truth.

@@ -6,7 +6,9 @@
 
 - **`edit_file` / `bulk_edits` `oldText`/`newText` accept a UTF-8 string again** (`TextOrRef`). ContentRef objects still work for blobs. Hosts (Grok) drop nested `{kind:inline,text}` — especially when `text` contains `{` — and the call died as `missing field newText`. Short snippets are strings; `write_file` / `stdin` stay ContentRef-only.
 - Missing `newText` now names the contract (send a string or ContentRef) instead of a bare serde missing-field.
-- **`grep_files.path`** defaults to empty and aliases `root` / `dir` / `directory`. Empty path is a readable `invalid_params`, not `missing field path`. `filePattern` / `glob` / `include` / `file_pattern` all bind.
+- The `edit_file` tool description was still telling callers to send ContentRef-only, contradicting the fix above (the exact class of mismatch that caused the original bug) — reworded to match: string preferred, ContentRef optional.
+- **`grep_files.path`** defaults to empty and aliases `root` / `dir` / `directory` — previously wired onto the wrong struct (`GrepContextArgs`) so `grep_files` itself was unaffected. Empty path is now a readable `invalid_params` naming the accepted keys, not `missing field path`. `filePattern` / `glob` / `include` / `file_pattern` all bind.
+- The `TextOrRef` `JsonSchema` impl referenced an undeclared identifier (`gen` vs `generator`, a name `edition = "2024"` reserves) and did not compile; fixed. Verified live against a running server: two-edit `edit_file` calls with `{` in the replacement, and `grep_files` with `root` instead of `path`, both now succeed.
 
 ### Breaking — Content Plane SSOT
 
