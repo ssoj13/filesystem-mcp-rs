@@ -304,7 +304,7 @@ fn collect_fancy_matches(
 /// literal text between tokens may be any UTF-8 (Cyrillic, emoji, ...). A previous
 /// byte-wise version pushed `byte as char`, i.e. Latin-1, which mangled every
 /// non-ASCII replacement into mojibake.
-fn expand_fancy(caps: &fancy_regex::Captures<'_>, template: &str) -> String {
+fn expand_fancy(caps: &fancy_regex::Captures<'_, str>, template: &str) -> String {
     let mut out = String::with_capacity(template.len());
     let mut chars = template.chars().peekable();
     while let Some(c) = chars.next() {

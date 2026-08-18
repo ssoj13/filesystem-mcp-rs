@@ -2,6 +2,13 @@
 
 ## [Unreleased]
 
+### Upgrade — `rmcp` 2.2.0 → 3.1.3
+
+- **`rmcp::model::Meta` → `RequestMetaObject`** (SEP-2575 metadata rework). Renamed the import and every `meta: Meta` tool-handler parameter (`main.rs`, `src/tools/llm/mod.rs`) to `RequestMetaObject`; `.get_progress_token()` is unchanged.
+- **`ServerHandler::call_tool` now returns `CallToolResponse`, not `CallToolResult`** (SEP-2322 MRTR — adds `InputRequired`/`Task` alongside `Complete`). The hand-rolled `call_tool` override that stamps the session-lock footer now matches on `CallToolResponse::Complete(result)`, stamps the inner `CallToolResult`, and passes other variants through unchanged.
+- **`fancy_regex::Captures<'t>` gained a generic input parameter**: `Captures<'t, S: Input>` (unrelated `fancy-regex` 0.13→0.19 bump pulled in alongside the rmcp upgrade). `expand_fancy` now takes `Captures<'_, str>`.
+- Verified: `cargo build` links and runs (`--version`), `cargo test` 430 unit + 64 integration passing, `cargo clippy` clean (no new warnings).
+
 ### Fixes — `edit_file` / `grep_files` host-drop (bug.md)
 
 - **`edit_file` / `bulk_edits` `oldText`/`newText` accept a UTF-8 string again** (`TextOrRef`). ContentRef objects still work for blobs. Hosts (Grok) drop nested `{kind:inline,text}` — especially when `text` contains `{` — and the call died as `missing field newText`. Short snippets are strings; `write_file` / `stdin` stay ContentRef-only.

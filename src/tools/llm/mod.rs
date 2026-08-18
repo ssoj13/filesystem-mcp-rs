@@ -17,8 +17,8 @@ use rmcp::{
     ErrorData as McpError, RoleServer, ServerHandler,
     handler::server::{router::tool::ToolRouter, wrapper::Parameters},
     model::{
-        CallToolResult, ContentBlock, Implementation, Meta, ProgressNotificationParam,
-        ServerCapabilities, ServerInfo,
+        CallToolResult, ContentBlock, Implementation, ProgressNotificationParam,
+        RequestMetaObject, ServerCapabilities, ServerInfo,
     },
     service::Peer,
     tool, tool_handler, tool_router,
@@ -124,7 +124,7 @@ impl LlmMcpServer {
     async fn messages(
         &self,
         Parameters(request): Parameters<MessagesRequest>,
-        meta: Meta,
+        meta: RequestMetaObject,
         client: Peer<RoleServer>,
     ) -> Result<CallToolResult, McpError> {
         let provider = self.state.config.primary_provider();
@@ -139,7 +139,7 @@ impl LlmMcpServer {
     async fn messages_gemini(
         &self,
         Parameters(request): Parameters<MessagesRequest>,
-        meta: Meta,
+        meta: RequestMetaObject,
         client: Peer<RoleServer>,
     ) -> Result<CallToolResult, McpError> {
         self.messages_for_provider("gemini", request, meta, client)
@@ -153,7 +153,7 @@ impl LlmMcpServer {
     async fn messages_cerebras(
         &self,
         Parameters(request): Parameters<MessagesRequest>,
-        meta: Meta,
+        meta: RequestMetaObject,
         client: Peer<RoleServer>,
     ) -> Result<CallToolResult, McpError> {
         self.messages_for_provider("cerebras", request, meta, client)
@@ -167,7 +167,7 @@ impl LlmMcpServer {
     async fn messages_openai(
         &self,
         Parameters(request): Parameters<MessagesRequest>,
-        meta: Meta,
+        meta: RequestMetaObject,
         client: Peer<RoleServer>,
     ) -> Result<CallToolResult, McpError> {
         self.messages_for_provider("openai", request, meta, client)
@@ -178,7 +178,7 @@ impl LlmMcpServer {
         &self,
         provider: &str,
         mut request: MessagesRequest,
-        meta: Meta,
+        meta: RequestMetaObject,
         client: Peer<RoleServer>,
     ) -> Result<CallToolResult, McpError> {
         let original_model = request.model.clone();

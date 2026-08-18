@@ -14,8 +14,9 @@ use rmcp::{
     // `ListRootsRequest` is referenced by full path inside `refresh_roots`, which carries the
     // `#[allow(deprecated)]` and the explanation — importing it here would warn crate-wide.
     model::{
-        CallToolRequestParams, CallToolResult, ContentBlock, Implementation, Meta,
-        ProgressNotificationParam, ServerCapabilities, ServerInfo, ServerRequest,
+        CallToolRequestParams, CallToolResponse, CallToolResult, ContentBlock, Implementation,
+        ProgressNotificationParam, RequestMetaObject, ServerCapabilities, ServerInfo,
+        ServerRequest,
     },
     service::RequestContext,
     serde::{Deserialize, Serialize},
@@ -3394,7 +3395,7 @@ impl FileSystemServer {
     async fn grep_files(
         &self,
         Parameters(args): Parameters<GrepFilesArgs>,
-        meta: Meta,
+        meta: RequestMetaObject,
         client: Peer<RoleServer>,
     ) -> Result<CallToolResult, McpError> {
         self.ensure_allowed().await?;
@@ -6014,7 +6015,7 @@ USE CASES: Patch executables, fix binary data, search-replace in non-text files.
     async fn run_command(
         &self,
         Parameters(args): Parameters<RunCommandArgs>,
-        meta: Meta,
+        meta: RequestMetaObject,
         client: Peer<RoleServer>,
     ) -> Result<CallToolResult, McpError> {
         // Auto-split a full command line accidentally passed via `command`.
@@ -6845,7 +6846,7 @@ USE CASES: Patch executables, fix binary data, search-replace in non-text files.
     async fn ai_messages(
         &self,
         Parameters(request): Parameters<tools::llm::model::MessagesRequest>,
-        meta: Meta,
+        meta: RequestMetaObject,
         client: Peer<RoleServer>,
     ) -> Result<CallToolResult, McpError> {
         let llm = self.require_llm()?;
@@ -6861,7 +6862,7 @@ USE CASES: Patch executables, fix binary data, search-replace in non-text files.
     async fn ai_messages_gemini(
         &self,
         Parameters(request): Parameters<tools::llm::model::MessagesRequest>,
-        meta: Meta,
+        meta: RequestMetaObject,
         client: Peer<RoleServer>,
     ) -> Result<CallToolResult, McpError> {
         let llm = self.require_llm()?;
@@ -6876,7 +6877,7 @@ USE CASES: Patch executables, fix binary data, search-replace in non-text files.
     async fn ai_messages_openai(
         &self,
         Parameters(request): Parameters<tools::llm::model::MessagesRequest>,
-        meta: Meta,
+        meta: RequestMetaObject,
         client: Peer<RoleServer>,
     ) -> Result<CallToolResult, McpError> {
         let llm = self.require_llm()?;
@@ -6891,7 +6892,7 @@ USE CASES: Patch executables, fix binary data, search-replace in non-text files.
     async fn ai_messages_cerebras(
         &self,
         Parameters(request): Parameters<tools::llm::model::MessagesRequest>,
-        meta: Meta,
+        meta: RequestMetaObject,
         client: Peer<RoleServer>,
     ) -> Result<CallToolResult, McpError> {
         let llm = self.require_llm()?;
@@ -7268,13 +7269,18 @@ impl ServerHandler for FileSystemServer {
         &self,
         request: CallToolRequestParams,
         context: RequestContext<RoleServer>,
-    ) -> Result<CallToolResult, McpError> {
+    ) -> Result<CallToolResponse, McpError> {
         let ctx = rmcp::handler::server::tool::ToolCallContext::new(self, request, context);
-        let result = self.tool_router.call(ctx).await?;
+        let response = self.tool_router.call(ctx).await?;
         Ok(if self.session_footer {
-            agent_policy::stamp_tool_result(result)
+            match response {
+                CallToolResponse::Complete(result) => {
+                    CallToolResponse::Complete(agent_policy::stamp_tool_result(result))
+                }
+                other => other,
+            }
         } else {
-            result
+            response
         })
     }
 
