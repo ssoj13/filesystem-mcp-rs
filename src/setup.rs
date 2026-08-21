@@ -45,6 +45,7 @@ fn default_env() -> BTreeMap<String, String> {
 ///
 /// Allowed directories are not baked in here — they are the trailing arguments of
 /// `filesystem-mcp-rs install <DIR>...`, which the CLI appends to the server command line.
+/// [`with_default_dirs`] fills those in with full-disk access when the user passed none.
 pub fn host_spec() -> Result<HostSpec> {
     let install_id = format!("{SERVER_KEY}:{}", env!("CARGO_PKG_VERSION"));
     Ok(HostSpec::from_current_exe(SERVER_KEY, install_id)?
@@ -54,4 +55,82 @@ pub fn host_spec() -> Result<HostSpec> {
             MCP_POLICY,
             MCP_WORKFLOWS,
         ])))
+}
+
+/// Directories written into the server's command line when `install` is run with no trailing
+/// `DIR` arguments: `/` on Unix, every mounted drive root on Windows.
+///
+/// Matches the "permissive by default, tighten later" posture already used for the HTTP/S3
+/// allowlists in [`default_env`] — `install` with no extra flags should make the server
+/// immediately useful rather than fail closed with "No allowed directories configured".
+fn default_install_dirs() -> Vec<String> {
+    #[cfg(unix)]
+    {
+        vec!["/".to_string()]
+    }
+    #[cfg(windows)]
+    {
+        ('A'..='Z')
+            .map(|letter| format!("{letter}:\\"))
+            .filter(|root| std::path::Path::new(root).exists())
+            .collect()
+    }
+}
+
+/// Fill in [`default_install_dirs`] as the `Install` subcommand's trailing directory arguments
+/// when the user did not pass any. Leaves `Uninstall`/`Status` and an explicit directory list
+/// untouched.
+pub fn with_default_dirs(
+    cmd: crate::mcp_setup::cli::SetupCommand,
+) -> crate::mcp_setup::cli::SetupCommand {
+    use crate::mcp_setup::cli::SetupCommand;
+    match cmd {
+        SetupCommand::Install(mut args) if args.server_args.is_empty() => {
+            args.server_args = default_install_dirs();
+            SetupCommand::Install(args)
+        }
+        other => other,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::mcp_setup::cli::{InstallArgs, SetupCommand, TargetArgs};
+
+    #[test]
+    fn default_install_dirs_is_never_empty_on_a_real_machine() {
+        assert!(!default_install_dirs().is_empty());
+    }
+
+    #[test]
+    fn install_with_no_dirs_gets_the_default() {
+        let cmd = SetupCommand::Install(InstallArgs::default());
+        let SetupCommand::Install(args) = with_default_dirs(cmd) else {
+            panic!("expected Install to stay Install");
+        };
+        assert_eq!(args.server_args, default_install_dirs());
+    }
+
+    #[test]
+    fn install_with_explicit_dirs_is_left_alone() {
+        let explicit = vec!["/only/this".to_string()];
+        let cmd = SetupCommand::Install(InstallArgs {
+            server_args: explicit.clone(),
+            ..Default::default()
+        });
+        let SetupCommand::Install(args) = with_default_dirs(cmd) else {
+            panic!("expected Install to stay Install");
+        };
+        assert_eq!(args.server_args, explicit);
+    }
+
+    #[test]
+    fn status_and_uninstall_are_untouched() {
+        let cmd = SetupCommand::Status(TargetArgs::default());
+        assert!(matches!(with_default_dirs(cmd), SetupCommand::Status(_)));
+
+        let cmd = SetupCommand::Uninstall(TargetArgs::default());
+        assert!(matches!(with_default_dirs(cmd), SetupCommand::Uninstall(_)));
+    }
 }

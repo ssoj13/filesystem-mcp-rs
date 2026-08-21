@@ -7399,8 +7399,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let top = TopCli::parse();
 
     // Setup subcommands never start the server: they only touch agent configs.
-    if let Some(cmd) = &top.setup {
-        if let Err(err) = mcp_setup::cli::run(cmd, &setup::host_spec()?) {
+    if let Some(cmd) = top.setup {
+        let cmd = setup::with_default_dirs(cmd);
+        if let Err(err) = mcp_setup::cli::run(&cmd, &setup::host_spec()?) {
             eprintln!("error: {err}");
             std::process::exit(1);
         }

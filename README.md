@@ -25,6 +25,8 @@ To the bone:
 >
 > **`run_command` is easier for agents to get right** — snake_case options are accepted alongside camelCase; head/tail/filter output is reliable again; tool descriptions now spell out that paths like `cwd` must be quoted JSON strings. **`install`** sets permissive HTTP/S3 allowlists by default so outbound tools work out of the box (you can tighten them later).
 >
+> **`install` with no directory arguments now defaults to the whole disk** (`/` on Unix, every mounted drive root on Windows) instead of failing closed with "No allowed directories configured" — the same permissive-by-default posture already used for HTTP/S3. Run `filesystem-mcp-rs install <DIR>...` to scope it down instead.
+>
 > See [CHANGELOG.md](CHANGELOG.md) for the full list and migration examples.
 >
 > **v0.1.10–0.1.16** — A big stretch of quality-of-life work: a much stronger **`run_command`** (sync / managed / detached modes, progress during long builds, filtered output, safer process cleanup), **system utilities** (ports, processes, disk, env, diffs), optional **HTTP / S3 / screenshots**, **LLM / Excel / Word** helpers, **flexible JSON parsing** so common agent mistakes don’t fail the call, plus faster **hashing** and better **client compatibility** (Gemini, Qwen). See [CHANGELOG.md](CHANGELOG.md).
@@ -118,6 +120,8 @@ Alternatively via env vars (comma/semicolon/whitespace separated):
 - `FS_MCP_S3_ALLOW_LIST=my-bucket;other-bucket` (use `*` to allow all)
 
 `filesystem-mcp-rs install` (mcp-setup) writes `FS_MCP_HTTP_ALLOW_LIST=*` and `FS_MCP_S3_ALLOW_LIST=*` into client MCP config by default. Override with `--http-allowlist-domain` / `--s3-allowlist-bucket` or `--env FS_MCP_HTTP_ALLOW_LIST=...`.
+
+`filesystem-mcp-rs install` also defaults the server's allowed directories to the whole disk when you pass none (`/` on Unix, every mounted drive root such as `C:\`, `D:\`, … on Windows). Pass explicit directories to scope it down: `filesystem-mcp-rs install C:\projects D:\data`.
 
 ## Memory v2
 

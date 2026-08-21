@@ -2,6 +2,18 @@
 
 ## [Unreleased]
 
+### `install` defaults to the whole disk when no directories are given
+
+- **`filesystem-mcp-rs install` with no trailing `DIR` arguments now writes `/` (Unix) or every
+  mounted drive root (Windows, e.g. `C:\`, `D:\`) into the server's command line**, instead of
+  registering with an empty allowlist that then fails every tool call with "No allowed
+  directories configured". Matches the existing permissive-by-default posture already used for
+  the HTTP/S3 allowlists (`FS_MCP_HTTP_ALLOW_LIST=*` / `FS_MCP_S3_ALLOW_LIST=*`). Pass explicit
+  directories to scope it down: `filesystem-mcp-rs install C:\projects D:\data`. New logic lives
+  in `src/setup.rs` (`default_install_dirs`, `with_default_dirs`), covered by unit tests.
+- Verified `src/mcp_setup/` (the vendored `mcp-setup-rs` copy) is still pinned to and in sync with
+  the upstream commit recorded in `src/mcp_setup/VENDOR.md` — no resync was needed.
+
 ### Upgrade — `rmcp` 2.2.0 → 3.1.3
 
 - **`rmcp::model::Meta` → `RequestMetaObject`** (SEP-2575 metadata rework). Renamed the import and every `meta: Meta` tool-handler parameter (`main.rs`, `src/tools/llm/mod.rs`) to `RequestMetaObject`; `.get_progress_token()` is unchanged.
