@@ -28,6 +28,8 @@ pub struct HostSpec {
     pub env: BTreeMap<String, String>,
     pub hints: HintsConfig,
     pub docs: HintDocs,
+    /// See [`InstallPlan::force`]. Off by default.
+    pub force: bool,
 }
 
 impl HostSpec {
@@ -66,7 +68,15 @@ impl HostSpec {
             env: BTreeMap::new(),
             hints: HintsConfig::default(),
             docs: HintDocs::default(),
+            force: false,
         }
+    }
+
+    /// Let `install` overwrite an entry under our key that carries no install-id marker of ours
+    /// (a hand-written one). See [`InstallPlan::force`] for why this is opt-in.
+    pub fn with_force(mut self, force: bool) -> Self {
+        self.force = force;
+        self
     }
 
     pub fn with_args<I, S>(mut self, args: I) -> Self
@@ -112,6 +122,7 @@ impl HostSpec {
             },
             hints: self.hints.clone(),
             docs: self.docs.clone(),
+            force: self.force,
         })
     }
 }
@@ -141,11 +152,19 @@ fn strip_verbatim(s: &str) -> String {
 /// Falls back to the running binary so a plain `cargo run` in a fresh checkout still produces a
 /// usable entry, rather than failing or writing a bare name that may not be on the host's PATH.
 pub fn resolve_installed_exe(exe: &Path) -> String {
+    resolve_installed_exe_in(exe, cargo_bin_dir().as_deref())
+}
+
+/// [`resolve_installed_exe`] with the install directory injected.
+///
+/// Split out so the preference order is testable without mutating `CARGO_HOME`: that is a
+/// process-global, and a test that writes it races every other test in the same binary.
+pub fn resolve_installed_exe_in(exe: &Path, install_dir: Option<&Path>) -> String {
     let Some(name) = exe.file_name() else {
         return normalize_path(exe);
     };
 
-    if let Some(bin) = cargo_bin_dir() {
+    if let Some(bin) = install_dir {
         let candidate = bin.join(name);
         if candidate.is_file() {
             return normalize_path(&candidate);
@@ -333,56 +352,28 @@ mod resolve_tests {
     /// that is exactly how a path dies on the next `cargo clean` or repo move.
     #[test]
     fn installed_copy_wins_over_the_running_one() {
-        let cargo_bin = tempfile::tempdir().expect("tempdir");
+        let install_dir = tempfile::tempdir().expect("tempdir");
         let build_tree = tempfile::tempdir().expect("tempdir");
         let name = if cfg!(windows) { "srv.exe" } else { "srv" };
 
-        let installed = cargo_bin.path().join(name);
+        let installed = install_dir.path().join(name);
         std::fs::write(&installed, b"").expect("write installed");
         let running = build_tree.path().join(name);
         std::fs::write(&running, b"").expect("write running");
 
-        // SAFETY: single-threaded test; CARGO_HOME is restored by the guard below.
-        let prev = std::env::var_os("CARGO_HOME");
-        unsafe { std::env::set_var("CARGO_HOME", cargo_bin.path().parent().unwrap()) };
-        // `cargo_bin_dir` appends `bin`, so mirror that layout.
-        let bin = cargo_bin.path().parent().unwrap().join("bin");
-        std::fs::create_dir_all(&bin).expect("mkdir bin");
-        let installed_in_bin = bin.join(name);
-        std::fs::write(&installed_in_bin, b"").expect("write bin copy");
-
-        let got = resolve_installed_exe(&running);
-        unsafe {
-            match prev {
-                Some(v) => std::env::set_var("CARGO_HOME", v),
-                None => std::env::remove_var("CARGO_HOME"),
-            }
-        }
-
-        assert_eq!(
-            got,
-            normalize_path(&installed_in_bin),
-            "installed copy must win"
-        );
+        let got = resolve_installed_exe_in(&running, Some(install_dir.path()));
+        assert_eq!(got, normalize_path(&installed), "installed copy must win");
     }
 
     /// With nothing installed we still produce a usable entry rather than failing.
     #[test]
     fn falls_back_to_the_running_binary() {
+        let empty = tempfile::tempdir().expect("tempdir");
         let build_tree = tempfile::tempdir().expect("tempdir");
         let running = build_tree.path().join("mcp-setup-rs-unique-fallback-probe");
         std::fs::write(&running, b"").expect("write running");
 
-        let prev = std::env::var_os("CARGO_HOME");
-        let empty = tempfile::tempdir().expect("tempdir");
-        unsafe { std::env::set_var("CARGO_HOME", empty.path()) };
-        let got = resolve_installed_exe(&running);
-        unsafe {
-            match prev {
-                Some(v) => std::env::set_var("CARGO_HOME", v),
-                None => std::env::remove_var("CARGO_HOME"),
-            }
-        }
+        let got = resolve_installed_exe_in(&running, Some(empty.path()));
         assert_eq!(got, normalize_path(&running));
     }
 }

@@ -72,6 +72,12 @@ pub struct InstallArgs {
     #[arg(long, default_value_t = false)]
     pub no_hints: bool,
 
+    /// Take over an entry under our key that we do not own (a hand-written one, reported as
+    /// `conflict` by `status`). Without this, `install` refuses rather than replace someone's
+    /// own configuration. The previous content is written to a timestamped backup first.
+    #[arg(long, default_value_t = false)]
+    pub force: bool,
+
     /// Markdown file merged as a user preamble inside the managed hints block. Relative paths
     /// resolve against home (user scope) or the project root (project scope).
     #[arg(long, value_name = "PATH")]
@@ -139,11 +145,11 @@ fn effective_spec(
         spec.args.extend(args.server_args.iter().cloned());
         spec.hints.enabled = !args.no_hints;
         spec.hints.snippet_source = args.hints_snippet.clone();
+        spec.force = args.force;
     }
     Ok(spec)
 }
 
-/// Run one subcommand against every selected client, print a table, and fail if any target did.
 /// Whether a sweep finished cleanly.
 ///
 /// Returned as a value rather than raised as an error: a client that is broken or unreachable is
@@ -172,6 +178,7 @@ impl Outcome {
     }
 }
 
+/// Run one subcommand against every selected client and print the results table.
 pub fn run(cmd: &SetupCommand, base: &HostSpec) -> CliResult<Outcome> {
     let ctx = SetupContext::from_user_dirs()?;
     let (target, install) = match cmd {

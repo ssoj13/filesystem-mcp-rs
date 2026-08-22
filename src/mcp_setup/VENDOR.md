@@ -3,7 +3,8 @@
 This directory is a **verbatim copy** of the private crate
 [`ssoj13/mcp-setup-rs`](https://github.com/ssoj13/mcp-setup-rs), pinned at:
 
-    commit  aebe269f15cdd5c3b3ea366403a36e2bfbb5e9eb   ("style: rustfmt the tree")
+    commit  27b95a0483b2c719fd1d71a11d5a2c6c378c46ed   ("feat(install): --force to take over an
+                                                         entry we do not own")
     origin  ssh://git@github.com/ssoj13/mcp-setup-rs.git   (branch main, PRIVATE)
 
 ## Why vendored instead of a dependency

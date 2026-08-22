@@ -142,6 +142,13 @@ pub struct InstallPlan {
     pub hints: HintsConfig,
     /// Markdown the host wants injected into agent context files.
     pub docs: HintDocs,
+    /// Overwrite an entry at [`mcp_server_key`](Self::mcp_server_key) that we do not own.
+    ///
+    /// Off by default: `install` refuses to touch a hand-written entry, because silently
+    /// replacing someone's own configuration is worse than failing loudly. Turning it on is a
+    /// deliberate "this key is mine now" — the previous content still goes to a timestamped
+    /// backup first, and the apply report says an unmanaged entry was overwritten.
+    pub force: bool,
 }
 
 #[derive(Debug, Clone, Default, Serialize)]

@@ -148,12 +148,17 @@ pub fn is_ours(install_id: &str, server_key: &str) -> bool {
 
 /// We only ever overwrite an entry that is already ours. Anything else is a conflict for the user
 /// to resolve — silently clobbering a hand-written entry would be theft.
+/// Refuse to apply over an entry we do not own, unless `force` says to take the key.
+///
+/// `force` is the caller's explicit "this key is mine now"; the write path still backs the file
+/// up first and reports that an unmanaged entry was replaced.
 pub fn ensure_key_available_for_apply(
     root: &Map<String, Value>,
     parent_path: &[&str],
     key: &str,
     server_key: &str,
     desired_install_id: &str,
+    force: bool,
 ) -> Result<()> {
     let Some(servers) = servers_at(root, parent_path) else {
         return Ok(());
@@ -163,12 +168,28 @@ pub fn ensure_key_available_for_apply(
     };
     match mcp_install_id_from_value(existing) {
         Some(id) if is_ours(&id, server_key) => Ok(()),
+        _ if force => Ok(()),
         found => Err(SetupError::McpKeyConflict {
             key: key.to_string(),
             expected: Some(desired_install_id.to_string()),
             found,
         }),
     }
+}
+
+/// Is there an entry at `key` that is not ours? Drives the "overwrote an unmanaged entry"
+/// note, so a forced apply is never silent about what it replaced.
+pub fn foreign_entry_at(
+    root: &Map<String, Value>,
+    parent_path: &[&str],
+    key: &str,
+    server_key: &str,
+) -> bool {
+    servers_at(root, parent_path)
+        .and_then(|servers| servers.get(key))
+        .is_some_and(|existing| {
+            !mcp_install_id_from_value(existing).is_some_and(|id| is_ours(&id, server_key))
+        })
 }
 
 #[cfg(test)]
@@ -227,8 +248,9 @@ mod tests {
     #[test]
     fn apply_refuses_to_clobber_foreign_entry() {
         let root = root_with("srv", serde_json::json!({"command": "x"}));
-        let err = ensure_key_available_for_apply(&root, &["mcpServers"], "srv", "srv", "srv:1.0")
-            .unwrap_err();
+        let err =
+            ensure_key_available_for_apply(&root, &["mcpServers"], "srv", "srv", "srv:1.0", false)
+                .unwrap_err();
         assert!(matches!(err, SetupError::McpKeyConflict { .. }));
     }
 
@@ -241,7 +263,8 @@ mod tests {
 
         let root = root_with("srv", EntryStyle::Plain.build(&stdio(), "srv:0.9.0"));
         // Upgrading from 0.9.0 to 1.0.0 must be allowed to overwrite our own entry.
-        ensure_key_available_for_apply(&root, &["mcpServers"], "srv", "srv", "srv:1.0.0").unwrap();
+        ensure_key_available_for_apply(&root, &["mcpServers"], "srv", "srv", "srv:1.0.0", false)
+            .unwrap();
     }
 
     #[test]

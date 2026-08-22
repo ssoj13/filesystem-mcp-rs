@@ -189,6 +189,102 @@ fn refuses_to_overwrite_a_hand_written_entry() {
     assert!(matches!(err, SetupError::NotOurInstall { .. }), "{err:?}");
 }
 
+/// `--force` is the deliberate "this key is mine now". It must overwrite, keep the old content
+/// recoverable, and say what it did — a silent takeover of someone's config would be worse than
+/// the refusal it replaces.
+#[test]
+fn force_takes_over_a_hand_written_entry_and_says_so() {
+    let tmp = tempfile::tempdir().unwrap();
+    let home = tmp.path();
+    make_agent_dirs(home);
+    let config = home.join(".claude.json");
+    std::fs::write(
+        &config,
+        format!(r#"{{"mcpServers":{{"{KEY}":{{"command":"/somewhere/else"}}}}}}"#),
+    )
+    .unwrap();
+    let ctx = SetupContext::from_home(home.to_path_buf()).unwrap();
+
+    let forced = spec().with_force(true);
+    let applied = host::install(&ctx, &clients::CLAUDE_CODE, &Scope::User, &forced).unwrap();
+
+    assert!(applied.changed);
+    let raw = std::fs::read_to_string(&config).unwrap();
+    assert!(
+        raw.contains("/opt/bin/demo-mcp"),
+        "our command should have replaced theirs: {raw}"
+    );
+    assert!(
+        !raw.contains("/somewhere/else"),
+        "the hand-written command should be gone: {raw}"
+    );
+    assert!(
+        raw.contains("MCP_SETUP_INSTALL_ID"),
+        "the entry must now be owned: {raw}"
+    );
+
+    let backup = applied.backup_path.expect("a takeover must leave a backup");
+    let saved = std::fs::read_to_string(&backup).unwrap();
+    assert!(
+        saved.contains("/somewhere/else"),
+        "the backup must hold what was overwritten: {saved}"
+    );
+
+    let note = applied
+        .note
+        .expect("a takeover must be reported, not silent");
+    assert!(note.contains("unmanaged"), "{note}");
+
+    // Now that it is ours, uninstall works — the takeover is complete, not half-done.
+    host::uninstall(&ctx, &clients::CLAUDE_CODE, &Scope::User, &forced).unwrap();
+}
+
+/// Same for a TOML-backed client, whose ownership guard is a separate code path.
+#[test]
+fn force_takes_over_a_hand_written_toml_entry() {
+    let tmp = tempfile::tempdir().unwrap();
+    let home = tmp.path();
+    make_agent_dirs(home);
+    let config = home.join(".codex").join("config.toml");
+    std::fs::create_dir_all(config.parent().unwrap()).unwrap();
+    std::fs::write(
+        &config,
+        format!("[mcp_servers.{KEY}]\ncommand = \"/somewhere/else\"\n"),
+    )
+    .unwrap();
+    let ctx = SetupContext::from_home(home.to_path_buf()).unwrap();
+
+    // Codex wraps config.toml failures in `CodexConfigFailed`, so match on the message rather
+    // than the variant — what matters is that it refused.
+    let err = host::install(&ctx, &clients::CODEX, &Scope::User, &spec()).unwrap_err();
+    assert!(
+        err.to_string().contains("refusing to overwrite"),
+        "expected a refusal without --force, got {err:?}"
+    );
+
+    host::install(
+        &ctx,
+        &clients::CODEX,
+        &Scope::User,
+        &spec().with_force(true),
+    )
+    .unwrap();
+    let raw = std::fs::read_to_string(&config).unwrap();
+    assert!(raw.contains("/opt/bin/demo-mcp"), "{raw}");
+    assert!(!raw.contains("/somewhere/else"), "{raw}");
+}
+
+/// Force is opt-in: the default must still refuse, or every ordinary `install` becomes a
+/// takeover. Guards the flag from being wired to the wrong default.
+#[test]
+fn force_defaults_off() {
+    assert!(!spec().force, "HostSpec must not force by default");
+    assert!(
+        !spec().plan().unwrap().force,
+        "the plan must inherit force=false"
+    );
+}
+
 #[test]
 fn status_spots_the_same_binary_under_an_unmanaged_key() {
     let tmp = tempfile::tempdir().unwrap();

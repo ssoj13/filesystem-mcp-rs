@@ -184,6 +184,8 @@ fn ensure_key_available(client: &TomlClient, doc: &DocumentMut, plan: &InstallPl
     };
     match read_install_id(entry) {
         Some(id) if is_ours(&id, &plan.mcp_server_key) => Ok(()),
+        // Explicit "this key is mine now"; `upsert_toml` still backs the file up first.
+        _ if plan.force => Ok(()),
         found => Err(SetupError::McpKeyConflict {
             key: plan.mcp_server_key.clone(),
             expected: Some(plan.install_id.clone()),

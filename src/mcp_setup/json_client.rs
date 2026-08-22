@@ -8,8 +8,8 @@ use crate::mcp_setup::client::{ContextFile, McpClient};
 use crate::mcp_setup::error::{Result, SetupError};
 use crate::mcp_setup::hints::{self, ClientDoc};
 use crate::mcp_setup::json_merge::{
-    EntryStyle, ensure_key_available_for_apply, find_custom_mcp_server_key, is_ours,
-    mcp_command_from_value, mcp_install_id_from_value, servers_at,
+    EntryStyle, ensure_key_available_for_apply, find_custom_mcp_server_key, foreign_entry_at,
+    is_ours, mcp_command_from_value, mcp_install_id_from_value, servers_at,
 };
 use crate::mcp_setup::jsonc::{read_root_object, remove_in_file, upsert_in_file};
 use crate::mcp_setup::manifest::{InstallManifest, MANIFEST_SCHEMA};
@@ -154,7 +154,16 @@ impl McpClient for JsonClient {
             &plan.mcp_server_key,
             &plan.mcp_server_key,
             &plan.install_id,
+            plan.force,
         )?;
+        // Only possible under `force` — without it the guard above would have refused. Recorded
+        // so the apply report can say whose entry was replaced rather than overwriting quietly.
+        let took_foreign_entry = foreign_entry_at(
+            &root,
+            self.parent_path,
+            &plan.mcp_server_key,
+            &plan.mcp_server_key,
+        );
 
         // Re-running install with identical settings must not rewrite (or back up) the file.
         let changed = servers_at(&root, self.parent_path)
@@ -196,6 +205,10 @@ impl McpClient for JsonClient {
             backup_path,
             manifest_path: manifest_path.clone(),
             changed,
+            note: took_foreign_entry.then(|| {
+                "overwrote an unmanaged entry (--force); previous content is in the backup"
+                    .to_string()
+            }),
             ..ApplyReport::default()
         };
 

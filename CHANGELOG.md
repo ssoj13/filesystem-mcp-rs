@@ -2,6 +2,21 @@
 
 ## [Unreleased]
 
+### `install --force` — take over a hand-written MCP entry
+
+- **`install` refuses when the key already holds an entry we do not own** (what `status` calls
+  `conflict`), because silently replacing someone's own configuration is worse than failing
+  loudly. `--force` is the explicit "this key is mine now". The previous content goes to a
+  timestamped backup first, and the apply report carries `overwrote an unmanaged entry
+  (--force)` so a takeover is never silent. Honoured by both the JSON and TOML ownership guards;
+  library callers use `HostSpec::with_force(true)`. `uninstall` is deliberately not covered —
+  refusing to delete an entry we never created is a different risk from refusing to overwrite
+  one.
+- Binary resolution is now testable without touching `CARGO_HOME`
+  (`resolve_installed_exe_in(exe, install_dir)`); the old test mutated that process-global and
+  raced the rest of the suite.
+- Vendored copy pinned at upstream `27b95a0`.
+
 ### Vendored `mcp-setup-rs` resync — dangling MCP entries are now detected, and no longer created
 
 - **`install` registers the installed binary, not the running one.** `HostSpec::from_current_exe`
