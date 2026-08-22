@@ -182,10 +182,7 @@ enum AnyMatcher {
 impl AnyMatcher {
     fn find_spans(&self, hay: &str) -> Vec<(usize, usize)> {
         match self {
-            AnyMatcher::Regex(re) => re
-                .find_iter(hay)
-                .map(|m| (m.start(), m.end()))
-                .collect(),
+            AnyMatcher::Regex(re) => re.find_iter(hay).map(|m| (m.start(), m.end())).collect(),
             AnyMatcher::Fancy(re) => {
                 let mut out = Vec::new();
                 let mut cursor = 0usize;
@@ -866,7 +863,10 @@ mod tests {
         let mut params = default_params(&root.to_string_lossy(), "[abc]");
         params.max_matches = 3;
 
-        let result = grep_files_fast(params, &allowed, false, None).await.unwrap().result;
+        let result = grep_files_fast(params, &allowed, false, None)
+            .await
+            .unwrap()
+            .result;
         if let GrepResult::Matches(m) = result {
             assert_eq!(m.len(), 3);
         } else {
@@ -884,7 +884,10 @@ mod tests {
         let allowed = AllowedDirs::new(vec![root.to_path_buf()]);
         let params = default_params(&root.to_string_lossy(), "anything");
 
-        let result = grep_files_fast(params, &allowed, false, None).await.unwrap().result;
+        let result = grep_files_fast(params, &allowed, false, None)
+            .await
+            .unwrap()
+            .result;
         if let GrepResult::Matches(m) = result {
             assert_eq!(m.len(), 0);
         } else {
@@ -905,7 +908,10 @@ mod tests {
         let allowed = AllowedDirs::new(vec![root.to_path_buf()]);
         let params = default_params(&file_path.to_string_lossy(), "hello");
 
-        let result = grep_files_fast(params, &allowed, false, None).await.unwrap().result;
+        let result = grep_files_fast(params, &allowed, false, None)
+            .await
+            .unwrap()
+            .result;
         if let GrepResult::Matches(matches) = result {
             assert_eq!(matches.len(), 2);
             assert_eq!(matches[0].line, "hello world");
@@ -929,7 +935,10 @@ mod tests {
         let mut params = default_params(&root.to_string_lossy(), "match");
         params.invert_match = true;
 
-        let result = grep_files_fast(params, &allowed, false, None).await.unwrap().result;
+        let result = grep_files_fast(params, &allowed, false, None)
+            .await
+            .unwrap()
+            .result;
         if let GrepResult::Matches(matches) = result {
             assert_eq!(matches.len(), 2);
             assert_eq!(matches[0].line, "no");
@@ -954,7 +963,10 @@ mod tests {
         let mut params = default_params(&root.to_string_lossy(), "a");
         params.output_mode = GrepOutputMode::CountOnly;
 
-        let result = grep_files_fast(params, &allowed, false, None).await.unwrap().result;
+        let result = grep_files_fast(params, &allowed, false, None)
+            .await
+            .unwrap()
+            .result;
         if let GrepResult::Counts(counts) = result {
             assert_eq!(counts.len(), 2);
             let total: usize = counts.iter().map(|c| c.count).sum();
@@ -981,7 +993,10 @@ mod tests {
         let mut params = default_params(&root.to_string_lossy(), "findme");
         params.output_mode = GrepOutputMode::FilesWithMatches;
 
-        let result = grep_files_fast(params, &allowed, false, None).await.unwrap().result;
+        let result = grep_files_fast(params, &allowed, false, None)
+            .await
+            .unwrap()
+            .result;
         if let GrepResult::Files(files) = result {
             assert_eq!(files.len(), 1);
             assert!(files[0].to_string_lossy().contains("has_match"));
@@ -1007,7 +1022,10 @@ mod tests {
         let mut params = default_params(&root.to_string_lossy(), "findme");
         params.output_mode = GrepOutputMode::FilesWithoutMatch;
 
-        let result = grep_files_fast(params, &allowed, false, None).await.unwrap().result;
+        let result = grep_files_fast(params, &allowed, false, None)
+            .await
+            .unwrap()
+            .result;
         if let GrepResult::Files(files) = result {
             assert_eq!(files.len(), 1);
             assert!(files[0].to_string_lossy().contains("no_match"));
@@ -1029,7 +1047,10 @@ mod tests {
         let mut params = default_params(&root.to_string_lossy(), "match");
         params.exclude_patterns = vec!["skip.txt".to_string()];
 
-        let result = grep_files_fast(params, &allowed, false, None).await.unwrap().result;
+        let result = grep_files_fast(params, &allowed, false, None)
+            .await
+            .unwrap()
+            .result;
         if let GrepResult::Matches(matches) = result {
             assert_eq!(matches.len(), 1);
             assert!(matches[0].path.to_string_lossy().contains("keep.txt"));

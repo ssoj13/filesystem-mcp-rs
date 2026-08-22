@@ -85,8 +85,12 @@ pub fn apply_edits_with_mode(
 
         if edit.is_regex {
             let found = match engine {
-                EditEngine::Regex => collect_regex_matches(idx, &old, &new, &original, edit.replace_all),
-                EditEngine::Fancy => collect_fancy_matches(idx, &old, &new, &original, edit.replace_all),
+                EditEngine::Regex => {
+                    collect_regex_matches(idx, &old, &new, &original, edit.replace_all)
+                }
+                EditEngine::Fancy => {
+                    collect_fancy_matches(idx, &old, &new, &original, edit.replace_all)
+                }
             }?;
             matches_per_edit[idx] = found.len();
             replacements.extend(found);
@@ -148,7 +152,11 @@ pub fn apply_edits_with_mode(
         ));
         for &i in &unmatched {
             let preview = truncate_preview(&edits[i].old_text, 120);
-            let kind = if edits[i].is_regex { "regex" } else { "literal" };
+            let kind = if edits[i].is_regex {
+                "regex"
+            } else {
+                "literal"
+            };
             lines.push(format!("  edit #{} ({kind}): {}", i + 1, preview));
         }
         lines.push(String::new());
@@ -547,7 +555,11 @@ mod tests {
 
         let outcome = run(content, edits).unwrap();
         let count_mv = outcome.modified.matches("multiview_mask: None,").count();
-        assert_eq!(count_mv, 3, "expected exactly 3 inserts, got\n{}", outcome.modified);
+        assert_eq!(
+            count_mv, 3,
+            "expected exactly 3 inserts, got\n{}",
+            outcome.modified
+        );
         // Each edit applied at exactly one site.
         assert_eq!(outcome.applied_per_edit, vec![1, 1, 1]);
     }

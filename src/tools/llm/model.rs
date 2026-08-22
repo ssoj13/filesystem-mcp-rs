@@ -85,11 +85,17 @@ pub struct MessagesRequest {
     pub top_p: Option<f32>,
     #[serde(default)]
     pub top_k: Option<u32>,
-    #[serde(default, deserialize_with = "crate::core::serde::option_json_value_or_string")]
+    #[serde(
+        default,
+        deserialize_with = "crate::core::serde::option_json_value_or_string"
+    )]
     pub metadata: Option<Value>,
     #[serde(default, deserialize_with = "crate::core::serde::option_vec_or_string")]
     pub tools: Option<Vec<Tool>>,
-    #[serde(default, deserialize_with = "crate::core::serde::option_json_value_or_string")]
+    #[serde(
+        default,
+        deserialize_with = "crate::core::serde::option_json_value_or_string"
+    )]
     pub tool_choice: Option<Value>,
     #[serde(default)]
     pub thinking: Option<ThinkingConfig>,
@@ -106,7 +112,10 @@ pub struct TokenCountRequest {
     pub tools: Option<Vec<Tool>>,
     #[serde(default)]
     pub thinking: Option<ThinkingConfig>,
-    #[serde(default, deserialize_with = "crate::core::serde::option_json_value_or_string")]
+    #[serde(
+        default,
+        deserialize_with = "crate::core::serde::option_json_value_or_string"
+    )]
     pub tool_choice: Option<Value>,
 }
 

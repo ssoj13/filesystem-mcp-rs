@@ -31,9 +31,17 @@ mod tests {
         env: Option<std::collections::HashMap<String, String>>,
         #[serde(default, alias = "clear_env")]
         clear_env: FlexBool,
-        #[serde(default, deserialize_with = "option_object_or_json_string", alias = "env_prepend")]
+        #[serde(
+            default,
+            deserialize_with = "option_object_or_json_string",
+            alias = "env_prepend"
+        )]
         env_prepend: Option<std::collections::HashMap<String, String>>,
-        #[serde(default, deserialize_with = "option_object_or_json_string", alias = "env_append")]
+        #[serde(
+            default,
+            deserialize_with = "option_object_or_json_string",
+            alias = "env_append"
+        )]
         env_append: Option<std::collections::HashMap<String, String>>,
         #[serde(default, alias = "timeout_ms")]
         timeout_ms: FlexU64,
@@ -64,7 +72,11 @@ mod tests {
         // exercised the two fields with the most fragile wire contract:
         // outputFilter (object OR stringified-JSON) and mode (closed enum).
         // Keep in sync with RunCommandArgs in main.rs.
-        #[serde(default, deserialize_with = "option_object_or_json_string", alias = "output_filter")]
+        #[serde(
+            default,
+            deserialize_with = "option_object_or_json_string",
+            alias = "output_filter"
+        )]
         output_filter: Option<serde_json::Value>,
         #[serde(default)]
         mode: Option<String>,
@@ -119,7 +131,13 @@ mod tests {
         // LLM-tolerant: a caller guessing any of these synonyms still sets cwd,
         // instead of having the key silently dropped (which left the child in
         // the server's primary dir — see FILESYSTEM_REPORT.md).
-        for key in ["working_directory", "workingDir", "working_dir", "workdir", "dir"] {
+        for key in [
+            "working_directory",
+            "workingDir",
+            "working_dir",
+            "workdir",
+            "dir",
+        ] {
             let args: RunCommandArgsFixture = serde_json::from_value(json!({
                 "command": "cargo",
                 "args": [],

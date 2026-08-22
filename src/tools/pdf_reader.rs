@@ -134,12 +134,7 @@ pub async fn read_pdf(
     let pages_owned = pages.map(|s| s.to_string());
 
     tokio::task::spawn_blocking(move || {
-        read_pdf_sync(
-            &path_buf,
-            pages_owned.as_deref(),
-            max_chars,
-            options,
-        )
+        read_pdf_sync(&path_buf, pages_owned.as_deref(), max_chars, options)
     })
     .await
     .with_context(|| "PDF extraction task panicked")?
@@ -325,10 +320,7 @@ fn is_glyph_fragment(token: &str) -> bool {
     }
     // Allow only edge punctuation around an alphanumeric core.
     let trimmed = token.trim_matches(|c: char| c.is_ascii_punctuation());
-    !trimmed.is_empty()
-        && trimmed
-            .chars()
-            .all(|c| c.is_ascii_alphanumeric())
+    !trimmed.is_empty() && trimmed.chars().all(|c| c.is_ascii_alphanumeric())
 }
 
 fn assess_quality(raw: &str) -> PdfQuality {
@@ -340,7 +332,9 @@ fn assess_quality(raw: &str) -> PdfQuality {
         .iter()
         .filter(|t| {
             let letters: String = t.chars().filter(|c| c.is_ascii_alphabetic()).collect();
-            letters.len() == 1 && t.chars().all(|c| c.is_ascii_alphabetic() || is_invisible(c))
+            letters.len() == 1
+                && t.chars()
+                    .all(|c| c.is_ascii_alphabetic() || is_invisible(c))
         })
         .count();
     let single_letter_token_ratio = single_letter as f64 / token_count as f64;
@@ -404,7 +398,9 @@ fn is_suspicious_token(token: &str) -> bool {
         return false;
     }
     // Broken ToUnicode maps often yield letter soup mixed with ] [ } {
-    let weird = t.chars().any(|c| matches!(c, ']' | '[' | '{' | '}' | '|' | '<' | '>'));
+    let weird = t
+        .chars()
+        .any(|c| matches!(c, ']' | '[' | '{' | '}' | '|' | '<' | '>'));
     if weird && alpha as f64 / t.len() as f64 >= 0.5 {
         return true;
     }
@@ -568,7 +564,11 @@ mod tests {
         assert!(q.zero_width_chars > 0);
         assert!(q.warnings.iter().any(|w| w == "zero_width_chars_present"));
         assert!(q.warnings.iter().any(|w| w == "spaced_glyphs_detected"));
-        assert!(q.warnings.iter().any(|w| w == "extraction_quality_degraded"));
+        assert!(
+            q.warnings
+                .iter()
+                .any(|w| w == "extraction_quality_degraded")
+        );
     }
 
     #[tokio::test]
@@ -604,8 +604,7 @@ mod tests {
                 .quality
                 .warnings
                 .iter()
-                .any(|w| w == "extraction_quality_degraded"
-                    || w == "suspicious_encoding_tokens")
+                .any(|w| w == "extraction_quality_degraded" || w == "suspicious_encoding_tokens")
         );
         let raw = result.raw_text.as_deref().unwrap_or("");
         assert!(raw.contains('\u{200B}') || raw.contains("Ta ble") || raw.contains("lqh]fe]"));

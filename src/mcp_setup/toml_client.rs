@@ -105,7 +105,10 @@ fn trim(s: &str, max: usize) -> String {
     if t.chars().count() <= max {
         return t.to_string();
     }
-    format!("{}…", t.chars().take(max.saturating_sub(1)).collect::<String>())
+    format!(
+        "{}…",
+        t.chars().take(max.saturating_sub(1)).collect::<String>()
+    )
 }
 
 fn fallback_note(client: &TomlClient, outcome: &CliOutcome, path: &Path) -> Option<String> {
@@ -129,7 +132,10 @@ fn fallback_note(client: &TomlClient, outcome: &CliOutcome, path: &Path) -> Opti
 /// Both paths failed: surface the TOML error *and* why the CLI could not help, so the user is not
 /// left guessing which half broke.
 fn apply_error(client: &TomlClient, toml_err: SetupError, cli: &CliOutcome) -> SetupError {
-    let mut detail = format!("could not update {}'s config.toml: {toml_err}", client.label);
+    let mut detail = format!(
+        "could not update {}'s config.toml: {toml_err}",
+        client.label
+    );
     match cli {
         CliOutcome::FailedOutput(out) => {
             let stderr = trim(&String::from_utf8_lossy(&out.stderr), 600);
@@ -294,13 +300,19 @@ fn remove_toml(
     Ok(true)
 }
 
-fn read_toml_status(client: &TomlClient, path: &Path, key: &str) -> Result<(bool, Option<String>)> {
+/// `(entry present, install id, command)` for `key`. The command comes back so `status` can
+/// check that what the config names is still launchable.
+fn read_toml_status(
+    client: &TomlClient,
+    path: &Path,
+    key: &str,
+) -> Result<(bool, Option<String>, Option<String>)> {
     if !path.exists() {
-        return Ok((false, None));
+        return Ok((false, None, None));
     }
     let raw = std::fs::read_to_string(path).map_err(|e| SetupError::io(path.to_path_buf(), e))?;
     if raw.trim().is_empty() {
-        return Ok((false, None));
+        return Ok((false, None, None));
     }
     let doc = parse_doc(client, path, &raw)?;
     let entry = doc
@@ -308,7 +320,11 @@ fn read_toml_status(client: &TomlClient, path: &Path, key: &str) -> Result<(bool
         .and_then(Item::as_table)
         .and_then(|t| t.get(key))
         .and_then(Item::as_table);
-    Ok((entry.is_some(), entry.and_then(read_install_id)))
+    let command = entry
+        .and_then(|t| t.get("command"))
+        .and_then(Item::as_str)
+        .map(ToString::to_string);
+    Ok((entry.is_some(), entry.and_then(read_install_id), command))
 }
 
 // --- client ---------------------------------------------------------------------------------
@@ -440,8 +456,7 @@ impl McpClient for TomlClient {
         let scope_slug = scope.slug()?;
         let manifest_path =
             InstallManifest::manifest_path_for(home, self.id, &scope_slug, &plan.mcp_server_key);
-        let manifest =
-            InstallManifest::load_for(home, self.id, &scope_slug, &plan.mcp_server_key)?;
+        let manifest = InstallManifest::load_for(home, self.id, &scope_slug, &plan.mcp_server_key)?;
         if let Some(ref m) = manifest {
             m.ensure_matches(&settings_path, plan)?;
         }
@@ -504,9 +519,14 @@ impl McpClient for TomlClient {
             return Ok(report);
         }
 
-        let (entry_present, found) = read_toml_status(self, &settings_path, &plan.mcp_server_key)?;
+        let (entry_present, found, stored_command) =
+            read_toml_status(self, &settings_path, &plan.mcp_server_key)?;
         report.config_entry = entry_present;
         report.found_install_id = found.clone();
+        if let Some(cmd) = stored_command {
+            report.command_resolves = Some(crate::mcp_setup::host::command_resolves(&cmd));
+            report.stored_command = Some(cmd);
+        }
         // A manifest with no TOML entry means the agent's own CLI took it into its registry.
         report.installed = found
             .as_deref()
@@ -524,9 +544,9 @@ impl McpClient for TomlClient {
                 "key exists but is owned by {id:?}, not by {:?}",
                 plan.install_id
             )),
-            None if entry_present => {
-                Some(format!("key exists but {INSTALL_ID_ENV_KEY} marker is missing"))
-            }
+            None if entry_present => Some(format!(
+                "key exists but {INSTALL_ID_ENV_KEY} marker is missing"
+            )),
             None if manifest => {
                 Some("manifest present; the agent's own registry may hold the entry".to_string())
             }

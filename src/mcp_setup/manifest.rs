@@ -53,7 +53,12 @@ impl InstallManifest {
         home.join(".mcp-setup").join("manifests")
     }
 
-    pub fn manifest_path_for(home: &Path, client: &str, scope: &str, mcp_server_key: &str) -> PathBuf {
+    pub fn manifest_path_for(
+        home: &Path,
+        client: &str,
+        scope: &str,
+        mcp_server_key: &str,
+    ) -> PathBuf {
         Self::dir(home).join(format!(
             "{}__{}__{}.json",
             sanitize(client),
@@ -65,7 +70,12 @@ impl InstallManifest {
     /// Manifests written before the file name dropped the install id: `<client>__<scope>__<key>__<id>.json`.
     /// Without this, upgrading the server would orphan the old manifest and `uninstall` would lose
     /// track of the Markdown block it has to remove.
-    fn legacy_path(home: &Path, client: &str, scope: &str, mcp_server_key: &str) -> Option<PathBuf> {
+    fn legacy_path(
+        home: &Path,
+        client: &str,
+        scope: &str,
+        mcp_server_key: &str,
+    ) -> Option<PathBuf> {
         let prefix = format!(
             "{}__{}__{}__",
             sanitize(client),
@@ -105,7 +115,12 @@ impl InstallManifest {
 
     /// Delete the manifest for this (client, scope, key), including any legacy file.
     pub fn remove_for(home: &Path, client: &str, scope: &str, mcp_server_key: &str) -> Result<()> {
-        Self::remove_file(&Self::manifest_path_for(home, client, scope, mcp_server_key))?;
+        Self::remove_file(&Self::manifest_path_for(
+            home,
+            client,
+            scope,
+            mcp_server_key,
+        ))?;
         if let Some(legacy) = Self::legacy_path(home, client, scope, mcp_server_key) {
             Self::remove_file(&legacy)?;
         }

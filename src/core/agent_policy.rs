@@ -19,10 +19,7 @@ pub fn stamp_tool_result(mut result: CallToolResult) -> CallToolResult {
 
     match &mut result.structured_content {
         Some(Value::Object(map)) => {
-            map.insert(
-                "_mcpSessionLock".to_string(),
-                Value::Bool(true),
-            );
+            map.insert("_mcpSessionLock".to_string(), Value::Bool(true));
             map.insert(
                 "_mcpPolicy".to_string(),
                 Value::String("mcp-only".to_string()),
@@ -63,17 +60,18 @@ mod tests {
 
     #[test]
     fn stamp_appends_footer_to_text() {
-        let mut result =
-            CallToolResult::success(vec![rmcp::model::ContentBlock::text("ok")]);
+        let mut result = CallToolResult::success(vec![rmcp::model::ContentBlock::text("ok")]);
         result = stamp_tool_result(result);
         let text = &result.content[0].as_text().unwrap().text;
         assert!(text.starts_with("ok"));
         assert!(text.contains("Do not guess the code"));
-        assert!(result
-            .structured_content
-            .as_ref()
-            .and_then(|v| v.get("_mcpSessionLock"))
-            .and_then(|v| v.as_bool())
-            .unwrap_or(false));
+        assert!(
+            result
+                .structured_content
+                .as_ref()
+                .and_then(|v| v.get("_mcpSessionLock"))
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false)
+        );
     }
 }

@@ -113,8 +113,7 @@ fn resolve_clients(args: &TargetArgs) -> CliResult<Vec<&'static dyn McpClient>> 
     }
     let mut out: Vec<&'static dyn McpClient> = Vec::new();
     for name in &args.clients {
-        let client =
-            clients::by_id(name).ok_or_else(|| SetupError::UnknownClient(name.clone()))?;
+        let client = clients::by_id(name).ok_or_else(|| SetupError::UnknownClient(name.clone()))?;
         if !out.iter().any(|c| c.id() == client.id()) {
             out.push(client);
         }
@@ -123,7 +122,11 @@ fn resolve_clients(args: &TargetArgs) -> CliResult<Vec<&'static dyn McpClient>> 
 }
 
 /// CLI overrides applied on top of what the host declared.
-fn effective_spec(base: &HostSpec, target: &TargetArgs, install: Option<&InstallArgs>) -> CliResult<HostSpec> {
+fn effective_spec(
+    base: &HostSpec,
+    target: &TargetArgs,
+    install: Option<&InstallArgs>,
+) -> CliResult<HostSpec> {
     let mut spec = base.clone();
     if let Some(key) = &target.server_key {
         spec.server_key = key.clone();
@@ -141,7 +144,35 @@ fn effective_spec(base: &HostSpec, target: &TargetArgs, install: Option<&Install
 }
 
 /// Run one subcommand against every selected client, print a table, and fail if any target did.
-pub fn run(cmd: &SetupCommand, base: &HostSpec) -> CliResult<()> {
+/// Whether a sweep finished cleanly.
+///
+/// Returned as a value rather than raised as an error: a client that is broken or unreachable is
+/// a *result*, already spelled out in the table, not an internal failure. Raising it made hosts
+/// wrap it in their error type and print an error chain — and, under `RUST_BACKTRACE=1`, a full
+/// Rust backtrace — on top of a perfectly readable table. Genuine failures (an unknown client, a
+/// malformed `--env`, no resolvable home) still come back as `Err`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[must_use]
+pub enum Outcome {
+    AllOk,
+    SomeFailed,
+}
+
+impl Outcome {
+    /// Process exit code for this outcome: 0 clean, 1 if any target failed.
+    pub fn exit_code(self) -> i32 {
+        match self {
+            Self::AllOk => 0,
+            Self::SomeFailed => 1,
+        }
+    }
+
+    pub fn all_ok(self) -> bool {
+        matches!(self, Self::AllOk)
+    }
+}
+
+pub fn run(cmd: &SetupCommand, base: &HostSpec) -> CliResult<Outcome> {
     let ctx = SetupContext::from_user_dirs()?;
     let (target, install) = match cmd {
         SetupCommand::Install(a) => (&a.target, Some(a)),
@@ -167,10 +198,11 @@ pub fn run(cmd: &SetupCommand, base: &HostSpec) -> CliResult<()> {
 
     let failed = rows.iter().any(|r| !r.ok);
     print_table(&rows);
-    if failed {
-        return Err("one or more targets failed (see table)".into());
-    }
-    Ok(())
+    Ok(if failed {
+        Outcome::SomeFailed
+    } else {
+        Outcome::AllOk
+    })
 }
 
 // --- table ---------------------------------------------------------------------------------
@@ -259,8 +291,14 @@ fn remove_row(label: &str, res: crate::mcp_setup::error::Result<RemoveReport>) -
 fn status_row(label: &str, res: crate::mcp_setup::error::Result<StatusReport>) -> Row {
     match res {
         Ok(r) => {
+            // An entry we own whose command no longer resolves is *broken*, not installed:
+            // the agent will fail to spawn it. Reported as not-ok so a sweep's exit code and a
+            // CI check both notice, and `install` is named as the repair.
+            let dangling = r.command_resolves == Some(false);
             let state = if !r.host_detected {
                 "not detected"
+            } else if r.installed && dangling {
+                "broken"
             } else if r.installed {
                 "installed"
             } else if r.custom_installed {
@@ -270,15 +308,22 @@ fn status_row(label: &str, res: crate::mcp_setup::error::Result<StatusReport>) -
             } else {
                 "not installed"
             };
+            let broken_detail = (r.host_detected && dangling).then(|| {
+                format!(
+                    "; command={:?} does not resolve — re-run `install` to repair",
+                    r.stored_command.as_deref().unwrap_or_default()
+                )
+            });
             Row {
                 target: label.to_string(),
                 status: state.to_string(),
-                ok: true,
+                ok: state != "broken",
                 detail: format!(
-                    "scope={}; config={}; manifest={}{}",
+                    "scope={}; config={}; manifest={}{}{}",
                     r.scope,
                     r.settings_path.display(),
                     r.manifest,
+                    broken_detail.unwrap_or_default(),
                     r.note.map(|n| format!("; note={n}")).unwrap_or_default(),
                 ),
             }

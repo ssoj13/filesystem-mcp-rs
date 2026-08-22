@@ -183,10 +183,8 @@ pub struct ContentPlane {
 
 impl ContentPlane {
     pub fn new() -> std::io::Result<Self> {
-        let root = std::env::temp_dir().join(format!(
-            "filesystem-mcp-rs-blobs-{}",
-            std::process::id()
-        ));
+        let root =
+            std::env::temp_dir().join(format!("filesystem-mcp-rs-blobs-{}", std::process::id()));
         std::fs::create_dir_all(&root)?;
         std::fs::create_dir_all(root.join("sessions"))?;
         std::fs::create_dir_all(root.join("blobs"))?;
@@ -200,10 +198,7 @@ impl ContentPlane {
     pub fn begin(&self) -> Result<String, ContentError> {
         let id = Uuid::new_v4().to_string();
         let seq = self.seq.fetch_add(1, Ordering::Relaxed);
-        let path = self
-            .root
-            .join("sessions")
-            .join(format!("{id}-{seq}.part"));
+        let path = self.root.join("sessions").join(format!("{id}-{seq}.part"));
         std::fs::File::create(&path).map_err(|e| ContentError::Io(e.to_string()))?;
         let mut guard = self
             .sessions
@@ -288,9 +283,8 @@ impl ContentPlane {
 
     pub fn stat(&self, id: &str) -> Result<BlobStat, ContentError> {
         let path = self.blob_path(id)?;
-        let meta = std::fs::metadata(&path).map_err(|_| ContentError::BlobNotFound {
-            id: id.to_string(),
-        })?;
+        let meta = std::fs::metadata(&path)
+            .map_err(|_| ContentError::BlobNotFound { id: id.to_string() })?;
         Ok(BlobStat {
             id: id.to_lowercase(),
             bytes: meta.len() as usize,
@@ -300,9 +294,7 @@ impl ContentPlane {
 
     pub fn read_blob(&self, id: &str) -> Result<Vec<u8>, ContentError> {
         let path = self.blob_path(id)?;
-        std::fs::read(&path).map_err(|_| ContentError::BlobNotFound {
-            id: id.to_string(),
-        })
+        std::fs::read(&path).map_err(|_| ContentError::BlobNotFound { id: id.to_string() })
     }
 
     fn blob_path(&self, id: &str) -> Result<PathBuf, ContentError> {

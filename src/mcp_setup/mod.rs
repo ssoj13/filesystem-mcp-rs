@@ -57,10 +57,10 @@
 
 mod backup;
 mod json_client;
-mod toml_client;
 mod json_merge;
 mod jsonc;
 mod manifest;
+mod toml_client;
 
 pub mod client;
 pub mod clients;
@@ -81,8 +81,8 @@ pub use docs::HintDocs;
 pub use error::{Result, SetupError};
 pub use host::{HostSpec, install, status, uninstall};
 pub use json_client::JsonClient;
-pub use toml_client::TomlClient;
 pub use json_merge::EntryStyle;
+pub use toml_client::TomlClient;
 pub use types::{
     ApplyReport, HintsConfig, INSTALL_ID_ENV_KEY, InstallPlan, RemoveReport, Scope, SetupContext,
     StatusReport, StdioMcpEntry,

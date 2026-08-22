@@ -268,8 +268,14 @@ async fn grep_files_description_separates_pattern_from_file_pattern() -> Result<
     let desc = tools["grep_files"].as_str().unwrap_or("");
 
     // Must call out both fields by name
-    assert!(desc.contains("pattern"), "grep_files desc must mention 'pattern'");
-    assert!(desc.contains("filePattern"), "grep_files desc must mention 'filePattern'");
+    assert!(
+        desc.contains("pattern"),
+        "grep_files desc must mention 'pattern'"
+    );
+    assert!(
+        desc.contains("filePattern"),
+        "grep_files desc must mention 'filePattern'"
+    );
     // Must warn that pattern is a quoted string, not a bare glob
     assert!(
         desc.contains("quoted") || desc.contains("JSON string"),
@@ -616,8 +622,11 @@ async fn read_text_file_pagination_edge_cases() -> Result<()> {
 
     // Empty file
     let empty_path = tmp.path().join("empty.txt");
-    srv.call_tool("write_file", json!({ "path": &empty_path, "content": content_inline("") }))
-        .await?;
+    srv.call_tool(
+        "write_file",
+        json!({ "path": &empty_path, "content": content_inline("") }),
+    )
+    .await?;
 
     let empty_res = srv
         .call_tool(
@@ -1183,7 +1192,10 @@ async fn grep_files_max_matches_is_global_result_limit() -> Result<()> {
     let total = res["result"]["structuredContent"]["totalMatches"]
         .as_u64()
         .unwrap_or(0);
-    assert_eq!(total, 3, "grep_files must cap total returned matches globally");
+    assert_eq!(
+        total, 3,
+        "grep_files must cap total returned matches globally"
+    );
 
     srv.kill().await;
     Ok(())
@@ -1208,7 +1220,10 @@ async fn grep_files_accepts_glob_and_head_limit_aliases() -> Result<()> {
         .await?;
     assert_ok(&res);
     let text = serde_json::to_string(&res["result"]).unwrap_or_default();
-    assert!(text.contains("keep.rs"), "glob alias must include keep.rs: {text}");
+    assert!(
+        text.contains("keep.rs"),
+        "glob alias must include keep.rs: {text}"
+    );
     assert!(
         !text.contains("skip.txt"),
         "glob alias must exclude skip.txt (was the filter silently dropped?): {text}"
@@ -1862,10 +1877,7 @@ async fn session_footer_appended_by_default() -> Result<()> {
         text.contains("[MCP session lock]"),
         "expected session footer in tool text, got: {text}"
     );
-    assert_eq!(
-        res["result"]["structuredContent"]["_mcpSessionLock"],
-        true
-    );
+    assert_eq!(res["result"]["structuredContent"]["_mcpSessionLock"], true);
 
     srv.kill().await;
     Ok(())
@@ -2019,10 +2031,7 @@ async fn content_plane_blob_write_cyrillic() -> Result<()> {
     assert_ok(&append);
 
     let fin = srv
-        .call_tool(
-            "blob_finalize",
-            json!({ "sessionId": &session_id }),
-        )
+        .call_tool("blob_finalize", json!({ "sessionId": &session_id }))
         .await?;
     assert_ok(&fin);
     let blob_id = fin["result"]["structuredContent"]["id"]
@@ -2275,7 +2284,10 @@ async fn read_pdf_cryptomatte_quality_contract() -> Result<()> {
     assert!(!text.contains("Ta ble"));
     let score = sc["quality"]["score"].as_f64().unwrap_or(1.0);
     assert!(score < 0.85, "expected degraded score, got {score}");
-    let warnings = sc["quality"]["warnings"].as_array().cloned().unwrap_or_default();
+    let warnings = sc["quality"]["warnings"]
+        .as_array()
+        .cloned()
+        .unwrap_or_default();
     assert!(
         warnings.iter().any(|w| {
             matches!(

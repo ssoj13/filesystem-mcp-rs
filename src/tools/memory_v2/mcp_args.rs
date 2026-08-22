@@ -8,12 +8,12 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 use uuid::Uuid;
 
+use super::SqliteMemoryStore;
 use super::types::{
     ActorContext, ActorType, GetRequest, GetSummaryRequest, LinkRequest, MemoryItemInput,
     MemoryItemType, MemoryRelationInput, PutRequest, ScopeRef, SearchRequest, SummaryRef,
     UpdateRequest, Visibility,
 };
-use super::SqliteMemoryStore;
 
 pub fn invalid_params(msg: impl Into<String>) -> McpError {
     McpError::invalid_params(msg.into(), None)
@@ -388,7 +388,10 @@ fn validate_summary_level_scope(level: SummaryLevelArg, scope: &ScopeRef) -> Res
     Ok(())
 }
 
-pub async fn mem_put(store: &SqliteMemoryStore, args: MemPutArgs) -> Result<CallToolResult, McpError> {
+pub async fn mem_put(
+    store: &SqliteMemoryStore,
+    args: MemPutArgs,
+) -> Result<CallToolResult, McpError> {
     let request = args.into_put_request().map_err(invalid_params)?;
     let result = store
         .put(request)
@@ -449,7 +452,10 @@ pub async fn mem_search(
     .with_structured(json!(result)))
 }
 
-pub async fn mem_get(store: &SqliteMemoryStore, args: MemGetArgs) -> Result<CallToolResult, McpError> {
+pub async fn mem_get(
+    store: &SqliteMemoryStore,
+    args: MemGetArgs,
+) -> Result<CallToolResult, McpError> {
     let request = args.into_get_request().map_err(invalid_params)?;
     let result = store
         .get(request)
@@ -466,9 +472,7 @@ pub async fn mem_get_summary(
     store: &SqliteMemoryStore,
     args: MemGetSummaryArgs,
 ) -> Result<CallToolResult, McpError> {
-    let request = args
-        .into_get_summary_request()
-        .map_err(invalid_params)?;
+    let request = args.into_get_summary_request().map_err(invalid_params)?;
     let result = store
         .get_summary(request)
         .await
@@ -551,10 +555,7 @@ mod tests {
         let schema = schemars::schema_for!(MemPutArgs);
         let value = serde_json::to_value(&schema).expect("schema json");
         let required = value["required"].as_array().expect("required array");
-        let names: Vec<_> = required
-            .iter()
-            .filter_map(|v| v.as_str())
-            .collect();
+        let names: Vec<_> = required.iter().filter_map(|v| v.as_str()).collect();
         assert!(names.contains(&"workspaceId"));
         assert!(names.contains(&"actorId"));
         assert!(names.contains(&"item"));

@@ -9,7 +9,10 @@ use async_recursion::async_recursion;
 use clap::Parser;
 use futures::future::join_all;
 use rmcp::{
-    ErrorData as McpError, RoleServer, ServerHandler, ServiceExt,
+    ErrorData as McpError,
+    RoleServer,
+    ServerHandler,
+    ServiceExt,
     handler::server::{router::tool::ToolRouter, wrapper::Parameters},
     // `ListRootsRequest` is referenced by full path inside `refresh_roots`, which carries the
     // `#[allow(deprecated)]` and the explanation — importing it here would warn crate-wide.
@@ -18,10 +21,12 @@ use rmcp::{
         ProgressNotificationParam, RequestMetaObject, ServerCapabilities, ServerInfo,
         ServerRequest,
     },
-    service::RequestContext,
     serde::{Deserialize, Serialize},
+    service::RequestContext,
     service::{Peer, ServiceError},
-    tool, tool_handler, tool_router,
+    tool,
+    tool_handler,
+    tool_router,
     transport::stdio,
 };
 use schemars::JsonSchema;
@@ -33,20 +38,18 @@ use tracing::{info, warn};
 use crate::core::agent_policy;
 use crate::core::allowed::AllowedDirs;
 use crate::core::content_plane::{
-    ContentError, ContentMode, ContentPlane, ContentRef, TextOrRef,
-    sha256_hex,
+    ContentError, ContentMode, ContentPlane, ContentRef, TextOrRef, sha256_hex,
 };
 use crate::core::format;
 use crate::core::path::resolve_validated_path;
 use crate::core::schema::normalize_tool_schemas;
+#[cfg(feature = "s3-tools")]
+use crate::core::serde::deserialize_s3_args;
 use crate::core::serde::{
     FlexBool, FlexI32, FlexU32, FlexU64, FlexUsize, RI32, RU16, RU32, RU64, RUsize, ShellArg,
     ShellKind, default_flex_true, map_or_json_string, number_or_string,
-    option_object_or_json_string,
-    vec_or_string,
+    option_object_or_json_string, vec_or_string,
 };
-#[cfg(feature = "s3-tools")]
-use crate::core::serde::deserialize_s3_args;
 use crate::tools::binary::{
     extract_bytes, from_base64, patch_bytes, read_bytes, to_base64, write_bytes,
 };
@@ -66,8 +69,8 @@ use crate::tools::line_edit::{LineEdit, LineOperation, apply_line_edits};
 use crate::tools::media::read_media_base64;
 use crate::tools::memory_v2::{
     MemGetArgs, MemGetSummaryArgs, MemLinkArgs, MemPutArgs, MemSearchArgs, MemUpdateArgs,
-    MemoryAccessMode as V2MemoryAccessMode, SqliteMemoryStore,
-    mem_get, mem_get_summary, mem_link, mem_put, mem_search, mem_update,
+    MemoryAccessMode as V2MemoryAccessMode, SqliteMemoryStore, mem_get, mem_get_summary, mem_link,
+    mem_put, mem_search, mem_update,
 };
 #[cfg(feature = "s3-tools")]
 use crate::tools::s3_tools::{
@@ -466,12 +469,14 @@ impl FileSystemServer {
                     image.height()
                 );
                 Ok(
-                    CallToolResult::success(vec![ContentBlock::text(text)]).with_structured(json!({
-                        "output": "file",
-                        "path": target.display().to_string(),
-                        "width": image.width(),
-                        "height": image.height()
-                    })),
+                    CallToolResult::success(vec![ContentBlock::text(text)]).with_structured(
+                        json!({
+                            "output": "file",
+                            "path": target.display().to_string(),
+                            "width": image.width(),
+                            "height": image.height()
+                        }),
+                    ),
                 )
             }
             ScreenshotOutputMode::Clipboard => {
@@ -483,11 +488,13 @@ impl FileSystemServer {
                     image.height()
                 );
                 Ok(
-                    CallToolResult::success(vec![ContentBlock::text(text)]).with_structured(json!({
-                        "output": "clipboard",
-                        "width": image.width(),
-                        "height": image.height()
-                    })),
+                    CallToolResult::success(vec![ContentBlock::text(text)]).with_structured(
+                        json!({
+                            "output": "clipboard",
+                            "width": image.width(),
+                            "height": image.height()
+                        }),
+                    ),
                 )
             }
             ScreenshotOutputMode::Base64 => {
@@ -692,7 +699,12 @@ struct EditOperation {
     // objects when `text` contains `{`). ContentRef still works for blobs.
     #[serde(rename = "oldText", alias = "old_text", alias = "old")]
     old_text: TextOrRef,
-    #[serde(rename = "newText", alias = "new_text", alias = "new", alias = "replacement")]
+    #[serde(
+        rename = "newText",
+        alias = "new_text",
+        alias = "new",
+        alias = "replacement"
+    )]
     new_text: TextOrRef,
     #[serde(default, rename = "isRegex", alias = "is_regex")]
     is_regex: FlexBool,
@@ -706,7 +718,12 @@ impl<'de> Deserialize<'de> for EditOperation {
         struct Raw {
             #[serde(rename = "oldText", alias = "old_text", alias = "old")]
             old_text: Option<TextOrRef>,
-            #[serde(rename = "newText", alias = "new_text", alias = "new", alias = "replacement")]
+            #[serde(
+                rename = "newText",
+                alias = "new_text",
+                alias = "new",
+                alias = "replacement"
+            )]
             new_text: Option<TextOrRef>,
             #[serde(default, rename = "isRegex", alias = "is_regex")]
             is_regex: FlexBool,
@@ -949,7 +966,12 @@ struct GrepFilesArgs {
     // Aliases accept the built-in Grep/ripgrep vocabulary clients reflexively
     // send; without them `glob` was silently dropped and the search widened to
     // the whole tree (see BUG.md).
-    #[serde(skip_serializing_if = "Option::is_none", alias = "glob", alias = "include", alias = "file_pattern")]
+    #[serde(
+        skip_serializing_if = "Option::is_none",
+        alias = "glob",
+        alias = "include",
+        alias = "file_pattern"
+    )]
     file_pattern: Option<String>,
     /// Accepted for compatibility with built-in Grep (`lineNumbers`, `-n`);
     /// line numbers are always returned, so this is ignored.
@@ -964,10 +986,20 @@ struct GrepFilesArgs {
     #[serde(default, alias = "-i", alias = "ignoreCase", alias = "ignore_case")]
     case_insensitive: FlexBool,
     /// Number of context lines before match
-    #[serde(default, deserialize_with = "number_or_string", alias = "-B", alias = "before")]
+    #[serde(
+        default,
+        deserialize_with = "number_or_string",
+        alias = "-B",
+        alias = "before"
+    )]
     context_before: usize,
     /// Number of context lines after match
-    #[serde(default, deserialize_with = "number_or_string", alias = "-A", alias = "after")]
+    #[serde(
+        default,
+        deserialize_with = "number_or_string",
+        alias = "-A",
+        alias = "after"
+    )]
     context_after: usize,
     /// Maximum number of matches to return (0 = unlimited, default 100)
     #[serde(
@@ -1025,7 +1057,12 @@ struct GrepContextArgs {
     // Aliases accept the built-in Grep/ripgrep vocabulary clients reflexively
     // send; without them `glob` was silently dropped and the search widened to
     // the whole tree (see BUG.md).
-    #[serde(skip_serializing_if = "Option::is_none", alias = "glob", alias = "include", alias = "file_pattern")]
+    #[serde(
+        skip_serializing_if = "Option::is_none",
+        alias = "glob",
+        alias = "include",
+        alias = "file_pattern"
+    )]
     file_pattern: Option<String>,
     /// Accepted for compatibility with built-in Grep (`lineNumbers`, `-n`);
     /// line numbers are always returned, so this is ignored.
@@ -1040,10 +1077,20 @@ struct GrepContextArgs {
     #[serde(default, alias = "-i", alias = "ignoreCase", alias = "ignore_case")]
     case_insensitive: FlexBool,
     /// Number of context lines before match
-    #[serde(default, deserialize_with = "number_or_string", alias = "-B", alias = "before")]
+    #[serde(
+        default,
+        deserialize_with = "number_or_string",
+        alias = "-B",
+        alias = "before"
+    )]
     context_before: usize,
     /// Number of context lines after match
-    #[serde(default, deserialize_with = "number_or_string", alias = "-A", alias = "after")]
+    #[serde(
+        default,
+        deserialize_with = "number_or_string",
+        alias = "-A",
+        alias = "after"
+    )]
     context_after: usize,
     /// Maximum number of matches to return (0 = unlimited, default 100)
     #[serde(
@@ -1498,10 +1545,7 @@ struct TailFileArgs {
     /// Path to file
     path: String,
     /// Number of lines to read (default: 10)
-    #[serde(
-        default = "default_tail_lines",
-        deserialize_with = "number_or_string"
-    )]
+    #[serde(default = "default_tail_lines", deserialize_with = "number_or_string")]
     lines: usize,
     /// Alternative: number of bytes to read
     #[serde(default)]
@@ -2092,10 +2136,18 @@ struct RunCommandArgs {
     #[serde(default, alias = "clear_env")]
     clear_env: FlexBool,
     /// Prepend to existing env vars (e.g. {"PATH": "C:/new/bin;"} prepends to current PATH)
-    #[serde(default, deserialize_with = "option_object_or_json_string", alias = "env_prepend")]
+    #[serde(
+        default,
+        deserialize_with = "option_object_or_json_string",
+        alias = "env_prepend"
+    )]
     env_prepend: Option<std::collections::HashMap<String, String>>,
     /// Append to existing env vars (e.g. {"PATH": ";C:/extra/bin"} appends to current PATH)
-    #[serde(default, deserialize_with = "option_object_or_json_string", alias = "env_append")]
+    #[serde(
+        default,
+        deserialize_with = "option_object_or_json_string",
+        alias = "env_append"
+    )]
     env_append: Option<std::collections::HashMap<String, String>>,
     /// Timeout in milliseconds (command will be killed after this time)
     #[serde(default, alias = "timeout_ms")]
@@ -2672,8 +2724,10 @@ impl FileSystemServer {
             }
         });
         let joined = join_all(tasks).await.join("\n---\n");
-        Ok(CallToolResult::success(vec![ContentBlock::text(joined.clone())])
-            .with_structured(json!({ "content": joined })))
+        Ok(
+            CallToolResult::success(vec![ContentBlock::text(joined.clone())])
+                .with_structured(json!({ "content": joined })),
+        )
     }
 
     #[tool(
@@ -2744,7 +2798,6 @@ impl FileSystemServer {
             "sha256": sha256_hex(&bytes),
         })))
     }
-
 
     #[tool(
         name = "blob_begin",
@@ -2856,7 +2909,8 @@ impl FileSystemServer {
         let tf = read_text_meta(&path)
             .await
             .map_err(internal_err("Failed to read file"))?;
-        tf.ensure_roundtrippable().map_err(internal_err("Cannot edit file"))?;
+        tf.ensure_roundtrippable()
+            .map_err(internal_err("Cannot edit file"))?;
 
         let mut resolved_edits = Vec::with_capacity(edits.len());
         for e in edits {
@@ -2864,12 +2918,10 @@ impl FileSystemServer {
             let new_ref = e.new_text.into_ref();
             let old_bytes = self.resolve_content(&old_ref, ContentMode::Text).await?;
             let new_bytes = self.resolve_content(&new_ref, ContentMode::Text).await?;
-            let old_text = String::from_utf8(old_bytes).map_err(|err| {
-                Self::content_err(ContentError::InvalidUtf8(err.to_string()))
-            })?;
-            let new_text = String::from_utf8(new_bytes).map_err(|err| {
-                Self::content_err(ContentError::InvalidUtf8(err.to_string()))
-            })?;
+            let old_text = String::from_utf8(old_bytes)
+                .map_err(|err| Self::content_err(ContentError::InvalidUtf8(err.to_string())))?;
+            let new_text = String::from_utf8(new_bytes)
+                .map_err(|err| Self::content_err(ContentError::InvalidUtf8(err.to_string())))?;
             resolved_edits.push(FileEdit {
                 old_text,
                 new_text,
@@ -3357,8 +3409,10 @@ impl FileSystemServer {
         } else {
             format!("Allowed directories:\n{}", lines.join("\n"))
         };
-        Ok(CallToolResult::success(vec![ContentBlock::text(text.clone())])
-            .with_structured(json!({ "directories": lines })))
+        Ok(
+            CallToolResult::success(vec![ContentBlock::text(text.clone())])
+                .with_structured(json!({ "directories": lines })),
+        )
     }
 
     #[tool(
@@ -3451,13 +3505,17 @@ impl FileSystemServer {
         };
 
         let progress_cb = grep_progress_callback(meta.get_progress_token(), client);
-        let fast_result =
-            grep_files_fast(params, &self.allowed, self.allow_symlink_escape, progress_cb)
-                .await
-                .map_err(|e| {
-                    let details = format!("{:#}", e);
-                    McpError::internal_error(format!("Grep failed: {}", details), None)
-                })?;
+        let fast_result = grep_files_fast(
+            params,
+            &self.allowed,
+            self.allow_symlink_escape,
+            progress_cb,
+        )
+        .await
+        .map_err(|e| {
+            let details = format!("{:#}", e);
+            McpError::internal_error(format!("Grep failed: {}", details), None)
+        })?;
         let stats = grep_stats_json(&fast_result.stats);
         let result = fast_result.result;
 
@@ -4286,7 +4344,9 @@ impl FileSystemServer {
             .await
             .map_err(|e| McpError::internal_error(format!("S3 put failed: {e}"), None))?;
 
-        Ok(CallToolResult::success(vec![ContentBlock::text("S3 put ok")]))
+        Ok(CallToolResult::success(vec![ContentBlock::text(
+            "S3 put ok",
+        )]))
     }
 
     #[cfg(feature = "s3-tools")]
@@ -4318,7 +4378,9 @@ impl FileSystemServer {
             .await
             .map_err(|e| McpError::internal_error(format!("S3 copy failed: {e}"), None))?;
 
-        Ok(CallToolResult::success(vec![ContentBlock::text("S3 copy ok")]))
+        Ok(CallToolResult::success(vec![ContentBlock::text(
+            "S3 copy ok",
+        )]))
     }
 
     #[cfg(feature = "s3-tools")]
@@ -4348,7 +4410,9 @@ impl FileSystemServer {
         .await
         .map_err(|e| McpError::internal_error(format!("S3 delete failed: {e}"), None))?;
 
-        Ok(CallToolResult::success(vec![ContentBlock::text("S3 delete ok")]))
+        Ok(CallToolResult::success(vec![ContentBlock::text(
+            "S3 delete ok",
+        )]))
     }
 
     #[cfg(feature = "s3-tools")]
@@ -4403,8 +4467,10 @@ impl FileSystemServer {
         .await
         .map_err(|e| McpError::internal_error(format!("S3 presign failed: {e}"), None))?;
 
-        Ok(CallToolResult::success(vec![ContentBlock::text(url.clone())])
-            .with_structured(json!({ "url": url })))
+        Ok(
+            CallToolResult::success(vec![ContentBlock::text(url.clone())])
+                .with_structured(json!({ "url": url })),
+        )
     }
 
     #[cfg(feature = "s3-tools")]
@@ -4690,7 +4756,8 @@ impl FileSystemServer {
         let tf = read_text_meta(&path)
             .await
             .map_err(internal_err("Failed to read file"))?;
-        tf.ensure_roundtrippable().map_err(internal_err("Cannot edit file"))?;
+        tf.ensure_roundtrippable()
+            .map_err(internal_err("Cannot edit file"))?;
         let original = tf.text.clone();
 
         // Convert JSON operations to internal LineEdit format
@@ -4766,12 +4833,10 @@ EXAMPLES:\n  1. Literal replace all occurrences:\n     {\"oldText\": \"use crate
             let new_ref = e.new_text.into_ref();
             let old_bytes = self.resolve_content(&old_ref, ContentMode::Text).await?;
             let new_bytes = self.resolve_content(&new_ref, ContentMode::Text).await?;
-            let old_text = String::from_utf8(old_bytes).map_err(|err| {
-                Self::content_err(ContentError::InvalidUtf8(err.to_string()))
-            })?;
-            let new_text = String::from_utf8(new_bytes).map_err(|err| {
-                Self::content_err(ContentError::InvalidUtf8(err.to_string()))
-            })?;
+            let old_text = String::from_utf8(old_bytes)
+                .map_err(|err| Self::content_err(ContentError::InvalidUtf8(err.to_string())))?;
+            let new_text = String::from_utf8(new_bytes)
+                .map_err(|err| Self::content_err(ContentError::InvalidUtf8(err.to_string())))?;
             edits.push(FileEdit {
                 old_text,
                 new_text,
@@ -4840,7 +4905,11 @@ EXAMPLES:\n  1. Literal replace all occurrences:\n     {\"oldText\": \"use crate
         ));
         lines.push(String::new());
         for result in &error_results {
-            lines.push(format!("❌ {}: {}", result.path.display(), result.error.as_deref().unwrap_or("")));
+            lines.push(format!(
+                "❌ {}: {}",
+                result.path.display(),
+                result.error.as_deref().unwrap_or("")
+            ));
         }
         for result in &modified_files {
             lines.push(format!("✓ {} - MODIFIED", result.path.display()));
@@ -4856,27 +4925,27 @@ EXAMPLES:\n  1. Literal replace all occurrences:\n     {\"oldText\": \"use crate
         // Structured payload: skip unchanged files entirely; truncate diffs;
         // stop emitting diffs once total payload approaches cap.
         // Aggregate per-edit match/apply counts across ALL files (so users can
-            // quickly see if any edit silently produced zero changes — critical
-            // for migration safety).
-            let edit_count = edits.len();
-            let mut total_matches_per_edit = vec![0usize; edit_count];
-            let mut total_applied_per_edit = vec![0usize; edit_count];
-            let mut files_with_matches_per_edit = vec![0usize; edit_count];
-            for r in &results {
-                for (i, &n) in r.matches_per_edit.iter().enumerate() {
-                    if i < edit_count {
-                        total_matches_per_edit[i] += n;
-                        if n > 0 {
-                            files_with_matches_per_edit[i] += 1;
-                        }
-                    }
-                }
-                for (i, &n) in r.applied_per_edit.iter().enumerate() {
-                    if i < edit_count {
-                        total_applied_per_edit[i] += n;
+        // quickly see if any edit silently produced zero changes — critical
+        // for migration safety).
+        let edit_count = edits.len();
+        let mut total_matches_per_edit = vec![0usize; edit_count];
+        let mut total_applied_per_edit = vec![0usize; edit_count];
+        let mut files_with_matches_per_edit = vec![0usize; edit_count];
+        for r in &results {
+            for (i, &n) in r.matches_per_edit.iter().enumerate() {
+                if i < edit_count {
+                    total_matches_per_edit[i] += n;
+                    if n > 0 {
+                        files_with_matches_per_edit[i] += 1;
                     }
                 }
             }
+            for (i, &n) in r.applied_per_edit.iter().enumerate() {
+                if i < edit_count {
+                    total_applied_per_edit[i] += n;
+                }
+            }
+        }
 
         let mut total_chars = 0usize;
         let mut any_diff_dropped = false;
@@ -4923,17 +4992,17 @@ EXAMPLES:\n  1. Literal replace all occurrences:\n     {\"oldText\": \"use crate
             .collect();
 
         // Per-edit summary across all files — makes it trivial to spot silent
-            // no-op edits in a migration batch.
-            let edits_summary: Vec<_> = (0..edit_count)
-                .map(|i| {
-                    json!({
-                        "index": i,
-                        "totalMatches": total_matches_per_edit[i],
-                        "totalApplied": total_applied_per_edit[i],
-                        "filesWithMatches": files_with_matches_per_edit[i],
-                    })
+        // no-op edits in a migration batch.
+        let edits_summary: Vec<_> = (0..edit_count)
+            .map(|i| {
+                json!({
+                    "index": i,
+                    "totalMatches": total_matches_per_edit[i],
+                    "totalApplied": total_applied_per_edit[i],
+                    "filesWithMatches": files_with_matches_per_edit[i],
                 })
-                .collect();
+            })
+            .collect();
 
         let structured = json!({
             "scannedFiles": scanned_files,
@@ -5007,7 +5076,8 @@ USE CASES: Remove imports, delete code blocks, cut sections to paste elsewhere."
         let tf = read_text_meta(&path)
             .await
             .map_err(internal_err("Failed to read file"))?;
-        tf.ensure_roundtrippable().map_err(internal_err("Cannot edit file"))?;
+        tf.ensure_roundtrippable()
+            .map_err(internal_err("Cannot edit file"))?;
         let content = &tf.text;
 
         // Track if original content ends with newline
@@ -5104,7 +5174,10 @@ USE CASES: Remove imports, delete code blocks, cut sections to paste elsewhere."
             structured["extracted"] = json!(extracted_text);
         }
 
-        Ok(CallToolResult::success(vec![ContentBlock::text(text_response)]).with_structured(structured))
+        Ok(
+            CallToolResult::success(vec![ContentBlock::text(text_response)])
+                .with_structured(structured),
+        )
     }
 
     #[tool(
@@ -5150,7 +5223,8 @@ Note: Uses Unicode chars (safe for multibyte), not raw bytes. If range exceeds f
         let tf = read_text_meta(&path)
             .await
             .map_err(internal_err("Failed to read file"))?;
-        tf.ensure_roundtrippable().map_err(internal_err("Cannot edit file"))?;
+        tf.ensure_roundtrippable()
+            .map_err(internal_err("Cannot edit file"))?;
         let content = &tf.text;
 
         // Work with Unicode characters
@@ -5235,7 +5309,10 @@ Note: Uses Unicode chars (safe for multibyte), not raw bytes. If range exceeds f
             structured["extracted"] = json!(extracted);
         }
 
-        Ok(CallToolResult::success(vec![ContentBlock::text(text_response)]).with_structured(structured))
+        Ok(
+            CallToolResult::success(vec![ContentBlock::text(text_response)])
+                .with_structured(structured),
+        )
     }
 
     // ========================================================================
@@ -5671,14 +5748,16 @@ USE CASES: Patch executables, fix binary data, search-replace in non-text files.
         // In follow mode the appended content is the whole point of the call;
         // surface it (and its line count) instead of silently discarding it.
         Ok(
-            CallToolResult::success(vec![ContentBlock::text(&result.content)]).with_structured(json!({
-                "content": result.content,
-                "linesReturned": result.lines_returned,
-                "fileSize": result.file_size,
-                "truncated": result.truncated,
-                "followContent": result.follow_content,
-                "followLines": result.follow_lines,
-            })),
+            CallToolResult::success(vec![ContentBlock::text(&result.content)]).with_structured(
+                json!({
+                    "content": result.content,
+                    "linesReturned": result.lines_returned,
+                    "fileSize": result.file_size,
+                    "truncated": result.truncated,
+                    "followContent": result.follow_content,
+                    "followLines": result.follow_lines,
+                }),
+            ),
         )
     }
 
@@ -6053,19 +6132,18 @@ USE CASES: Patch executables, fix binary data, search-replace in non-text files.
         // quietly does the wrong thing and returns a confusing exit code. We do
         // NOT reject (literal operators are valid argv for some programs); we
         // only attach an advisory so the caller knows to pass `shell:"bash"`.
-        let pipe_hint: Option<String> =
-            if args.args.is_empty() && *args.shell == ShellKind::None {
-                top_level_shell_meta(&args.command).map(|op| {
-                    format!(
-                        "command contains an unquoted shell operator '{op}' but shell is off, \
+        let pipe_hint: Option<String> = if args.args.is_empty() && *args.shell == ShellKind::None {
+            top_level_shell_meta(&args.command).map(|op| {
+                format!(
+                    "command contains an unquoted shell operator '{op}' but shell is off, \
                          so it was passed as a literal argument and NOT interpreted. For \
                          pipelines/redirection pass shell:\"bash\" (works on Windows/macOS/Linux) \
                          or shell:true; quote the operator to silence this."
-                    )
-                })
-            } else {
-                None
-            };
+                )
+            })
+        } else {
+            None
+        };
 
         // Determine effective mode (backward compat: background=true -> detached)
         let mode = if *args.background {
@@ -6101,7 +6179,10 @@ USE CASES: Patch executables, fix binary data, search-replace in non-text files.
                 .map(|p| regex::Regex::new(p))
                 .collect::<std::result::Result<Vec<_>, _>>()
                 .map_err(|e| {
-                    McpError::invalid_params(format!("Invalid outputFilter include regex: {e}"), None)
+                    McpError::invalid_params(
+                        format!("Invalid outputFilter include regex: {e}"),
+                        None,
+                    )
                 })?;
             let exclude = filter_args
                 .exclude
@@ -6109,7 +6190,10 @@ USE CASES: Patch executables, fix binary data, search-replace in non-text files.
                 .map(|p| regex::Regex::new(p))
                 .collect::<std::result::Result<Vec<_>, _>>()
                 .map_err(|e| {
-                    McpError::invalid_params(format!("Invalid outputFilter exclude regex: {e}"), None)
+                    McpError::invalid_params(
+                        format!("Invalid outputFilter exclude regex: {e}"),
+                        None,
+                    )
                 })?;
             Some(process::OutputFilter {
                 include,
@@ -6133,9 +6217,7 @@ USE CASES: Patch executables, fix binary data, search-replace in non-text files.
             stdout_file: stdout_file.clone(),
             stderr_file: stderr_file.clone(),
             stdin_bytes: match args.stdin.as_ref() {
-                Some(content) => Some(
-                    self.resolve_content(content, ContentMode::Text).await?,
-                ),
+                Some(content) => Some(self.resolve_content(content, ContentMode::Text).await?),
                 None => None,
             },
             stdout_head: args.stdout_head.get(),
@@ -6181,8 +6263,7 @@ USE CASES: Patch executables, fix binary data, search-replace in non-text files.
                 };
                 let seq = counter.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                 Box::pin(async move {
-                    let param =
-                        ProgressNotificationParam::new(token, seq as f64).with_message(msg);
+                    let param = ProgressNotificationParam::new(token, seq as f64).with_message(msg);
                     let _ = peer.notify_progress(param).await;
                 })
             }))
@@ -7097,10 +7178,11 @@ USE CASES: Patch executables, fix binary data, search-replace in non-text files.
             .get("hostname")
             .and_then(|v| v.as_str())
             .unwrap_or("unknown");
-        Ok(
-            CallToolResult::success(vec![ContentBlock::text(format!("System info for {}", hostname))])
-                .with_structured(info),
-        )
+        Ok(CallToolResult::success(vec![ContentBlock::text(format!(
+            "System info for {}",
+            hostname
+        ))])
+        .with_structured(info))
     }
 
     #[tool(
@@ -7251,10 +7333,11 @@ USE CASES: Patch executables, fix binary data, search-replace in non-text files.
                 let path = result.get("path").and_then(|v| v.as_str()).unwrap_or("");
                 Ok(CallToolResult::success(vec![ContentBlock::text(path)]).with_structured(result))
             }
-            Err(e) => Ok(CallToolResult::success(vec![ContentBlock::text(e.to_string())])
-                .with_structured(
+            Err(e) => Ok(
+                CallToolResult::success(vec![ContentBlock::text(e.to_string())]).with_structured(
                     json!({"command": args.command, "found": false, "error": e.to_string()}),
-                )),
+                ),
+            ),
         }
     }
 }
@@ -7401,11 +7484,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Setup subcommands never start the server: they only touch agent configs.
     if let Some(cmd) = top.setup {
         let cmd = setup::with_default_dirs(cmd);
-        if let Err(err) = mcp_setup::cli::run(&cmd, &setup::host_spec()?) {
-            eprintln!("error: {err}");
-            std::process::exit(1);
+        match mcp_setup::cli::run(&cmd, &setup::host_spec()?) {
+            // A broken or unreachable client is already spelled out in the table; exit non-zero
+            // rather than printing an error line over it.
+            Ok(outcome) => std::process::exit(outcome.exit_code()),
+            Err(err) => {
+                eprintln!("error: {err}");
+                std::process::exit(1);
+            }
         }
-        return Ok(());
     }
 
     let args = top.server;
@@ -7651,7 +7738,9 @@ fn parse_time_filter(raw: &str) -> anyhow::Result<SystemTime> {
             .checked_sub(duration)
             .ok_or_else(|| anyhow::anyhow!("Time filter underflow"));
     }
-    anyhow::bail!("Invalid time filter '{raw}'. Expected RFC3339 or duration like '17m 20s' or '7d'")
+    anyhow::bail!(
+        "Invalid time filter '{raw}'. Expected RFC3339 or duration like '17m 20s' or '7d'"
+    )
 }
 
 async fn prepare_stream_paths(args: &RunCommandArgs) -> Result<(String, String), McpError> {

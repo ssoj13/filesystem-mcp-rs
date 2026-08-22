@@ -50,11 +50,7 @@ pub fn host_spec() -> Result<HostSpec> {
     let install_id = format!("{SERVER_KEY}:{}", env!("CARGO_PKG_VERSION"));
     Ok(HostSpec::from_current_exe(SERVER_KEY, install_id)?
         .with_env(default_env())
-        .with_docs(HintDocs::new([
-            KARPATHY_RULES,
-            MCP_POLICY,
-            MCP_WORKFLOWS,
-        ])))
+        .with_docs(HintDocs::new([KARPATHY_RULES, MCP_POLICY, MCP_WORKFLOWS])))
 }
 
 /// Directories written into the server's command line when `install` is run with no trailing

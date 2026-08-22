@@ -3,11 +3,11 @@
 
 use std::path::Path;
 
+use crate::mcp_setup::SetupError;
 use crate::mcp_setup::clients;
 use crate::mcp_setup::docs::HintDocs;
 use crate::mcp_setup::host::{self, HostSpec};
 use crate::mcp_setup::types::{Scope, SetupContext};
-use crate::mcp_setup::SetupError;
 
 const KEY: &str = "demo-mcp";
 const ID: &str = "demo-mcp:1.0.0";
@@ -15,7 +15,9 @@ const ID: &str = "demo-mcp:1.0.0";
 fn spec() -> HostSpec {
     HostSpec::new(KEY, ID, "/opt/bin/demo-mcp")
         .with_args(["--flag"])
-        .with_docs(HintDocs::new(["## demo\n\nUse `{{MCP_SERVER_KEY}}` for X."]))
+        .with_docs(HintDocs::new([
+            "## demo\n\nUse `{{MCP_SERVER_KEY}}` for X.",
+        ]))
 }
 
 /// Pretend every supported agent is installed for this user, by creating the marker directory each
@@ -39,7 +41,11 @@ fn every_client_installs_reports_and_uninstalls_in_user_scope() {
     for client in clients::all() {
         let applied = host::install(&ctx, client, &Scope::User, &spec)
             .unwrap_or_else(|e| panic!("{} install: {e}", client.id()));
-        assert!(applied.changed, "{}: first install must change", client.id());
+        assert!(
+            applied.changed,
+            "{}: first install must change",
+            client.id()
+        );
         assert!(applied.settings_path.is_file(), "{}", client.id());
         assert!(applied.manifest_path.is_file(), "{}", client.id());
 
@@ -55,15 +61,27 @@ fn every_client_installs_reports_and_uninstalls_in_user_scope() {
         // agents that have one. (Claude Desktop, VS Code, Cline, … have no rules file.)
         if let Some(hints) = applied.hints_path.clone() {
             let hints_raw = std::fs::read_to_string(&hints).unwrap();
-            assert!(hints_raw.contains("Use `demo-mcp` for X."), "{}", client.id());
+            assert!(
+                hints_raw.contains("Use `demo-mcp` for X."),
+                "{}",
+                client.id()
+            );
         }
 
         let status = host::status(&ctx, client, &Scope::User, &spec).unwrap();
-        assert!(status.installed, "{}: status should be installed", client.id());
+        assert!(
+            status.installed,
+            "{}: status should be installed",
+            client.id()
+        );
 
         // Re-installing identical settings is a no-op.
         let again = host::install(&ctx, client, &Scope::User, &spec).unwrap();
-        assert!(!again.changed, "{}: reinstall must be idempotent", client.id());
+        assert!(
+            !again.changed,
+            "{}: reinstall must be idempotent",
+            client.id()
+        );
 
         let removed = host::uninstall(&ctx, client, &Scope::User, &spec).unwrap();
         assert!(removed.removed, "{}: uninstall must remove", client.id());
@@ -119,7 +137,8 @@ fn a_newer_version_upgrades_and_can_remove_the_older_install() {
     let ctx = SetupContext::from_home(home.to_path_buf()).unwrap();
     let docs = HintDocs::new(["## demo\n\nUse `{{MCP_SERVER_KEY}}` for X."]);
 
-    let old = HostSpec::new(KEY, format!("{KEY}:1.0.0"), "/opt/bin/demo-mcp").with_docs(docs.clone());
+    let old =
+        HostSpec::new(KEY, format!("{KEY}:1.0.0"), "/opt/bin/demo-mcp").with_docs(docs.clone());
     let new =
         HostSpec::new(KEY, format!("{KEY}:2.0.0"), "/opt/bin/demo-mcp-v2").with_docs(docs.clone());
 
@@ -130,13 +149,21 @@ fn a_newer_version_upgrades_and_can_remove_the_older_install() {
             .unwrap_or_else(|e| panic!("{} upgrade: {e}", client.id()));
         assert!(upgraded.changed, "{}: upgrade must rewrite", client.id());
         let raw = std::fs::read_to_string(&upgraded.settings_path).unwrap();
-        assert!(raw.contains("2.0.0"), "{}: still on the old install id", client.id());
+        assert!(
+            raw.contains("2.0.0"),
+            "{}: still on the old install id",
+            client.id()
+        );
 
         let status = host::status(&ctx, client, &Scope::User, &new).unwrap();
         assert!(status.installed, "{}", client.id());
 
         let removed = host::uninstall(&ctx, client, &Scope::User, &new).unwrap();
-        assert!(removed.removed, "{}: upgraded entry must be removable", client.id());
+        assert!(
+            removed.removed,
+            "{}: upgraded entry must be removable",
+            client.id()
+        );
         let raw = std::fs::read_to_string(&upgraded.settings_path).unwrap();
         assert!(!raw.contains(KEY), "{}: entry left behind", client.id());
     }
@@ -188,7 +215,10 @@ fn missing_agent_is_reported_as_not_detected_not_created() {
 
     let err = host::install(&ctx, &clients::CURSOR, &Scope::User, &spec()).unwrap_err();
     assert!(matches!(err, SetupError::HostNotDetected { .. }), "{err:?}");
-    assert!(!home.join(".cursor").exists(), "must not create the agent dir");
+    assert!(
+        !home.join(".cursor").exists(),
+        "must not create the agent dir"
+    );
 }
 
 #[test]
@@ -201,11 +231,18 @@ fn user_notes_outside_the_managed_block_survive_uninstall() {
     let ctx = SetupContext::from_home(home.to_path_buf()).unwrap();
 
     host::install(&ctx, &clients::CLAUDE_CODE, &Scope::User, &spec()).unwrap();
-    assert!(std::fs::read_to_string(&claude_md).unwrap().contains("Keep me."));
+    assert!(
+        std::fs::read_to_string(&claude_md)
+            .unwrap()
+            .contains("Keep me.")
+    );
 
     host::uninstall(&ctx, &clients::CLAUDE_CODE, &Scope::User, &spec()).unwrap();
     let after = std::fs::read_to_string(&claude_md).unwrap();
-    assert!(after.contains("Keep me."), "user notes were eaten: {after:?}");
+    assert!(
+        after.contains("Keep me."),
+        "user notes were eaten: {after:?}"
+    );
     assert!(!after.contains("demo-mcp"));
 }
 

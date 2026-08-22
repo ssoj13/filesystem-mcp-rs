@@ -192,6 +192,18 @@ pub struct StatusReport {
     pub custom_key: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub found_install_id: Option<String>,
+    /// The `command` string as it is actually written in the config, before any resolution.
+    /// `None` when there is no entry to read one from.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub stored_command: Option<String>,
+    /// Whether [`stored_command`](Self::stored_command) can actually be launched — the file
+    /// exists, or a bare name is found on `PATH`. `None` when there is no entry.
+    ///
+    /// `Some(false)` alongside `installed` is the *broken* case: we own the entry, but it points
+    /// at a binary that is gone (a build-tree path after `cargo clean`, a moved repo, an
+    /// uninstalled server). Without this, such an entry is indistinguishable from a healthy one.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub command_resolves: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub note: Option<String>,
 }

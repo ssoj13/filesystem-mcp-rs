@@ -102,20 +102,19 @@ fn detect_newline(s: &str) -> Newline {
 pub fn decode_meta(bytes: &[u8]) -> TextFile {
     // Determine encoding + BOM. UTF-8 (with or without BOM) is the fast, common
     // path; only genuinely non-UTF-8 bytes reach chardetng.
-    let (encoding, had_bom): (&'static Encoding, bool) =
-        if bytes.starts_with(&[0xEF, 0xBB, 0xBF]) {
-            (encoding_rs::UTF_8, true)
-        } else if bytes.starts_with(&[0xFF, 0xFE]) {
-            (encoding_rs::UTF_16LE, true)
-        } else if bytes.starts_with(&[0xFE, 0xFF]) {
-            (encoding_rs::UTF_16BE, true)
-        } else if std::str::from_utf8(bytes).is_ok() {
-            (encoding_rs::UTF_8, false)
-        } else {
-            let mut detector = EncodingDetector::new(Iso2022JpDetection::Allow);
-            detector.feed(bytes, true);
-            (detector.guess(None, Utf8Detection::Deny), false)
-        };
+    let (encoding, had_bom): (&'static Encoding, bool) = if bytes.starts_with(&[0xEF, 0xBB, 0xBF]) {
+        (encoding_rs::UTF_8, true)
+    } else if bytes.starts_with(&[0xFF, 0xFE]) {
+        (encoding_rs::UTF_16LE, true)
+    } else if bytes.starts_with(&[0xFE, 0xFF]) {
+        (encoding_rs::UTF_16BE, true)
+    } else if std::str::from_utf8(bytes).is_ok() {
+        (encoding_rs::UTF_8, false)
+    } else {
+        let mut detector = EncodingDetector::new(Iso2022JpDetection::Allow);
+        detector.feed(bytes, true);
+        (detector.guess(None, Utf8Detection::Deny), false)
+    };
 
     // `decode` strips a leading BOM matching the encoding and reports whether any
     // byte sequence was malformed (replaced with U+FFFD).

@@ -57,7 +57,8 @@ fn reject_overlapping_edits(edits: &[LineEdit]) -> Result<()> {
         if a.0 > a.1 {
             bail!(
                 "Invalid range: start line {} is after end line {}",
-                a.0, a.1
+                a.0,
+                a.1
             );
         }
         for j in (i + 1)..edits.len() {
@@ -70,7 +71,10 @@ fn reject_overlapping_edits(edits: &[LineEdit]) -> Result<()> {
                     "Overlapping edits: edit A lines {}-{} overlaps edit B lines {}-{}. \
                      Use non-overlapping ranges (original line numbers); apply sequential \
                      calls if you need dependent edits.",
-                    a.0, a.1, b.0, b.1
+                    a.0,
+                    a.1,
+                    b.0,
+                    b.1
                 );
             }
         }
@@ -366,10 +370,13 @@ mod tests {
             start_line: 4,
             end_line: None,
             operation: LineOperation::Replace,
-            text: Some("def beta():
+            text: Some(
+                "def beta():
     new1
     new2
-    new3".to_string()),
+    new3"
+                    .to_string(),
+            ),
         }];
         let (result, _) = apply_line_edits(content, &edits).unwrap();
         assert_eq!(
@@ -423,10 +430,13 @@ mod tests {
             start_line: 4,
             end_line: Some(7),
             operation: LineOperation::Replace,
-            text: Some("def beta():
+            text: Some(
+                "def beta():
     new1
     new2
-    new3".to_string()),
+    new3"
+                    .to_string(),
+            ),
         }];
         let (result, _) = apply_line_edits(content, &edits).unwrap();
         assert_eq!(
@@ -464,9 +474,12 @@ L5
                 start_line: 2,
                 end_line: Some(2),
                 operation: LineOperation::Replace,
-                text: Some("A
+                text: Some(
+                    "A
 B
-C".to_string()), // expands 1 line -> 3
+C"
+                    .to_string(),
+                ), // expands 1 line -> 3
             },
             LineEdit {
                 start_line: 4,
@@ -477,13 +490,16 @@ C".to_string()), // expands 1 line -> 3
         ];
         let (result, _) = apply_line_edits(content, &edits).unwrap();
         // Apply high range first: L4-L5 -> X, then L2 -> A/B/C
-        assert_eq!(result, "L1
+        assert_eq!(
+            result,
+            "L1
 A
 B
 C
 L3
 X
-");
+"
+        );
     }
 
     /// Overlapping ranges are rejected up front (not after a confusing shrink).

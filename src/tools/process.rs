@@ -200,9 +200,7 @@ pub fn process_output(
     }
 
     // Simple tail-only case (backward compat)
-    if head.is_none()
-        && filter.is_none_or(|f| !f.is_active())
-    {
+    if head.is_none() && filter.is_none_or(|f| !f.is_active()) {
         if let Some(n) = tail
             && n > 0
             && n < lines.len()
@@ -561,8 +559,10 @@ fn quote_pwsh(arg: &str) -> String {
 /// variable expansion), but this correctly handles the common case of a path or
 /// value containing spaces, which the old space-join broke outright.
 fn quote_cmd(arg: &str) -> String {
-    let needs_quote =
-        arg.is_empty() || arg.chars().any(|c| c.is_whitespace() || "&|<>^\"()".contains(c));
+    let needs_quote = arg.is_empty()
+        || arg
+            .chars()
+            .any(|c| c.is_whitespace() || "&|<>^\"()".contains(c));
     if needs_quote {
         format!("\"{}\"", arg.replace('"', "\"\""))
     } else {
@@ -607,10 +607,8 @@ impl TempScript {
     /// the console's default code page — otherwise a non-ASCII command (e.g. a
     /// Cyrillic path) would be read in the active code page and mojibake'd.
     async fn create(line: &str) -> Result<Self> {
-        let path =
-            std::env::temp_dir().join(format!("fsmcp-cmd-{}.bat", uuid::Uuid::new_v4()));
-        let mut body =
-            String::with_capacity(line.len() + "@echo off\r\nchcp 65001 >nul\r\n".len());
+        let path = std::env::temp_dir().join(format!("fsmcp-cmd-{}.bat", uuid::Uuid::new_v4()));
+        let mut body = String::with_capacity(line.len() + "@echo off\r\nchcp 65001 >nul\r\n".len());
         body.push_str("@echo off\r\n");
         body.push_str("chcp 65001 >nul\r\n");
         for l in line.split('\n') {
@@ -1245,10 +1243,7 @@ async fn wait_for_process(
     // Apply output processing (head + filter + tail)
     let has_processing = params.stdout_head.is_some()
         || params.stderr_head.is_some()
-        || params
-            .output_filter
-            .as_ref()
-            .is_some_and(|f| f.is_active());
+        || params.output_filter.as_ref().is_some_and(|f| f.is_active());
 
     let (stdout, stdout_processed) = if has_processing {
         let processed = process_output(
@@ -1530,9 +1525,21 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(result.exit_code, Some(0), "stdout: {}", result.stdout);
-        assert!(result.stdout.contains("LINE_A"), "stdout: {}", result.stdout);
-        assert!(result.stdout.contains("LINE_B"), "stdout: {}", result.stdout);
-        assert!(result.stdout.contains("LINE_C"), "stdout: {}", result.stdout);
+        assert!(
+            result.stdout.contains("LINE_A"),
+            "stdout: {}",
+            result.stdout
+        );
+        assert!(
+            result.stdout.contains("LINE_B"),
+            "stdout: {}",
+            result.stdout
+        );
+        assert!(
+            result.stdout.contains("LINE_C"),
+            "stdout: {}",
+            result.stdout
+        );
     }
 
     /// The exit code of a multi-line cmd run is that of the LAST line
@@ -1792,10 +1799,16 @@ mod tests {
             "stdout_head must return inline content even when capture_output=false; got: {:?}",
             result.stdout
         );
-        assert!(!result.stdout.contains("line2"), "head=1 must not include line2");
+        assert!(
+            !result.stdout.contains("line2"),
+            "head=1 must not include line2"
+        );
         // Full output still written to file
         let file_content = std::fs::read_to_string(&stdout_path).unwrap();
-        assert!(file_content.contains("line3"), "file must still have full output");
+        assert!(
+            file_content.contains("line3"),
+            "file must still have full output"
+        );
     }
 
     #[tokio::test]

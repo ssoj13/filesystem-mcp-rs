@@ -65,12 +65,7 @@ fn servers_object(root: &CstRootNode, parent_path: &[&str]) -> CstObject {
 }
 
 /// Insert or replace `parent_path.<key>`, preserving everything else in the file verbatim.
-pub fn upsert_in_file(
-    path: &Path,
-    parent_path: &[&str],
-    key: &str,
-    entry: &Value,
-) -> Result<()> {
+pub fn upsert_in_file(path: &Path, parent_path: &[&str], key: &str, entry: &Value) -> Result<()> {
     let raw = read_if_present(path)?.unwrap_or_default();
     let root = root_of(path, &raw)?;
     let servers = servers_object(&root, parent_path);
@@ -94,7 +89,10 @@ pub fn remove_in_file(path: &Path, parent_path: &[&str], key: &str) -> Result<bo
     let root = root_of(path, &raw)?;
     let mut obj = root.object_value_or_set();
     for k in parent_path {
-        let Some(next) = obj.get(k).and_then(|prop| prop.value().and_then(|v| v.as_object())) else {
+        let Some(next) = obj
+            .get(k)
+            .and_then(|prop| prop.value().and_then(|v| v.as_object()))
+        else {
             return Ok(false);
         };
         obj = next;
@@ -123,11 +121,9 @@ fn to_cst(value: &Value) -> CstInputValue {
         Value::Number(n) => CstInputValue::Number(n.to_string()),
         Value::String(s) => CstInputValue::String(s.clone()),
         Value::Array(items) => CstInputValue::Array(items.iter().map(to_cst).collect()),
-        Value::Object(map) => CstInputValue::Object(
-            map.iter()
-                .map(|(k, v)| (k.clone(), to_cst(v)))
-                .collect(),
-        ),
+        Value::Object(map) => {
+            CstInputValue::Object(map.iter().map(|(k, v)| (k.clone(), to_cst(v))).collect())
+        }
     }
 }
 
@@ -178,7 +174,13 @@ mod tests {
     fn missing_file_is_created_with_the_entry() {
         let tmp = tempfile::tempdir().unwrap();
         let path = tmp.path().join("nested").join("mcp.json");
-        upsert_in_file(&path, &["servers"], "demo", &serde_json::json!({"command": "x"})).unwrap();
+        upsert_in_file(
+            &path,
+            &["servers"],
+            "demo",
+            &serde_json::json!({"command": "x"}),
+        )
+        .unwrap();
         let map = read_root_object(&path).unwrap();
         assert!(map["servers"]["demo"]["command"] == serde_json::json!("x"));
     }

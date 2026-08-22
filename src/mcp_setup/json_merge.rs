@@ -68,7 +68,10 @@ impl EntryStyle {
 }
 
 /// The servers map, e.g. `["mcpServers"]` or `["mcp", "servers"]` (VS Code user settings).
-pub fn servers_at<'a>(root: &'a Map<String, Value>, path: &[&str]) -> Option<&'a Map<String, Value>> {
+pub fn servers_at<'a>(
+    root: &'a Map<String, Value>,
+    path: &[&str],
+) -> Option<&'a Map<String, Value>> {
     let mut cur = root;
     for (i, key) in path.iter().enumerate() {
         let next = cur.get(*key)?.as_object()?;
@@ -201,7 +204,8 @@ mod tests {
     /// The servers map may sit one level down (VS Code user settings: `mcp` → `servers`).
     #[test]
     fn nested_parent_path_is_walked() {
-        let root = serde_json::json!({"mcp": {"servers": {"srv": {"env": {INSTALL_ID_ENV_KEY: "id1"}}}}});
+        let root =
+            serde_json::json!({"mcp": {"servers": {"srv": {"env": {INSTALL_ID_ENV_KEY: "id1"}}}}});
         let root = root.as_object().unwrap().clone();
         let path = ["mcp", "servers"];
         assert!(servers_at(&root, &path).unwrap().contains_key("srv"));
@@ -242,7 +246,10 @@ mod tests {
 
     #[test]
     fn custom_key_detected_by_command_basename() {
-        let root = root_with("handwritten", serde_json::json!({"command": "/opt/bin/srv"}));
+        let root = root_with(
+            "handwritten",
+            serde_json::json!({"command": "/opt/bin/srv"}),
+        );
         assert_eq!(
             find_custom_mcp_server_key(&root, &["mcpServers"], "srv", "C:\\tools\\SRV").as_deref(),
             Some("handwritten")

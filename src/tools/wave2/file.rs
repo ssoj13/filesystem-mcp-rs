@@ -214,7 +214,8 @@ mod tests {
         // filesystem timestamp resolution.
         let past = SystemTime::now() - Duration::from_secs(3600);
         let f = fs::OpenOptions::new().write(true).open(&file).unwrap();
-        f.set_times(std::fs::FileTimes::new().set_modified(past)).unwrap();
+        f.set_times(std::fs::FileTimes::new().set_modified(past))
+            .unwrap();
         drop(f);
         let before = fs::metadata(&file).unwrap().modified().unwrap();
 

@@ -11,7 +11,9 @@ use ignore::{DirEntry, WalkBuilder, WalkState};
 
 use crate::core::allowed::AllowedDirs;
 use crate::core::path::resolve_validated_path;
-use crate::tools::grep::{GrepCount, GrepEngine, GrepMatch, GrepOutputMode, GrepParams, GrepResult};
+use crate::tools::grep::{
+    GrepCount, GrepEngine, GrepMatch, GrepOutputMode, GrepParams, GrepResult,
+};
 
 #[derive(Debug, Clone, Default)]
 pub struct GrepStats {
@@ -151,7 +153,12 @@ impl Shared {
             let grant = want.min(self.max_matches - current);
             if self
                 .total_matches
-                .compare_exchange_weak(current, current + grant, Ordering::Relaxed, Ordering::Relaxed)
+                .compare_exchange_weak(
+                    current,
+                    current + grant,
+                    Ordering::Relaxed,
+                    Ordering::Relaxed,
+                )
                 .is_ok()
             {
                 if current + grant >= self.max_matches {
@@ -183,7 +190,10 @@ impl Shared {
         // matchesFound reflects the real number of matches (0 = unlimited).
         let granted = self.reserve_counts(count);
         if granted > 0 {
-            self.counts.lock().unwrap().push(GrepCount { path, count: granted });
+            self.counts.lock().unwrap().push(GrepCount {
+                path,
+                count: granted,
+            });
         }
     }
 
@@ -656,8 +666,7 @@ fn fancy_grep_blocking(
     } else {
         pattern = format!("(?m){pattern}");
     }
-    let matcher = fancy_regex::Regex::new(&pattern)
-        .context("Invalid fancy-regex pattern")?;
+    let matcher = fancy_regex::Regex::new(&pattern).context("Invalid fancy-regex pattern")?;
 
     let mut walk_builder = WalkBuilder::new(&root_path);
     walk_builder
@@ -753,7 +762,11 @@ fn fancy_grep_blocking(
                     Ok(Some(m)) => {
                         let line_idx = line_index_for_offset(&line_starts, m.start());
                         hits.push(line_idx);
-                        cursor = if m.end() == m.start() { m.end() + 1 } else { m.end() };
+                        cursor = if m.end() == m.start() {
+                            m.end() + 1
+                        } else {
+                            m.end()
+                        };
                     }
                     Ok(None) => break,
                     Err(e) => {
@@ -777,10 +790,7 @@ fn fancy_grep_blocking(
             } else {
                 // De-dup line indices but preserve order.
                 let mut seen = std::collections::HashSet::new();
-                hits.iter()
-                    .copied()
-                    .filter(|i| seen.insert(*i))
-                    .collect()
+                hits.iter().copied().filter(|i| seen.insert(*i)).collect()
             };
             matched_lines.sort_unstable();
 
@@ -799,14 +809,10 @@ fn fancy_grep_blocking(
                             .saturating_add(ctx_after)
                             .min(lines.len());
                         let strip = |s: &&str| s.trim_end_matches(['\r', '\n']).to_string();
-                        let before_context: Vec<String> = lines[before_start..*line_idx]
-                            .iter()
-                            .map(strip)
-                            .collect();
-                        let after_context: Vec<String> = lines[after_start..after_end]
-                            .iter()
-                            .map(strip)
-                            .collect();
+                        let before_context: Vec<String> =
+                            lines[before_start..*line_idx].iter().map(strip).collect();
+                        let after_context: Vec<String> =
+                            lines[after_start..after_end].iter().map(strip).collect();
                         let line = strip(&lines[*line_idx]);
                         shared.matches.lock().unwrap().push(GrepMatch {
                             path: path.clone(),
@@ -990,7 +996,9 @@ mod tests {
         params.multiline = true;
         params.file_pattern = Some("*.rs".into());
 
-        let res = grep_files_fast(params, &allowed, false, None).await.unwrap();
+        let res = grep_files_fast(params, &allowed, false, None)
+            .await
+            .unwrap();
         match res.result {
             GrepResult::Matches(m) => {
                 assert!(!m.is_empty(), "multiline pattern should match across lines");
@@ -1010,7 +1018,10 @@ mod tests {
         let params = base_params(&root.to_string_lossy(), r"hello\nworld");
 
         let res = grep_files_fast(params, &allowed, false, None).await;
-        assert!(res.is_err(), "\\n in pattern should error when multiline=false");
+        assert!(
+            res.is_err(),
+            "\\n in pattern should error when multiline=false"
+        );
     }
 
     /// rg `-F` equivalent — special regex chars treated as literals.
@@ -1024,7 +1035,9 @@ mod tests {
         let mut params = base_params(&root.to_string_lossy(), "$9.99");
         params.fixed_strings = true;
 
-        let res = grep_files_fast(params, &allowed, false, None).await.unwrap();
+        let res = grep_files_fast(params, &allowed, false, None)
+            .await
+            .unwrap();
         match res.result {
             GrepResult::Matches(m) => {
                 assert_eq!(m.len(), 1);
@@ -1049,11 +1062,18 @@ mod tests {
         let mut params = base_params(&root.to_string_lossy(), "foo");
         params.whole_word = true;
 
-        let res = grep_files_fast(params, &allowed, false, None).await.unwrap();
+        let res = grep_files_fast(params, &allowed, false, None)
+            .await
+            .unwrap();
         match res.result {
             GrepResult::Matches(m) => {
                 // "foo" and "  foo  " match; "foobar", "barfoo", "foo_baz" do not.
-                assert_eq!(m.len(), 2, "got: {:?}", m.iter().map(|x| &x.line).collect::<Vec<_>>());
+                assert_eq!(
+                    m.len(),
+                    2,
+                    "got: {:?}",
+                    m.iter().map(|x| &x.line).collect::<Vec<_>>()
+                );
             }
             _ => panic!("unexpected variant"),
         }
@@ -1076,11 +1096,18 @@ mod tests {
         params.engine = GrepEngine::Fancy;
         params.file_pattern = Some("*.rs".into());
 
-        let res = grep_files_fast(params, &allowed, false, None).await.unwrap();
+        let res = grep_files_fast(params, &allowed, false, None)
+            .await
+            .unwrap();
         match res.result {
             GrepResult::Matches(m) => {
                 // "hello hello" + "repeat repeat" — two matched lines.
-                assert_eq!(m.len(), 2, "got {:?}", m.iter().map(|x| &x.line).collect::<Vec<_>>());
+                assert_eq!(
+                    m.len(),
+                    2,
+                    "got {:?}",
+                    m.iter().map(|x| &x.line).collect::<Vec<_>>()
+                );
             }
             _ => panic!("unexpected variant"),
         }
@@ -1117,7 +1144,9 @@ mod tests {
             params.context_after = 1;
             params.file_pattern = Some("*.txt".into());
 
-            let res = grep_files_fast(params, &allowed, false, None).await.unwrap();
+            let res = grep_files_fast(params, &allowed, false, None)
+                .await
+                .unwrap();
             let matches = match res.result {
                 GrepResult::Matches(m) => m,
                 _ => panic!("unexpected variant"),
@@ -1156,7 +1185,9 @@ mod tests {
         let mut params = base_params(&root.to_string_lossy(), "FINDME");
         params.max_depth = 1; // only root level
 
-        let res = grep_files_fast(params, &allowed, false, None).await.unwrap();
+        let res = grep_files_fast(params, &allowed, false, None)
+            .await
+            .unwrap();
         match res.result {
             GrepResult::Matches(m) => {
                 assert_eq!(m.len(), 1, "only top.txt should be matched");
@@ -1208,11 +1239,7 @@ mod tests {
         let root = temp.path();
         // 3 files, 2 matching lines each => 6 matches total.
         for i in 0..3 {
-            std::fs::write(
-                root.join(format!("f{i}.txt")),
-                "HIT one\nmiss\nHIT two\n",
-            )
-            .unwrap();
+            std::fs::write(root.join(format!("f{i}.txt")), "HIT one\nmiss\nHIT two\n").unwrap();
         }
         let allowed = AllowedDirs::new(vec![root.to_path_buf()]);
 
@@ -1221,7 +1248,9 @@ mod tests {
             let mut params = base_params(&root.to_string_lossy(), "HIT");
             params.output_mode = GrepOutputMode::CountOnly;
             params.file_pattern = Some("*.txt".into());
-            let res = grep_files_fast(params, &allowed, false, None).await.unwrap();
+            let res = grep_files_fast(params, &allowed, false, None)
+                .await
+                .unwrap();
             let total: usize = match res.result {
                 GrepResult::Counts(c) => c.iter().map(|g| g.count).sum(),
                 _ => panic!("unexpected variant"),
@@ -1237,7 +1266,9 @@ mod tests {
             params.output_mode = GrepOutputMode::CountOnly;
             params.file_pattern = Some("*.txt".into());
             params.max_matches = 4;
-            let res = grep_files_fast(params, &allowed, false, None).await.unwrap();
+            let res = grep_files_fast(params, &allowed, false, None)
+                .await
+                .unwrap();
             let total: usize = match res.result {
                 GrepResult::Counts(c) => c.iter().map(|g| g.count).sum(),
                 _ => panic!("unexpected variant"),
@@ -1267,9 +1298,14 @@ mod tests {
         for engine in [GrepEngine::Regex, GrepEngine::Fancy] {
             let mut params = base_params(&root.to_string_lossy(), "FINDME");
             params.engine = engine;
-            let res = grep_files_fast(params, &allowed, false, None).await.unwrap();
+            let res = grep_files_fast(params, &allowed, false, None)
+                .await
+                .unwrap();
             let stats = res.stats;
-            assert_eq!(stats.files_seen, 2, "engine {engine:?}: both files are candidates");
+            assert_eq!(
+                stats.files_seen, 2,
+                "engine {engine:?}: both files are candidates"
+            );
             assert_eq!(
                 stats.files_searched, 1,
                 "engine {engine:?}: only the text file is actually searched"
@@ -1278,7 +1314,10 @@ mod tests {
                 stats.bytes_searched, a_len,
                 "engine {engine:?}: bytes_searched excludes the binary file"
             );
-            assert_eq!(stats.skipped_binary, 1, "engine {engine:?}: binary file skipped");
+            assert_eq!(
+                stats.skipped_binary, 1,
+                "engine {engine:?}: binary file skipped"
+            );
         }
     }
 }

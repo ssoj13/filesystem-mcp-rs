@@ -9,7 +9,7 @@ use crate::mcp_setup::error::{Result, SetupError};
 use crate::mcp_setup::hints::{self, ClientDoc};
 use crate::mcp_setup::json_merge::{
     EntryStyle, ensure_key_available_for_apply, find_custom_mcp_server_key, is_ours,
-    mcp_install_id_from_value, servers_at,
+    mcp_command_from_value, mcp_install_id_from_value, servers_at,
 };
 use crate::mcp_setup::jsonc::{read_root_object, remove_in_file, upsert_in_file};
 use crate::mcp_setup::manifest::{InstallManifest, MANIFEST_SCHEMA};
@@ -56,7 +56,12 @@ impl JsonClient {
         })
     }
 
-    fn manifest_path(&self, ctx: &SetupContext, scope: &Scope, plan: &InstallPlan) -> Result<PathBuf> {
+    fn manifest_path(
+        &self,
+        ctx: &SetupContext,
+        scope: &Scope,
+        plan: &InstallPlan,
+    ) -> Result<PathBuf> {
         Ok(InstallManifest::manifest_path_for(
             ctx.home_dir(),
             self.id,
@@ -219,8 +224,7 @@ impl McpClient for JsonClient {
         let settings_path = self.config_path(scope, home)?;
         let manifest_path = self.manifest_path(ctx, scope, plan)?;
         let scope_slug = scope.slug()?;
-        let manifest =
-            InstallManifest::load_for(home, self.id, &scope_slug, &plan.mcp_server_key)?;
+        let manifest = InstallManifest::load_for(home, self.id, &scope_slug, &plan.mcp_server_key)?;
 
         if let Some(ref m) = manifest {
             m.ensure_matches(&settings_path, plan)?;
@@ -321,6 +325,13 @@ impl McpClient for JsonClient {
             .is_some_and(|id| is_ours(id, &plan.mcp_server_key));
         report.found_install_id = found.clone();
 
+        // Read back the command the config actually names and check it still launches. An entry
+        // can carry our key and our install id yet point at a binary that no longer exists.
+        if let Some(cmd) = entry.and_then(mcp_command_from_value) {
+            report.stored_command = Some(cmd.to_string());
+            report.command_resolves = Some(crate::mcp_setup::host::command_resolves(cmd));
+        }
+
         if !report.config_entry
             && let Some(custom_key) = find_custom_mcp_server_key(
                 &root,
@@ -342,16 +353,17 @@ impl McpClient for JsonClient {
                 (!manifest).then(|| "config entry present, manifest missing".to_string())
             }
             // Ours, but written by another version of this server: install will upgrade it.
-            Some(id) if is_ours(&id, &plan.mcp_server_key) => {
-                Some(format!("installed by {id:?} (this build is {:?})", plan.install_id))
-            }
+            Some(id) if is_ours(&id, &plan.mcp_server_key) => Some(format!(
+                "installed by {id:?} (this build is {:?})",
+                plan.install_id
+            )),
             Some(id) => Some(format!(
                 "key exists but is owned by {id:?}, not by {:?}",
                 plan.install_id
             )),
-            None if entry.is_some() => {
-                Some(format!("key exists but {INSTALL_ID_ENV_KEY} marker is missing"))
-            }
+            None if entry.is_some() => Some(format!(
+                "key exists but {INSTALL_ID_ENV_KEY} marker is missing"
+            )),
             None if manifest => Some("manifest present, config entry missing".to_string()),
             None => None,
         };

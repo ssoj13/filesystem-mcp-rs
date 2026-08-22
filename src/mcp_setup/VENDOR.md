@@ -3,8 +3,7 @@
 This directory is a **verbatim copy** of the private crate
 [`ssoj13/mcp-setup-rs`](https://github.com/ssoj13/mcp-setup-rs), pinned at:
 
-    commit  5b802d0fe8207e90fd9427dd514c14ed9b1711b9   ("fix: agent configs are JSONC — read them
-                                                         tolerantly, write them through the CST")
+    commit  aebe269f15cdd5c3b3ea366403a36e2bfbb5e9eb   ("style: rustfmt the tree")
     origin  ssh://git@github.com/ssoj13/mcp-setup-rs.git   (branch main, PRIVATE)
 
 ## Why vendored instead of a dependency

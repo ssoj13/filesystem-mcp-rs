@@ -563,9 +563,7 @@ where
         serde_json::Value::String(s) => {
             let trimmed = s.trim();
             if trimmed.is_empty() {
-                return Err(DeError::custom(
-                    "expected JSON object, got empty string",
-                ));
+                return Err(DeError::custom("expected JSON object, got empty string"));
             }
             let parsed = parse_json_from_string(trimmed).ok_or_else(|| {
                 DeError::custom(format!(
@@ -668,7 +666,9 @@ fn coerce_json_value_leaf(value: serde_json::Value) -> serde_json::Value {
 }
 
 /// Like [`json_value_or_string`] for `Option<serde_json::Value>`.
-pub fn option_json_value_or_string<'de, D>(deserializer: D) -> Result<Option<serde_json::Value>, D::Error>
+pub fn option_json_value_or_string<'de, D>(
+    deserializer: D,
+) -> Result<Option<serde_json::Value>, D::Error>
 where
     D: Deserializer<'de>,
 {

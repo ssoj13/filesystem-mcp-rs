@@ -17,8 +17,8 @@ use rmcp::{
     ErrorData as McpError, RoleServer, ServerHandler,
     handler::server::{router::tool::ToolRouter, wrapper::Parameters},
     model::{
-        CallToolResult, ContentBlock, Implementation, ProgressNotificationParam,
-        RequestMetaObject, ServerCapabilities, ServerInfo,
+        CallToolResult, ContentBlock, Implementation, ProgressNotificationParam, RequestMetaObject,
+        ServerCapabilities, ServerInfo,
     },
     service::Peer,
     tool, tool_handler, tool_router,
@@ -596,11 +596,16 @@ impl LlmMcpServer {
                         partial,
                     } => {
                         progress_count += 1.0;
-                        notify_progress(client, &progress_token, progress_count, json!({
-                            "type": "content_block_delta",
-                            "index": block_index,
-                            "delta": {"type": "input_json_delta", "partial_json": partial}
-                        }))
+                        notify_progress(
+                            client,
+                            &progress_token,
+                            progress_count,
+                            json!({
+                                "type": "content_block_delta",
+                                "index": block_index,
+                                "delta": {"type": "input_json_delta", "partial_json": partial}
+                            }),
+                        )
                         .await;
                     }
                 }
@@ -704,10 +709,7 @@ enum SseEvent {
         name: String,
     },
     /// A fragment of a tool call's `arguments` JSON string.
-    ToolArgs {
-        block_index: usize,
-        partial: String,
-    },
+    ToolArgs { block_index: usize, partial: String },
 }
 
 /// Per-tool-call accumulation state, keyed by the OpenAI
