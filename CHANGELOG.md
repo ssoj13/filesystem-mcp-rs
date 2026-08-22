@@ -2,6 +2,33 @@
 
 ## [Unreleased]
 
+### Vendored `mcp-setup-rs` resync — dangling MCP entries are now detected, and no longer created
+
+- **`install` registers the installed binary, not the running one.** `HostSpec::from_current_exe`
+  used to record whatever executable happened to be running, so a server registering itself from
+  `target/release` baked a build-tree path into every agent config — a path that dies on the next
+  `cargo clean`, branch switch or repo move. Resolution is now `$CARGO_HOME/bin` → `PATH` → the
+  running binary (the last only as a fallback for a checkout with nothing installed).
+- **`status` reports `broken` for an entry whose command is gone.** `StatusReport` gained
+  `stored_command` and `command_resolves`; an entry we own that names a binary which cannot be
+  launched is no longer indistinguishable from a healthy one. This was found live: a
+  `~/.claude.json` had pointed at a `target/release` path for weeks after the repo moved, and
+  `status` called it `installed` the whole time because the key and the install id were both
+  present and nothing ever checked the path. `install` already rewrites a differing entry, so it
+  is also the repair.
+- **`normalize_path` strips Windows' `\?\` verbatim prefix.** Live configs carried
+  `\?\C:\Users\…\*.exe`. Legal for `CreateProcess`, but not universally understood by the Node /
+  Python launchers that actually read these files.
+- **`cli::run` returns `Outcome::{AllOk, SomeFailed}` instead of raising on failed targets.** A
+  broken or unreachable client is a result the table already reported; raising it made every host
+  print an error chain — and, under `RUST_BACKTRACE=1`, a full Rust backtrace — on top of a
+  perfectly readable table. Hosts now turn the outcome into an exit code. *Breaking for
+  embedders:* `run` returns `CliResult<Outcome>`, not `CliResult<()>`.
+- PATH lookup walks `PATH` directly (honouring `PATHEXT` on Windows) rather than shelling out to
+  `where` / `which`: no subprocess, nothing locale-dependent to parse.
+- Pinned at upstream `aebe269`; see the vendored `VENDOR.md`. Upstream is now rustfmt-clean, so
+  this tree was formatted to match — future resyncs no longer land as formatting diffs.
+
 ### `install` defaults to the whole disk when no directories are given
 
 - **`filesystem-mcp-rs install` with no trailing `DIR` arguments now writes `/` (Unix) or every
