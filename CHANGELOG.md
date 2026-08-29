@@ -2,6 +2,18 @@
 
 ## [Unreleased]
 
+### Content Plane: tolerant `content` parsing, actionable errors, 64 KiB inline (BUG.md resolution)
+
+- **`content` accepts bare strings** (write_file / edit_file sides / run_command stdin /
+  write_binary): a bare string becomes inline text; a `{`-prefixed string is unwrapped as a
+  double-encoded ContentRef object. Canonical object form unchanged. Closes the
+  `expected internally tagged enum ContentRef` failure mode (BUG.md variant B).
+- **Deserialization errors now carry position/field detail**: mangled `{`-strings surface
+  serde_json's `at line L column C`; invalid objects name the missing field; wrong shapes name
+  the JSON type received.
+- **Inline/chunk limits raised 8 → 64 KiB** — real files (8.4 KB) no longer force blob staging.
+- Regression tests for all tolerance paths in `content_plane.rs`.
+
 ### Computer control behind feature flags (`computer-tools` umbrella + `ctl-*` domains)
 
 - **New self-contained module `src/tools/computer/`** — mouse (click/drag/scroll),

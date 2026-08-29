@@ -22,9 +22,9 @@ Every MCP tool invocation must pass top-level **`server`** and **`toolName`** (r
 
 ### Content Plane (large payloads)
 Do **not** put large source into JSON tool args. Use:
-1. `blob_begin` → `blob_append` (≤8 KiB chunks) → `blob_finalize` → `{kind:"blob", id}`
+1. `blob_begin` → `blob_append` (≤64 KiB chunks) → `blob_finalize` → `{kind:"blob", id}`
 2. Or `{kind:"path", path}` for an allowlisted file already on disk
-3. Small text only: `{kind:"inline", text}` (hard max 8 KiB)
+3. Small text only: `{kind:"inline", text}` (hard max 64 KiB)
 
 `write_file` / `edit_file` / `run_command.stdin` / `write_binary` all take **ContentRef** objects — never bare mega-strings. Never patch large files via `python -c`.
 

@@ -18,10 +18,15 @@ use thiserror::Error;
 use uuid::Uuid;
 
 /// Hard max for `inline` / `base64` ContentRef payloads (bytes after decode).
-pub const INLINE_MAX_BYTES: usize = 8 * 1024;
+/// Max inline content carried in a single tool argument (write_file content,
+/// edit snippets, stdin). 64 KiB keeps single-argument payloads bounded (no
+/// megabyte smuggling) while not forcing blob staging for ordinary sources —
+/// the old 8 KiB tripped real files (BUG.md follow-up, 2026-08-29).
+pub const INLINE_MAX_BYTES: usize = 64 * 1024;
 
-/// Hard max per `blob_append` chunk.
-pub const CHUNK_MAX_BYTES: usize = 8 * 1024;
+/// Hard max per `blob_append` chunk (kept equal to [`INLINE_MAX_BYTES`] so
+/// staging large files needs the same number of calls as inline would).
+pub const CHUNK_MAX_BYTES: usize = 64 * 1024;
 
 /// How resolved bytes will be used.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -32,8 +37,10 @@ pub enum ContentMode {
     Binary,
 }
 
-/// Tagged content reference — object only (no bare-string dual form).
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+/// Tagged content reference — canonical form is an object; a bare string is
+/// tolerated as inline text (BUG.md fix 1: hosts that double-encode the
+/// argument would otherwise die at deserialization).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, JsonSchema)]
 #[serde(tag = "kind", rename_all = "camelCase")]
 pub enum ContentRef {
     /// UTF-8 text, max [`INLINE_MAX_BYTES`].
@@ -44,6 +51,88 @@ pub enum ContentRef {
     Path { path: String },
     /// Finalized content-addressed blob id (sha256 hex).
     Blob { id: String },
+}
+
+/// Object-shape mirror used by the tolerant [`ContentRef`] deserializer.
+/// A separate type avoids recursion: the public enum's custom Deserialize
+/// dispatches on the incoming JSON shape, then delegates here for objects.
+#[derive(serde::Deserialize)]
+#[serde(tag = "kind", rename_all = "camelCase")]
+enum ContentRefObject {
+    Inline { text: String },
+    Base64 { data: String },
+    Path { path: String },
+    Blob { id: String },
+}
+
+impl From<ContentRefObject> for ContentRef {
+    fn from(o: ContentRefObject) -> Self {
+        match o {
+            ContentRefObject::Inline { text } => Self::Inline { text },
+            ContentRefObject::Base64 { data } => Self::Base64 { data },
+            ContentRefObject::Path { path } => Self::Path { path },
+            ContentRefObject::Blob { id } => Self::Blob { id },
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for ContentRef {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let value = serde_json::Value::deserialize(deserializer)?;
+        Self::tolerant_from_value(value).map_err(DeError::custom)
+    }
+}
+
+impl ContentRef {
+    /// Tolerant parse (BUG.md): canonical object OR string forms.
+    ///
+    /// - object → canonical tagged parse (unknown fields ignored, as before)
+    /// - string starting with `{` → must parse as a JSON object holding a
+    ///   ContentRef (double-encoded form); failures are LOUD with line/column
+    ///   from serde_json (BUG.md fix 2) — a mangled encoding must not silently
+    ///   become file content
+    /// - any other string → inline text
+    pub fn tolerant_from_value(value: serde_json::Value) -> Result<Self, String> {
+        match value {
+            serde_json::Value::Object(_) => {
+                let o = ContentRefObject::deserialize(value)
+                    .map_err(|e| format!("content: invalid ContentRef object: {e}"))?;
+                Ok(o.into())
+            }
+            serde_json::Value::String(s) => Self::tolerant_from_str(&s),
+            other => Err(format!(
+                "content: expected object {{kind:inline|base64|path|blob}} or string, got {}",
+                json_type_name(&other)
+            )),
+        }
+    }
+
+    /// String-form tolerance: unwrap a double-encoded ContentRef, else inline.
+    pub fn tolerant_from_str(s: &str) -> Result<Self, String> {
+        let trimmed = s.trim();
+        if trimmed.starts_with('{') {
+            // Looks like a (possibly double-encoded) ContentRef. serde_json's
+            // error carries "at line L column C" — the actionable detail the
+            // old opaque message lacked.
+            let parsed: serde_json::Value = serde_json::from_str(trimmed)
+                .map_err(|e| format!("content: string looks like a JSON object but failed to parse: {e} (fix escaping or stage via blob)"))?;
+            let o = ContentRefObject::deserialize(parsed)
+                .map_err(|e| format!("content: string holds JSON but not a ContentRef object: {e}"))?;
+            return Ok(o.into());
+        }
+        Ok(ContentRef::Inline { text: s.to_string() })
+    }
+}
+
+fn json_type_name(v: &serde_json::Value) -> &'static str {
+    match v {
+        serde_json::Value::Null => "null",
+        serde_json::Value::Bool(_) => "bool",
+        serde_json::Value::Number(_) => "number",
+        serde_json::Value::Array(_) => "array",
+        serde_json::Value::Object(_) => "object",
+        serde_json::Value::String(_) => "string",
+    }
 }
 
 /// Search/replace snippet for `edit_file` / `bulk_edits`.
@@ -420,6 +509,52 @@ pub fn sha256_hex(bytes: &[u8]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// BUG.md fix 1: bare string → inline text.
+    #[test]
+    fn tolerant_bare_string_is_inline() {
+        let r: ContentRef = serde_json::from_str("\"plain text content\"").unwrap();
+        assert_eq!(r, ContentRef::Inline { text: "plain text content".into() });
+    }
+
+    /// BUG.md fix 1: double-encoded ContentRef object is unwrapped.
+    #[test]
+    fn tolerant_double_encoded_object() {
+        let inner = serde_json::json!({ "kind": "inline", "text": "hi" });
+        let wire = serde_json::Value::String(inner.to_string());
+        let r: ContentRef = serde_json::from_value(wire).unwrap();
+        assert_eq!(r, ContentRef::Inline { text: "hi".into() });
+    }
+
+    /// BUG.md fix 1: canonical object form unchanged.
+    #[test]
+    fn tolerant_object_passthrough() {
+        let r: ContentRef =
+            serde_json::from_str("{\"kind\":\"blob\",\"id\":\"abc\"}").unwrap();
+        assert_eq!(r, ContentRef::Blob { id: "abc".into() });
+    }
+
+    /// BUG.md fix 2: malformed `{`-string fails LOUDLY with serde line/column.
+    #[test]
+    fn tolerant_mangled_object_is_loud() {
+        let err = ContentRef::tolerant_from_str("{kind: inline").unwrap_err();
+        assert!(err.contains("line"), "error must carry line/column: {err}");
+    }
+
+    /// Non-string non-object shapes stay a clear error.
+    #[test]
+    fn tolerant_rejects_other_shapes() {
+        assert!(ContentRef::tolerant_from_value(serde_json::json!(42)).is_err());
+        assert!(ContentRef::tolerant_from_value(serde_json::json!(null)).is_err());
+    }
+
+    /// A JSON object that is NOT a ContentRef fails with a field-level error.
+    #[test]
+    fn tolerant_wrong_object_shape_is_loud() {
+        let err = ContentRef::tolerant_from_value(serde_json::json!({ "kind": "inline" }))
+            .unwrap_err();
+        assert!(err.contains("text"), "error must name the missing field: {err}");
+    }
 
     fn rt() -> tokio::runtime::Runtime {
         tokio::runtime::Builder::new_current_thread()

@@ -57,9 +57,29 @@ questions for whoever owns the MCP-side transport:
   but this is speculative from the caller side and needs confirming against the actual host/client
   code, which is outside this repo.
 
-## Not fixed
+## RESOLVED server-side (2026-08-29) — tolerant ContentRef + actionable errors
 
-This file only documents the symptom and the caller-side hypothesis; no code in this repo was
-changed. If investigation confirms the failure is genuinely reproducible from a conforming MCP
-client (i.e. not just this one agent's serialization slip), re-open as a real parsing bug with a
-minimal repro payload attached.
+Two variants hit in production sessions since the original report:
+
+- **Variant A (unreachable server-side):** the harness substitutes the `content` argument as raw
+  unescaped text into the outer JSON envelope — the transport fails before the server sees anything.
+  Unfixable here; retry-identical-payload or use the built-in Write tool.
+- **Variant B (fixed):** `content` arrives as a bare string — either plain text, or a JSON-encoded
+  string of the ContentRef object (`"{\"kind\":\"inline\",...}"`). Both previously died with the
+  opaque `expected internally tagged enum ContentRef`.
+
+Server changes (`core/content_plane.rs`):
+
+1. **Tolerant `ContentRef` deserialization** — a bare string is accepted as inline text; a
+   `{`-prefixed string is parsed as a (double-encoded) ContentRef object and unwrapped. Canonical
+   object form unchanged. Cost: writing literal content that starts with `{` and happens to be a
+   valid ContentRef object requires the canonical object form.
+2. **Actionable errors with line/column** — a `{`-prefixed string that fails JSON parse surfaces
+   serde_json's `at line L column C` (the old message had none); wrong object shapes name the
+   missing field (`content: invalid ContentRef object: missing field \`text\``); non-string
+   non-object shapes report the actual JSON type.
+3. **Inline limit raised 8 → 64 KiB** (`INLINE_MAX_BYTES`, `CHUNK_MAX_BYTES`): real files
+   (PLAN2.md, 8.4 KB) tripped the old limit and forced blob staging for no safety gain.
+
+Note: the `InputValidationError ... You sent (first 200 of ...)` header quoted above is emitted by
+the calling host (Claude Code), not this server — its formatting is upstream and out of scope.

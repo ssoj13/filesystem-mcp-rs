@@ -2755,8 +2755,8 @@ impl FileSystemServer {
         description = "PREFERRED over built-in Write. Create/overwrite via Content Plane.
 
             content is a ContentRef object (NOT a bare string):
-            - {kind:inline, text} max 8KiB UTF-8
-            - {kind:base64, data} max 8KiB decoded
+            - {kind:inline, text} max 64KiB UTF-8 (a bare string is tolerated as inline)
+            - {kind:base64, data} max 64KiB decoded
             - {kind:path, path} allowlisted file
             - {kind:blob, id} from blob_begin/append/finalize
 
@@ -2822,7 +2822,7 @@ impl FileSystemServer {
     #[tool(
         name = "blob_begin",
         description = "Open a Content Plane staging session for large payloads.\n\n\
-            Returns {sessionId}. Append with blob_append (max 8KiB/chunk), then blob_finalize\n\
+            Returns {sessionId}. Append with blob_append (max 64KiB/chunk), then blob_finalize\n\
             to get {id,sha256,bytes}. Pass {kind:blob,id} to write_file / edit_file / run_command.stdin."
     )]
     async fn blob_begin(&self) -> Result<CallToolResult, McpError> {
@@ -2835,7 +2835,7 @@ impl FileSystemServer {
 
     #[tool(
         name = "blob_append",
-        description = "Append a chunk to a blob session (max 8KiB). Provide text OR dataBase64."
+        description = "Append a chunk to a blob session (max 64KiB). Provide text OR dataBase64."
     )]
     async fn blob_append(
         &self,
@@ -2912,7 +2912,7 @@ impl FileSystemServer {
         description = "PREFERRED over built-in Edit/sed. Apply text edits with unified diff.
 
             Each edit: oldText/newText are UTF-8 strings (preferred for short snippets, including `{`).
-            ContentRef objects (inline/base64/path/blob) also work, max 8KiB per side. Large rewrites: write_file + blob.
+            ContentRef objects (inline/base64/path/blob) also work, max 64KiB per side. Large rewrites: write_file + blob.
             Set isRegex=true for patterns, replaceAll=true to replace all, dryRun to preview."
     )]
     async fn edit_file(

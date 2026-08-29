@@ -2059,7 +2059,7 @@ async fn content_plane_inline_too_large() -> Result<()> {
     let tmp = TempDir::new()?;
     let srv = start_server(tmp.path()).await?;
     let file_path = tmp.path().join("big.txt");
-    let big = "x".repeat(8 * 1024 + 1);
+    let big = "x".repeat(64 * 1024 + 1); // INLINE_MAX_BYTES + 1 (now 64 KiB)
 
     let res = srv
         .call_tool(
