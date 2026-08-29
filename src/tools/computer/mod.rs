@@ -18,8 +18,9 @@
 //! feature; every input tool re-checks it per call. Coordinates are
 //! virtual-screen physical px (multi-monitor, negative origins allowed).
 
-// Input core: gate, mouse/keyboard, windows, macros, waits.
-#[cfg(feature = "ctl-input")]
+// Input core: gate, mouse/keyboard, windows, macros, waits. On non-Windows
+// builds these compile against the driver fallback (loud unsupported errors).
+#[cfg(all(windows, feature = "ctl-input"))]
 pub mod input;
 #[cfg(any(
     feature = "ctl-input",
@@ -29,12 +30,22 @@ pub mod input;
     feature = "ctl-clip-files"
 ))]
 pub mod safety;
-#[cfg(feature = "ctl-input")]
+#[cfg(all(windows, feature = "ctl-input"))]
 pub mod steps;
-#[cfg(feature = "ctl-input")]
+#[cfg(all(windows, feature = "ctl-input"))]
 pub mod wait;
-#[cfg(any(feature = "ctl-input", feature = "ctl-uia", feature = "ctl-ocr"))]
+#[cfg(all(windows, any(feature = "ctl-input", feature = "ctl-uia", feature = "ctl-ocr")))]
 pub mod win;
+
+// Platform driver: OS seam — portable core calls only this layer.
+#[cfg(any(
+    feature = "ctl-input",
+    feature = "ctl-uia",
+    feature = "ctl-ocr",
+    feature = "ctl-notify",
+    feature = "ctl-clip-files"
+))]
+pub mod driver;
 
 // Passive capture extensions (cursor-anchor, dhash) — needs xcap/image.
 #[cfg(any(feature = "ctl-input", feature = "ctl-ocr"))]

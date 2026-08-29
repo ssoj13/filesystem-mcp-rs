@@ -3,7 +3,6 @@
 //! Enumeration runs top-to-bottom in z-order (EnumWindows order), which becomes
 //! our `z` field. `id` is the HWND (xcap parity: `Window::id() == hwnd`).
 
-use serde::Serialize;
 use windows::core::BOOL;
 use windows::Win32::Foundation::{CloseHandle, HWND, LPARAM, RECT, WPARAM};
 use windows::Win32::Graphics::Dwm::{DwmGetWindowAttribute, DWMWA_CLOAKED};
@@ -22,42 +21,8 @@ use windows::Win32::UI::WindowsAndMessaging::{
     SW_MAXIMIZE, SW_MINIMIZE, SW_RESTORE, SWP_NOACTIVATE, SWP_NOZORDER, WM_CLOSE,
 };
 
+pub use super::driver::{LayoutEntry, WinInfo, WinQuery, WinTarget};
 use super::safety::CtlError;
-
-/// One visible top-level window (agent-facing shape).
-#[derive(Debug, Clone, Serialize)]
-pub struct WinInfo {
-    pub id: u32,
-    pub title: String,
-    pub exe: String,
-    pub pid: u32,
-    pub x: i32,
-    pub y: i32,
-    pub w: i32,
-    pub h: i32,
-    pub z: i32,
-    pub active: bool,
-    pub minimized: bool,
-    pub maximized: bool,
-}
-
-/// Filter for [`list_windows`] (case-insensitive substrings).
-#[derive(Debug, Clone, Default, serde::Deserialize, schemars::JsonSchema)]
-pub struct WinQuery {
-    pub title: Option<String>,
-    pub exe: Option<String>,
-}
-
-/// How to address a window: {"id":n} | {"title":s} | {"exe":s} — untagged, so the
-/// same shape works for MCP args, macro steps and capture targets (dedup: the
-/// srv layer reuses this type instead of its own wrapper).
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, schemars::JsonSchema)]
-#[serde(untagged)]
-pub enum WinTarget {
-    Id { id: u32 },
-    Title { title: String },
-    Exe { exe: String },
-}
 
 /// Virtual screen metrics: (x, y, width, height) in physical pixels.
 pub fn virtual_screen() -> (i32, i32, i32, i32) {
@@ -360,18 +325,6 @@ pub fn close(hwnd: HWND) -> anyhow::Result<()> {
         "window {} still alive after WM_CLOSE (app may show a save prompt)",
         hwnd.0 as u32
     ))
-}
-
-/// One saved window position (layout snapshot entry).
-#[derive(Debug, Clone, Serialize, serde::Deserialize)]
-pub struct LayoutEntry {
-    pub id: u32,
-    pub title: String,
-    pub exe: String,
-    pub x: i32,
-    pub y: i32,
-    pub w: i32,
-    pub h: i32,
 }
 
 /// Snapshot every visible top-level window into `<data>/computer-mcp-rs/layouts/<name>.json`.

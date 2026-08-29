@@ -96,7 +96,7 @@ pub fn capture(target: CapTarget) -> anyhow::Result<CapResult> {
         }
         CapTarget::Rect { x, y, w, h } => Rect::new(x, y, w, h),
         CapTarget::Cursor { size } => {
-            let (cx, cy) = cursor().ok_or_else(|| anyhow::anyhow!("no cursor position"))?;
+            let (cx, cy) = cursor()?;
             let half = (size / 2) as i32;
             Rect::new(cx - half, cy - half, size, size)
         }
@@ -139,13 +139,10 @@ fn monitor_for(rect: &Rect) -> anyhow::Result<Monitor> {
         .ok_or_else(|| anyhow::anyhow!("no monitor contains rect {rect:?}"))
 }
 
-/// Cursor position in virtual-screen pixels.
-fn cursor() -> Option<(i32, i32)> {
-    use windows::Win32::Foundation::POINT;
-    use windows::Win32::UI::WindowsAndMessaging::GetCursorPos;
-    let mut p = POINT::default();
-    // SAFETY: out-pointer only.
-    unsafe { GetCursorPos(&mut p) }.ok().map(|_| (p.x, p.y))
+/// Cursor position via the platform driver (real on win32; unsupported
+/// elsewhere until a non-Windows cursor backend lands).
+fn cursor() -> anyhow::Result<(i32, i32)> {
+    super::driver::cursor_pos()
 }
 
 fn save(img: RgbaImage, rect: Rect) -> anyhow::Result<CapResult> {

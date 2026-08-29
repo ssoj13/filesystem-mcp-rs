@@ -2,7 +2,7 @@
 //! round trip (PLAN2.md §3 `input_macro` — the biggest latency saver).
 //!
 //! Semantics: fail-fast (critic A), per-step arm re-check (input steps already
-//! gate inside input::*), 40-step and 30 s wall caps, results aligned with the
+//! gate inside driver::*), 40-step and 30 s wall caps, results aligned with the
 //! step list so the agent can see exactly which step failed and why.
 
 use std::time::{Duration, Instant};
@@ -10,9 +10,8 @@ use std::time::{Duration, Instant};
 use serde::{Deserialize, Serialize};
 
 use super::capture::{self, CapTarget, hash_dist, default_cursor_size};
-use super::input::{self, Btn};
+use super::driver::{self, Btn, WinTarget};
 use super::safety::SafetyGate;
-use super::win::{self, WinTarget};
 
 /// Default dhash distance above which a screen counts as "changed" (§6.6).
 const CHANGE_EPS: u32 = 6;
@@ -45,7 +44,7 @@ pub enum Step {
         /// Tempo: real duration in ms (0 = instant).
         duration_ms: Option<u32>,
         /// Trajectory: linear | out (default linear).
-        ease: Option<super::input::Ease>,
+        ease: Option<super::driver::Ease>,
         /// Settle at `from` with button down before moving (ms).
         hold_ms: Option<u32>,
     },
@@ -132,20 +131,13 @@ fn run_step(gate: &SafetyGate, step: &Step) -> anyhow::Result<serde_json::Value>
     match step {
         Step::Move { x, y } => {
             gate.check()?;
-            let f = input::move_cursor(*x, *y)?;
+            let f = driver::move_cursor(*x, *y)?;
             Ok(serde_json::json!({ "focus": f }))
         }
         Step::Click { x, y, button, clicks, mods } => {
             let btn = *button.as_ref().unwrap_or(&Btn::Left);
-            let mod_keys: Vec<_> = mods
-                .as_deref()
-                .unwrap_or(&[])
-                .iter()
-                .map(|n| {
-                    input::vk(n).ok_or_else(|| anyhow::anyhow!("unknown modifier {n:?}"))
-                })
-                .collect::<Result<_, _>>()?;
-            let f = input::click(gate, *x, *y, btn, clicks.unwrap_or(1), &mod_keys)?;
+            let mod_keys = driver::parse_keymods(mods.as_deref())?;
+            let f = driver::click(gate, *x, *y, btn, clicks.unwrap_or(1), &mod_keys)?;
             Ok(serde_json::json!({ "focus": f }))
         }
         Step::Drag { from, to, button, duration_ms, ease, hold_ms } => {
@@ -154,31 +146,31 @@ fn run_step(gate: &SafetyGate, step: &Step) -> anyhow::Result<serde_json::Value>
                 Some(p) => (p.x, p.y),
                 None => cursor_now(),
             };
-            let f = input::drag(
+            let f = driver::drag(
                 gate,
                 start,
                 (to.x, to.y),
                 btn,
                 duration_ms.unwrap_or(0),
-                ease.unwrap_or(super::input::Ease::Linear),
+                ease.unwrap_or(super::driver::Ease::Linear),
                 hold_ms.unwrap_or(0),
             )?;
             Ok(serde_json::json!({ "focus": f }))
         }
         Step::Scroll { dy, dx } => {
-            let f = input::scroll(gate, *dy, dx.unwrap_or(0))?;
+            let f = driver::scroll(gate, *dy, dx.unwrap_or(0))?;
             Ok(serde_json::json!({ "focus": f }))
         }
         Step::Key { key, hold_ms } => {
-            let f = input::key_tap(gate, key, hold_ms.unwrap_or(0))?;
+            let f = driver::key_tap(gate, key, hold_ms.unwrap_or(0))?;
             Ok(serde_json::json!({ "focus": f }))
         }
         Step::Type { text, paste } => {
             let paste = paste.unwrap_or(true);
             // Paste safety: the expected window is whatever is focused NOW —
             // a focus change between steps refuses the paste (critic §10.2).
-            let expect = if paste { Some(input::focus().hwnd) } else { None };
-            let r = input::type_text(gate, text, paste, 0, expect)?;
+            let expect = if paste { Some(driver::focus().hwnd) } else { None };
+            let r = driver::type_text(gate, text, paste, 0, expect)?;
             Ok(serde_json::json!({ "mode": r.mode, "chars": r.chars, "focus": r.focus, "clipboard_restored": r.clipboard_restored }))
         }
         Step::Wait { ms } => {
@@ -213,9 +205,9 @@ fn run_step(gate: &SafetyGate, step: &Step) -> anyhow::Result<serde_json::Value>
         }
         Step::Focus { target } => {
             gate.check()?;
-            let hwnd = win::resolve_target(target)?;
-            win::focus_window(hwnd)?;
-            Ok(serde_json::json!({ "focus": input::focus() }))
+            let id = driver::resolve_target(target)?;
+            driver::focus_window(id)?;
+            Ok(serde_json::json!({ "focus": driver::focus() }))
         }
     }
 }

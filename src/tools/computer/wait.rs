@@ -7,7 +7,8 @@ use serde::{Deserialize, Serialize};
 use windows::Win32::System::DataExchange::GetClipboardSequenceNumber;
 
 use super::capture::{self, CapTarget, hash_dist, default_cursor_size};
-use super::win::{self, WinQuery};
+use super::driver;
+use super::win::WinQuery;
 
 /// Default dhash distance for "screen changed" (§6.6).
 const CHANGE_EPS: u32 = 6;
@@ -93,7 +94,7 @@ pub fn wait(
                     return Ok(WaitResult { ok: false, hash: None, wins: None, rgb: None });
                 }
                 std::thread::sleep(poll);
-                let wins = win::list_windows(Some(q.clone()))?;
+                let wins = driver::list_windows(Some(q.clone()))?;
                 if !wins.is_empty() {
                     return Ok(WaitResult { ok: true, hash: None, wins: Some(wins.len() as u32), rgb: None });
                 }
@@ -122,7 +123,7 @@ pub fn wait(
                 if started.elapsed() > deadline {
                     return Ok(WaitResult { ok: false, hash: None, wins: None, rgb: None });
                 }
-                let c = super::input::color_at(t.x, t.y)?;
+                let c = super::driver::color_at(t.x, t.y)?;
                 if near(c) {
                     return Ok(WaitResult { ok: true, hash: None, wins: None, rgb: Some(c) });
                 }

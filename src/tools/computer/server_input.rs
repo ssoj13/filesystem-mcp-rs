@@ -16,7 +16,8 @@ use serde_json::json;
 
 use super::{
     capture::CapTarget,
-    input::{self, Btn},
+    driver,
+    input::Btn,
     ok_json,
     win::{self, WinTarget},
 };
@@ -52,10 +53,10 @@ impl FileSystemServer {
         Parameters(ClickArgs { x, y, button, clicks, mods }): Parameters<ClickArgs>,
     ) -> Result<CallToolResult, McpError> {
         let btn = parse_btn(button.as_deref())?;
-        let mod_keys = parse_mods(mods.as_deref())?;
+        let mod_keys = driver::parse_keymods(mods.as_deref()).map_err(super::ctl_err)?;
         let gate = super::safety::gate();
         let focus = tokio::task::spawn_blocking(move || {
-            input::click(&gate, x, y, btn, clicks.unwrap_or(1), &mod_keys)
+            driver::click(&gate, x, y, btn, clicks.unwrap_or(1), &mod_keys)
         })
         .await
         .map_err(|e| McpError::internal_error(e.to_string(), None))?
@@ -77,7 +78,7 @@ impl FileSystemServer {
         let ease = parse_ease(ease.as_deref())?;
         let gate = super::safety::gate();
         let focus = tokio::task::spawn_blocking(move || {
-            input::drag(
+            driver::drag(
                 &gate,
                 (from.x, from.y),
                 (to.x, to.y),
@@ -103,7 +104,7 @@ impl FileSystemServer {
         Parameters(ScrollArgs { dy, dx }): Parameters<ScrollArgs>,
     ) -> Result<CallToolResult, McpError> {
         let gate = super::safety::gate();
-        let focus = tokio::task::spawn_blocking(move || input::scroll(&gate, dy, dx.unwrap_or(0)))
+        let focus = tokio::task::spawn_blocking(move || driver::scroll(&gate, dy, dx.unwrap_or(0)))
             .await
             .map_err(|e| McpError::internal_error(e.to_string(), None))?
             .map_err(ctl_err)?;
@@ -122,7 +123,7 @@ impl FileSystemServer {
     ) -> Result<CallToolResult, McpError> {
         let gate = super::safety::gate();
         let focus = tokio::task::spawn_blocking(move || {
-            input::key_tap(&gate, &key, hold_ms.unwrap_or(0))
+            driver::key_tap(&gate, &key, hold_ms.unwrap_or(0))
         })
         .await
         .map_err(|e| McpError::internal_error(e.to_string(), None))?
@@ -160,7 +161,7 @@ impl FileSystemServer {
             None => None,
         };
         let res = tokio::task::spawn_blocking(move || {
-            input::type_text(&gate, &text, paste, interval, expect)
+            driver::type_text(&gate, &text, paste, interval, expect)
         })
         .await
         .map_err(|e| McpError::internal_error(e.to_string(), None))?
@@ -182,13 +183,13 @@ impl FileSystemServer {
         Parameters(FocusArgs { target }): Parameters<FocusArgs>,
     ) -> Result<CallToolResult, McpError> {
         let gate = super::safety::gate();
-        let res = tokio::task::spawn_blocking(move || -> anyhow::Result<win::WinInfo> {
-            let hwnd = win::resolve_target(&target)?;
+        let res = tokio::task::spawn_blocking(move || -> anyhow::Result<driver::WinInfo> {
+            let id = driver::resolve_target(&target)?;
             gate.check()?;
-            win::focus_window(hwnd)?;
-            win::list_windows(Some(win::WinQuery::default()))?
+            driver::focus_window(id)?;
+            driver::list_windows(Some(win::WinQuery::default()))?
                 .into_iter()
-                .find(|w| w.id == hwnd.0 as u32)
+                .find(|w| w.id == id)
                 .ok_or_else(|| anyhow::anyhow!("focused window vanished"))
         })
         .await
@@ -209,8 +210,8 @@ impl FileSystemServer {
         let gate = super::safety::gate();
         let res = tokio::task::spawn_blocking(move || {
             gate.check()?;
-            let hwnd = win::resolve_target(&target)?;
-            win::geom(hwnd, x, y, w, h, state.as_deref())
+            let id = driver::resolve_target(&target)?;
+            driver::geom(id, x, y, w, h, state.as_deref())
         })
         .await
         .map_err(|e| McpError::internal_error(e.to_string(), None))?
@@ -230,8 +231,8 @@ impl FileSystemServer {
         let gate = super::safety::gate();
         tokio::task::spawn_blocking(move || -> anyhow::Result<()> {
             gate.check()?;
-            let hwnd = win::resolve_target(&target)?;
-            win::close(hwnd)?;
+            let id = driver::resolve_target(&target)?;
+            driver::close_window(id)?;
             gate.record("win_close", json!({ "target": target }))?;
             Ok(())
         })
@@ -253,8 +254,8 @@ impl FileSystemServer {
         let gate = super::safety::gate();
         let res = tokio::task::spawn_blocking(move || {
             gate.check()?;
-            let hwnd = win::resolve_target(&target)?;
-            win::to_monitor(hwnd, monitor)
+            let id = driver::resolve_target(&target)?;
+            driver::to_monitor(id, monitor)
         })
         .await
         .map_err(|e| McpError::internal_error(e.to_string(), None))?
@@ -276,12 +277,12 @@ impl FileSystemServer {
         let res = tokio::task::spawn_blocking(move || -> anyhow::Result<serde_json::Value> {
             match op.as_str() {
                 "save" => {
-                    let entries = win::layout_save(&name)?;
+                    let entries = driver::layout_save(&name)?;
                     gate.record("win_layout_save", json!({ "name": name, "windows": entries.len() }))?;
                     Ok(json!({ "saved": entries }))
                 }
                 "load" => {
-                    let applied = win::layout_load(&name, dry_run.unwrap_or(false))?;
+                    let applied = driver::layout_load(&name, dry_run.unwrap_or(false))?;
                     gate.record("win_layout_load", json!({ "name": name, "dry_run": dry_run }))?;
                     Ok(json!({ "applied": applied }))
                 }
@@ -391,20 +392,6 @@ fn parse_ease(s: Option<&str>) -> Result<super::input::Ease, McpError> {
     }
 }
 
-/// Modifier names -> VK codes (loud error on unknown names).
-fn parse_mods(mods: Option<&[String]>) -> Result<Vec<windows::Win32::UI::Input::KeyboardAndMouse::VIRTUAL_KEY>, McpError> {
-    let Some(names) = mods else {
-        return Ok(Vec::new());
-    };
-    names
-        .iter()
-        .map(|n| {
-            super::input::vk(n).ok_or_else(|| {
-                McpError::invalid_params(format!("unknown modifier {n:?} (ctrl|alt|shift|win)"), None)
-            })
-        })
-        .collect()
-}
 
 /// Downcast CtlError for a stable wire code prefix (see mod.rs ctl_err).
 fn ctl_err(e: anyhow::Error) -> McpError {

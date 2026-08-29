@@ -64,7 +64,7 @@ impl FileSystemServer {
         &self,
         Parameters(ColorArgs { x, y }): Parameters<ColorArgs>,
     ) -> Result<CallToolResult, McpError> {
-        let rgb = tokio::task::spawn_blocking(move || super::input::color_at(x, y))
+        let rgb = tokio::task::spawn_blocking(move || super::driver::color_at(x, y))
             .await
             .map_err(|e| McpError::internal_error(e.to_string(), None))?
             .map_err(super::ctl_err)?;
@@ -111,6 +111,16 @@ impl FileSystemServer {
         .map_err(|e| McpError::internal_error(e.to_string(), None))?
         .map_err(super::ctl_err)?;
         ok_json(res)
+    }
+
+    #[tool(
+        name = "ctl_caps",
+        description = "Capability map of the active platform driver: which ctl domains are real\n\
+            on this OS (input/window/uia/ocr_media/clip_files/notify/capture/ocr_ocrs).\n\
+            Read-only, no arm. Use it to adapt automation plans per platform."
+    )]
+    async fn ctl_caps(&self) -> Result<CallToolResult, McpError> {
+        ok_json(serde_json::to_value(super::driver::CAPS).map_err(|e| McpError::internal_error(e.to_string(), None))?)
     }
 
     #[tool(

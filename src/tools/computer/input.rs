@@ -8,7 +8,6 @@
 use std::sync::Mutex;
 
 use anyhow::Context as _;
-use serde::Serialize;
 use windows::Win32::Foundation::POINT;
 use windows::Win32::UI::Input::KeyboardAndMouse::{
     INPUT, INPUT_0, INPUT_KEYBOARD, INPUT_MOUSE, KEYBDINPUT,
@@ -24,31 +23,18 @@ use windows::Win32::UI::WindowsAndMessaging::{
     GetCursorPos, GetForegroundWindow, WHEEL_DELTA,
 };
 
+// Platform-neutral types: defined in the driver, re-exported for callers that
+// historically imported them from input (input::Btn etc.).
+pub use super::driver::{Btn, Ease, FocusInfo, TypeResult};
 use super::safety::{CtlError, SafetyGate};
 use super::win;
 
 /// One mutex serializes every SendInput batch (macro down/up ordering, §5).
 static INPUT_MTX: Mutex<()> = Mutex::new(());
 
-/// Focus snapshot returned with every input action.
-#[derive(Debug, Clone, Serialize)]
-pub struct FocusInfo {
-    pub hwnd: u32,
-    pub title: String,
-}
-
-/// Mouse button for clicks and drags.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize, schemars::JsonSchema)]
-#[serde(rename_all = "lowercase")]
-pub enum Btn {
-    Left,
-    Right,
-    Middle,
-}
-
+/// Mouse button down/up flag pair (win32 backend).
 impl Btn {
-    /// Down/up flag pair for this button.
-    fn flags(self) -> (MOUSE_EVENT_FLAGS, MOUSE_EVENT_FLAGS) {
+    pub(crate) fn flags(self) -> (MOUSE_EVENT_FLAGS, MOUSE_EVENT_FLAGS) {
         match self {
             Btn::Left => (MOUSEEVENTF_LEFTDOWN, MOUSEEVENTF_LEFTUP),
             Btn::Right => (MOUSEEVENTF_RIGHTDOWN, MOUSEEVENTF_RIGHTUP),
@@ -240,7 +226,8 @@ pub fn focus() -> FocusInfo {
 
 /// Post-move cursor verification (drift is a warning, not an error —
 /// rounding across the 65535 normalization can shift by a pixel).
-fn cursor_pos() -> Option<(i32, i32)> {
+/// Cursor position (None when unavailable).
+pub(crate) fn cursor_pos() -> Option<(i32, i32)> {
     let mut p = POINT::default();
     // SAFETY: out-pointer only.
     unsafe { GetCursorPos(&mut p) }
@@ -328,16 +315,6 @@ pub fn color_at(x: i32, y: i32) -> anyhow::Result<(u8, u8, u8)> {
         ((px.0 >> 8) & 0xFF) as u8,
         ((px.0 >> 16) & 0xFF) as u8,
     ))
-}
-
-/// Drag trajectory easing (agent-facing, serde lowercase).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize, schemars::JsonSchema)]
-#[serde(rename_all = "lowercase")]
-pub enum Ease {
-    /// Constant speed.
-    Linear,
-    /// Fast start, decelerating arrival (human-like).
-    Out,
 }
 
 /// Temporized drag: press at `from` (`hold_ms` settle with button down),
@@ -440,17 +417,6 @@ pub fn key_tap(gate: &SafetyGate, combo: &str, hold_ms: u32) -> anyhow::Result<F
     }
     gate.record("key_tap", serde_json::json!({ "combo": combo, "hold_ms": hold_ms }))?;
     Ok(focus())
-}
-
-/// Result of [`type_text`]: which path ran, clipboard outcome, post-type focus.
-#[derive(Debug, Serialize)]
-pub struct TypeResult {
-    /// "paste" (clipboard roundtrip) or "unicode" (synthetic per-char events).
-    pub mode: &'static str,
-    pub chars: usize,
-    /// paste mode only: whether the previous clipboard text was restored.
-    pub clipboard_restored: Option<bool>,
-    pub focus: FocusInfo,
 }
 
 const PASTE_SETTLE_MS: u64 = 150;

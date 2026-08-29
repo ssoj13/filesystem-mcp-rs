@@ -74,7 +74,7 @@ impl FileSystemServer {
         &self,
         Parameters(NotifyArgs { title, msg }): Parameters<NotifyArgs>,
     ) -> Result<CallToolResult, McpError> {
-        tokio::task::spawn_blocking(move || super::notify::notify(title.as_deref(), &msg))
+        tokio::task::spawn_blocking(move || super::driver::notify(title.as_deref(), &msg))
             .await
             .map_err(|e| McpError::internal_error(e.to_string(), None))?
             .map_err(super::ctl_err)?;
@@ -96,7 +96,7 @@ impl FileSystemServer {
         description = "Read the file list (CF_HDROP) currently on the clipboard."
     )]
     async fn ctl_clip_files_get(&self) -> Result<CallToolResult, McpError> {
-        let files = tokio::task::spawn_blocking(super::clip::get_files)
+        let files = tokio::task::spawn_blocking(super::driver::get_files)
             .await
             .map_err(|e| McpError::internal_error(e.to_string(), None))?
             .map_err(super::ctl_err)?;
@@ -111,7 +111,7 @@ impl FileSystemServer {
         &self,
         Parameters(FilesArgs { files }): Parameters<FilesArgs>,
     ) -> Result<CallToolResult, McpError> {
-        tokio::task::spawn_blocking(move || super::clip::set_files(&files))
+        tokio::task::spawn_blocking(move || super::driver::set_files(&files))
             .await
             .map_err(|e| McpError::internal_error(e.to_string(), None))?
             .map_err(super::ctl_err)?;
