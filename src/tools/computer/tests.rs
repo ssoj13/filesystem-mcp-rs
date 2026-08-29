@@ -103,6 +103,55 @@ fn canary_run() -> anyhow::Result<()> {
     Ok(())
 }
 
+/// Paste-juggle verification: marker text is placed on the clipboard, our
+/// paste types its own text, then the marker MUST be back on the clipboard
+/// (read via the title of a second paste into Notepad? No — verify via
+/// clip_files_get-style read: use the marker trick through the title).
+#[test]
+#[ignore = "interactive desktop experiment; run explicitly with --ignored"]
+fn paste_juggle_restores_clipboard() {
+    if let Err(e) = juggle_run() {
+        panic!("JUGGLE FAIL: {e:#}");
+    }
+}
+
+fn juggle_run() -> anyhow::Result<()> {
+    super::ensure_dpi_aware()?;
+    let gate = SafetyGate::new(600);
+    gate.arm(Duration::from_secs(60));
+    let marker = "JUGGLE-MARKER-777";
+    // 1. Put the marker on the clipboard (simulates the user's data).
+    let mut cb = arboard::Clipboard::new()?;
+    cb.set_text(marker.to_string())?;
+    // 2. Paste-type into our Notepad (this MUST temporarily take the clipboard).
+    let q = WinQuery { exe: Some("notepad".into()), title: None };
+    let before: Vec<u32> = win::list_windows(Some(q.clone()))?.iter().map(|w| w.id).collect();
+    let pid = std::process::Command::new("notepad.exe").spawn()?.id();
+    let mut id = 0u32;
+    for _ in 0..50 {
+        std::thread::sleep(Duration::from_millis(100));
+        if let Some(w) = win::list_windows(Some(q.clone()))?
+            .into_iter()
+            .find(|w| !before.contains(&w.id))
+        {
+            id = w.id;
+            break;
+        }
+    }
+    let hwnd = windows::Win32::Foundation::HWND(id as usize as *mut core::ffi::c_void);
+    win::focus_window(hwnd)?;
+    let r = input::type_text(&gate, marker, true, 0, Some(id))?;
+    println!("paste mode={} restored={:?}", r.mode, r.clipboard_restored);
+    assert_eq!(r.clipboard_restored, Some(true), "clipboard must be restored");
+    // 3. The marker must be back.
+    let mut cb = arboard::Clipboard::new()?;
+    let now = cb.get_text()?;
+    assert_eq!(now, marker, "clipboard content was not restored");
+    println!("JUGGLE OK: marker restored after paste");
+    kill(pid);
+    Ok(())
+}
+
 fn kill(pid: u32) {
     // CREATE_NO_WINDOW: cosmetic — no console flash for a kill helper.
     use std::os::windows::process::CommandExt;

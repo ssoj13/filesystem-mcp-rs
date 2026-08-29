@@ -381,6 +381,14 @@ pub struct TypeResult {
 
 const PASTE_SETTLE_MS: u64 = 150;
 
+/// Clipboard snapshot for the paste-mode juggle: full save/restore of text or
+/// image content; `None` = clipboard was empty (or an unsupported format).
+enum ClipSnap {
+    Text(String),
+    Image(arboard::ImageData<'static>),
+    None,
+}
+
 /// Type `text` into the focused window.
 ///
 /// paste mode (default): save clipboard -> set text -> ctrl+v -> settle ->
@@ -408,7 +416,21 @@ pub fn type_text(
                 .context("paste refused: focus changed before typing"));
         }
         let mut cb = arboard::Clipboard::new().context("open clipboard")?;
-        let old = cb.get_text().ok();
+        // Juggling: snapshot the old content in full (text OR image) so the
+        // paste can be undone. Non-text-only snapshots keep the clipboard
+        // restorable; an unsupported format simply arrives as `None` (empty).
+        let old: ClipSnap = match cb.get_text() {
+            Ok(prev) => ClipSnap::Text(prev),
+            Err(_) => match cb.get_image() {
+                Ok(img) => ClipSnap::Image(arboard::ImageData {
+                    width: img.width,
+                    height: img.height,
+                    bytes: std::borrow::Cow::Owned(img.bytes.into_owned()),
+                }),
+                // Both reads failed -> empty clipboard.
+                Err(_) => ClipSnap::None,
+            },
+        };
         cb.set_text(text.to_string()).context("set clipboard text")?;
         let batch = vec![
             key(VK_CONTROL.0, KEYBD_EVENT_FLAGS(0)),
@@ -418,13 +440,27 @@ pub fn type_text(
         ];
         send_batch(&batch)?;
         std::thread::sleep(std::time::Duration::from_millis(PASTE_SETTLE_MS));
-        let restored = match old {
-            Some(prev) => cb.set_text(prev).is_ok(),
-            None => cb.clear().is_ok(),
+        // Interloper guard: if the clipboard no longer holds OUR text, a
+        // concurrent writer landed between set and restore (human sharing the
+        // desktop). Restoring the snapshot would clobber THEIR newer data —
+        // keep theirs and report the skip instead.
+        let hijacked = cb.get_text().ok().as_deref() != Some(text);
+        let restored = if hijacked {
+            tracing::warn!(
+                "clipboard changed concurrently during paste; foreign content kept, nothing restored"
+            );
+            false
+        } else {
+            let ok = match &old {
+                ClipSnap::Text(prev) => cb.set_text(prev.clone()).is_ok(),
+                ClipSnap::Image(img) => cb.set_image(img.clone()).is_ok(),
+                ClipSnap::None => cb.clear().is_ok(),
+            };
+            if !ok {
+                tracing::warn!("clipboard restore failed; previous content lost");
+            }
+            ok
         };
-        if !restored {
-            tracing::warn!("clipboard restore failed; previous content lost");
-        }
         gate.record("key_type", serde_json::json!({ "mode": "paste", "chars": chars }))?;
         return Ok(TypeResult {
             mode: "paste",

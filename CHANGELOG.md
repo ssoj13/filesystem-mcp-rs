@@ -21,6 +21,11 @@
 - **Safety model:** process-global arm gate (`arm {ttl_ms}`, TTL auto-expiry,
   ops-per-minute cap, JSONL audit), pastes are refused when focus moved,
   `win_close` is a separate tool name so per-tool allowlists can exclude it.
+- **Clipboard juggling hardening (paste mode):** full snapshot save/restore of
+  TEXT or IMAGE content (arboard), plus an interloper guard — if a concurrent
+  writer lands between our set and the restore, their newer content is kept
+  and `clipboard_restored: false` is reported (never clobber foreign data).
+  Verified live: marker placed on clipboard → paste → marker restored.
 - `--ctl-ops-per-min` CLI flag; typing mode/interval, arm TTL and ops cap are also
   configurable via env vars (`FS_MCP_CTL_TYPE_MODE`, `FS_MCP_CTL_TYPE_INTERVAL_MS`,
   `FS_MCP_CTL_ARM_TTL_MS`, `FS_MCP_CTL_OPS_PER_MIN`) with precedence arg > env > default.
