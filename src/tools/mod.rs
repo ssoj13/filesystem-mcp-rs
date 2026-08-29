@@ -25,6 +25,15 @@ pub mod process;
 pub mod s3_tools;
 #[cfg(feature = "screenshot-tools")]
 pub mod screenshot;
+// Computer control (mouse/keyboard/windows/UIA/OCR) — self-contained module.
+#[cfg(any(
+    feature = "ctl-input",
+    feature = "ctl-uia",
+    feature = "ctl-ocr",
+    feature = "ctl-notify",
+    feature = "ctl-clip-files"
+))]
+pub mod computer;
 pub mod search;
 pub mod spooky;
 pub mod stats;

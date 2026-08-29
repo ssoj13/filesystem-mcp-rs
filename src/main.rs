@@ -155,6 +155,11 @@ struct ServerArgs {
     #[arg(short = 'l', long, value_name = "FILE", num_args = 0..=1, default_missing_value = "filesystem-mcp-rs.log")]
     log: Option<String>,
 
+    /// Computer-control executed-input ops per minute cap (needs ctl-input/ctl-uia features).
+    #[cfg(any(feature = "ctl-input", feature = "ctl-uia"))]
+    #[arg(long = "ctl-ops-per-min", value_name = "N", default_value_t = 240)]
+    ctl_ops_per_min: u32,
+
     /// HTTP allowlist domains (repeatable). Use "*" to allow all.
     #[cfg(feature = "http-tools")]
     #[arg(long = "http-allowlist-domain", value_name = "DOMAIN", action = clap::ArgAction::Append)]
@@ -210,6 +215,20 @@ struct FileSystemServer {
 impl FileSystemServer {
     fn new(allowed: AllowedDirs) -> Self {
         let mut tool_router = Self::tool_router();
+        // Computer-control domains: per-domain routers (S1 spike — rmcp cannot
+        // cfg-gate methods inside one impl), merged before schema normalization.
+        #[cfg(any(feature = "ctl-input", feature = "ctl-uia", feature = "ctl-ocr"))]
+        tool_router.merge(Self::ctl_readonly_router());
+        #[cfg(feature = "ctl-input")]
+        tool_router.merge(Self::ctl_input_router());
+        #[cfg(feature = "ctl-uia")]
+        tool_router.merge(Self::ctl_uia_router());
+        #[cfg(feature = "ctl-ocr")]
+        tool_router.merge(Self::ctl_ocr_router());
+        #[cfg(feature = "ctl-notify")]
+        tool_router.merge(Self::ctl_notify_router());
+        #[cfg(feature = "ctl-clip-files")]
+        tool_router.merge(Self::ctl_clip_router());
         normalize_tool_schemas(&mut tool_router);
         Self {
             allowed,
@@ -7496,6 +7515,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     let args = top.server;
+
+    // Computer-control bootstrap: DPI first (clicks/captures misalign without it),
+    // then the process-global arm gate.
+    #[cfg(any(feature = "ctl-input", feature = "ctl-uia", feature = "ctl-ocr"))]
+    if let Err(e) = crate::tools::computer::ensure_dpi_aware() {
+        eprintln!("fatal: {e}");
+        std::process::exit(1);
+    }
+    #[cfg(any(feature = "ctl-input", feature = "ctl-uia"))]
+    crate::tools::computer::safety::init_gate(args.ctl_ops_per_min);
 
     // Handle --list-features
     if args.list_features {

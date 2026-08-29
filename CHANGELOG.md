@@ -2,6 +2,31 @@
 
 ## [Unreleased]
 
+### Computer control behind feature flags (`computer-tools` umbrella + `ctl-*` domains)
+
+- **New self-contained module `src/tools/computer/`** — mouse (click/drag/scroll),
+  keyboard (VK combos, Unicode typing, clipboard-paste mode with focus gate and
+  restore), window management (focus with foreground-lock workaround, geom,
+  close, layout save/restore), cursor-anchored capture with dhash64, macro
+  engine (40 steps / 30 s, fail-fast, per-step arm re-check), waits
+  (screen_change / window / clipboard), UI Automation (`ui`, `ui_click` via
+  Invoke pattern, `ui_set` via Value pattern), offline WinRT OCR with bbox
+  `find`, toast notifications, CF_HDROP clipboard files. 22 tools total,
+  merged into the host router via per-domain `#[tool_router]` impls
+  (`ToolRouter::merge`) — rmcp cannot cfg-gate methods inside one impl.
+- **Feature matrix:** `computer-tools` = umbrella over `ctl-input` / `ctl-uia`
+  (implies ctl-input: the click fallback needs SendInput) / `ctl-ocr` /
+  `ctl-notify` / `ctl-clip-files`. Default build unchanged — the feature is
+  opt-in, no new default deps.
+- **Safety model:** process-global arm gate (`arm {ttl_ms}`, TTL auto-expiry,
+  ops-per-minute cap, JSONL audit), pastes are refused when focus moved,
+  `win_close` is a separate tool name so per-tool allowlists can exclude it.
+- `--ctl-ops-per-min` CLI flag (input ops/min cap, default 240).
+- Install hints append the arm-gate policy only when the feature is built in.
+- Real-machine canary (interactive desktop): spawn Notepad → focus-verify →
+  type ASCII+Unicode → hash-change → OCR match → cleanup
+  (`cargo test --features computer-tools canary_notepad -- --ignored --nocapture`).
+
 ### `install --force` — take over a hand-written MCP entry
 
 - **`install` refuses when the key already holds an entry we do not own** (what `status` calls

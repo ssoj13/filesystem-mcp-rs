@@ -14,7 +14,19 @@ use crate::mcp_setup::host::HostSpec;
 pub const SERVER_KEY: &str = "filesystem-mcp-rs";
 
 /// Session policy: this server is mandatory once connected. Written into the agent's context file.
-const MCP_POLICY: &str = include_str!("docs/mcp_policy.md");
+/// When computer-control features are built in, the arm-gate policy is appended
+/// inline in `MCP_POLICY` (concat! accepts literals only).
+const MCP_POLICY: &str = if cfg!(any(feature = "ctl-input", feature = "ctl-uia")) {
+    concat!(
+        include_str!("docs/mcp_policy.md"),
+        "\n== COMPUTER CONTROL POLICY ==\n",
+        "This build can move the mouse and type into real windows. Input tools REQUIRE ",
+        "`arm {ttl_ms}` first (TTL gate, default 30 s, ops-per-minute cap enforced).\n",
+        "Read-only ctl tools (capture, monitors, win_list) work without arming.\n"
+    )
+} else {
+    include_str!("docs/mcp_policy.md")
+};
 /// Concrete tool workflows (search_files / grep_files / run_command …).
 const MCP_WORKFLOWS: &str = include_str!("docs/mcp_workflows.md");
 
