@@ -65,16 +65,26 @@ impl FileSystemServer {
     #[tool(
         name = "mouse_drag",
         description = "Drag from {x,y} to {x,y} with an interpolated path (drag&drop, marquee).\n\
-            button: left|right|middle; steps: interpolation count (default 10). Requires arm."
+            button: left|right|middle; duration_ms: real drag tempo (0 = instant),
+            ease: linear|out; hold_ms: settle at `from` with button down. Requires arm."
     )]
     async fn ctl_mouse_drag(
         &self,
-        Parameters(DragArgs { from, to, button, steps }): Parameters<DragArgs>,
+        Parameters(DragArgs { from, to, button, duration_ms, ease, hold_ms }): Parameters<DragArgs>,
     ) -> Result<CallToolResult, McpError> {
         let btn = parse_btn(button.as_deref())?;
+        let ease = parse_ease(ease.as_deref())?;
         let gate = super::safety::gate();
         let focus = tokio::task::spawn_blocking(move || {
-            input::drag(&gate, (from.x, from.y), (to.x, to.y), btn, steps.unwrap_or(10))
+            input::drag(
+                &gate,
+                (from.x, from.y),
+                (to.x, to.y),
+                btn,
+                duration_ms.unwrap_or(0),
+                ease,
+                hold_ms.unwrap_or(0),
+            )
         })
         .await
         .map_err(|e| McpError::internal_error(e.to_string(), None))?
@@ -330,6 +340,14 @@ fn parse_btn(s: Option<&str>) -> Result<Btn, McpError> {
     }
 }
 
+fn parse_ease(s: Option<&str>) -> Result<super::input::Ease, McpError> {
+    match s.unwrap_or("linear") {
+        "linear" => Ok(super::input::Ease::Linear),
+        "out" => Ok(super::input::Ease::Out),
+        other => Err(McpError::invalid_params(format!("unknown ease {other:?}"), None)),
+    }
+}
+
 /// Downcast CtlError for a stable wire code prefix (see mod.rs ctl_err).
 fn ctl_err(e: anyhow::Error) -> McpError {
     super::ctl_err(e)
@@ -358,8 +376,12 @@ pub struct DragArgs {
     pub to: PtArgs,
     /// left|right|middle (default left).
     pub button: Option<String>,
-    /// Interpolation steps (default 10).
-    pub steps: Option<u32>,
+    /// Real drag duration (ms; 0 = instant single batch).
+    pub duration_ms: Option<u32>,
+    /// linear | out (default linear).
+    pub ease: Option<String>,
+    /// Settle at `from` with button down before moving (ms).
+    pub hold_ms: Option<u32>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]

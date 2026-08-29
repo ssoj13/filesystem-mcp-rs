@@ -297,37 +297,78 @@ pub fn click(
     Ok(focus())
 }
 
-/// Interpolated drag: down at `from`, linear absolute moves, up at `to`.
+/// Drag trajectory easing (agent-facing, serde lowercase).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize, schemars::JsonSchema)]
+#[serde(rename_all = "lowercase")]
+pub enum Ease {
+    /// Constant speed.
+    Linear,
+    /// Fast start, decelerating arrival (human-like).
+    Out,
+}
+
+/// Temporized drag: press at `from` (`hold_ms` settle with button down),
+/// then move in ~16 ms chunks over `duration_ms` (0 = instant single batch),
+/// then release. Chunked timing is what makes apps track the movement —
+/// a single instant batch lands before drag targets notice the press.
 pub fn drag(
     gate: &SafetyGate,
     from: (i32, i32),
     to: (i32, i32),
     btn: Btn,
-    steps: u32,
+    duration_ms: u32,
+    ease: Ease,
+    hold_ms: u32,
 ) -> anyhow::Result<FocusInfo> {
     gate.check()?;
     let (down, up) = btn.flags();
-    let mut batch = Vec::new();
     let (fx, fy) = to_abs(from.0, from.1);
-    batch.push(mouse(down, fx as i32, fy as i32, 0));
-    let n = steps.max(2);
+    let batch = vec![mouse(down, fx as i32, fy as i32, 0)];
+    send_batch(&batch)?;
+    if hold_ms > 0 {
+        std::thread::sleep(std::time::Duration::from_millis(hold_ms as u64));
+    }
+    // Chunk count: ~16 ms per chunk when timed; a fixed density when instant.
+    let n = if duration_ms > 0 {
+        (duration_ms / 16).clamp(2, 200)
+    } else {
+        24
+    };
+    let chunk_sleep = if duration_ms > 0 {
+        std::time::Duration::from_millis((duration_ms / n).max(1) as u64)
+    } else {
+        std::time::Duration::ZERO
+    };
     for i in 1..=n {
         let t = i as f64 / n as f64;
+        let t = match ease {
+            Ease::Linear => t,
+            // Ease-out: fast start, decelerating arrival (quadratic).
+            Ease::Out => 1.0 - (1.0 - t) * (1.0 - t),
+        };
         let x = from.0 as f64 + (to.0 - from.0) as f64 * t;
         let y = from.1 as f64 + (to.1 - from.1) as f64 * t;
         let (nx, ny) = to_abs(x as i32, y as i32);
-        batch.push(mouse(
+        let chunk = [mouse(
             MOUSEEVENTF_MOVE | MOUSEEVENTF_ABSOLUTE | MOUSEEVENTF_VIRTUALDESK,
             nx as i32,
             ny as i32,
             0,
-        ));
+        )];
+        send_batch(&chunk)?;
+        if !chunk_sleep.is_zero() && i < n {
+            std::thread::sleep(chunk_sleep);
+        }
     }
-    batch.push(mouse(up, 0, 0, 0));
-    send_batch(&batch)?;
-    gate.record("mouse_drag", serde_json::json!({ "from": from, "to": to }))?;
+    let end = [mouse(up, 0, 0, 0)];
+    send_batch(&end)?;
+    gate.record(
+        "mouse_drag",
+        serde_json::json!({ "from": from, "to": to, "duration_ms": duration_ms, "ease": ease, "hold_ms": hold_ms }),
+    )?;
     Ok(focus())
 }
+
 /// Wheel scroll: `dy > 0` scrolls down, `dx > 0` scrolls right (PLAN2.md §3).
 pub fn scroll(gate: &SafetyGate, dy: i32, dx: i32) -> anyhow::Result<FocusInfo> {
     gate.check()?;

@@ -97,7 +97,29 @@ fn canary_run() -> anyhow::Result<()> {
         panic!("neither hash change nor OCR match detected");
     }
 
-    // 9. Cleanup: kill OUR instance (unsaved text would make WM_CLOSE prompt).
+    // 9. Timed-drag acceptance: hold 10 ms at the start point, drag for 1 s
+    // with ease-out, release. Wall-clock must land near the target duration.
+    let drag_t0 = std::time::Instant::now();
+    let f = input::drag(
+        &gate,
+        (active.x + 60, active.y + 100),
+        (active.x + 260, active.y + 100),
+        input::Btn::Left,
+        1000,
+        crate::tools::computer::input::Ease::Out,
+        10,
+    )?;
+    let drag_ms = drag_t0.elapsed().as_millis();
+    println!(
+        "timed drag done in {drag_ms} ms (target ~1010), focus={} ({})",
+        f.hwnd, f.title
+    );
+    if !(900..=1400).contains(&drag_ms) {
+        kill(pid);
+        panic!("timed drag took {drag_ms} ms, expected ~1000");
+    }
+
+    // 10. Cleanup: kill OUR instance (unsaved text would make WM_CLOSE prompt).
     kill(pid);
     println!("cleanup: notepad {pid} killed");
     Ok(())

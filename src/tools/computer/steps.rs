@@ -31,7 +31,17 @@ pub struct Pt {
 pub enum Step {
     Move { x: i32, y: i32 },
     Click { x: Option<i32>, y: Option<i32>, button: Option<Btn>, clicks: Option<u32> },
-    Drag { from: Option<Pt>, to: Pt, button: Option<Btn>, steps: Option<u32> },
+    Drag {
+        from: Option<Pt>,
+        to: Pt,
+        button: Option<Btn>,
+        /// Tempo: real duration in ms (0 = instant).
+        duration_ms: Option<u32>,
+        /// Trajectory: linear | out (default linear).
+        ease: Option<super::input::Ease>,
+        /// Settle at `from` with button down before moving (ms).
+        hold_ms: Option<u32>,
+    },
     Scroll { dy: i32, dx: Option<i32> },
     Key { key: String, hold_ms: Option<u32> },
     Type { text: String, paste: Option<bool> },
@@ -115,17 +125,23 @@ fn run_step(gate: &SafetyGate, step: &Step) -> anyhow::Result<serde_json::Value>
             let f = input::click(gate, *x, *y, btn, clicks.unwrap_or(1))?;
             Ok(serde_json::json!({ "focus": f }))
         }
-        Step::Drag { from, to, button, steps } => {
+        Step::Drag { from, to, button, duration_ms, ease, hold_ms } => {
             let btn = *button.as_ref().unwrap_or(&Btn::Left);
-            let f = match from {
-                Some(p) => input::drag(gate, (p.x, p.y), (to.x, to.y), btn, steps.unwrap_or(10))?,
-                None => {
-                    let cur = cursor_now();
-                    input::drag(gate, cur, (to.x, to.y), btn, steps.unwrap_or(10))?
-                }
+            let start = match from {
+                Some(p) => (p.x, p.y),
+                None => cursor_now(),
             };
+            let f = input::drag(
+                gate,
+                start,
+                (to.x, to.y),
+                btn,
+                duration_ms.unwrap_or(0),
+                ease.unwrap_or(super::input::Ease::Linear),
+                hold_ms.unwrap_or(0),
+            )?;
             Ok(serde_json::json!({ "focus": f }))
-}
+        }
         Step::Scroll { dy, dx } => {
             let f = input::scroll(gate, *dy, dx.unwrap_or(0))?;
             Ok(serde_json::json!({ "focus": f }))
