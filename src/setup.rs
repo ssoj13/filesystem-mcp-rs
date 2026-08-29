@@ -21,8 +21,13 @@ const MCP_POLICY: &str = if cfg!(any(feature = "ctl-input", feature = "ctl-uia")
         include_str!("docs/mcp_policy.md"),
         "\n== COMPUTER CONTROL POLICY ==\n",
         "This build can move the mouse and type into real windows. Input tools REQUIRE ",
-        "`arm {ttl_ms}` first (TTL gate, default 30 s, ops-per-minute cap enforced).\n",
-        "Read-only ctl tools (capture, monitors, win_list) work without arming.\n"
+        "`arm {ttl_ms}` first (TTL gate, default 30000 ms, ops-per-minute cap enforced).\n",
+        "Read-only ctl tools (capture, monitors, win_list) work without arming.\n",
+        "\n== COMPUTER CONTROL ENV (set in mcpServers env; empty = unset; arg > env > default) ==\n",
+        "FS_MCP_CTL_TYPE_MODE=paste|chars  - typing mode (default paste)\n",
+        "FS_MCP_CTL_TYPE_INTERVAL_MS=12    - per-char delay for chars mode (safe floor 12 ms)\n",
+        "FS_MCP_CTL_ARM_TTL_MS=30000       - arm TTL (ms)\n",
+        "FS_MCP_CTL_OPS_PER_MIN=240        - input ops/minute cap\n"
     )
 } else {
     include_str!("docs/mcp_policy.md")
@@ -37,6 +42,22 @@ const DEFAULT_HTTP_ALLOW_LIST: &str = "*";
 #[cfg(feature = "s3-tools")]
 const DEFAULT_S3_ALLOW_LIST: &str = "*";
 
+/// Computer-control defaults written by `install` whenever any ctl feature is
+/// built in. Values are the built-in defaults (no-ops until edited); JSON
+/// configs cannot hold comments, so "commented out" is expressed as
+/// "present with the default value" — flipping behavior = editing the value.
+#[cfg(any(feature = "ctl-input", feature = "ctl-uia"))]
+fn push_computer_env(env: &mut BTreeMap<String, String>) {
+    for (k, v) in [
+        ("FS_MCP_CTL_TYPE_MODE", "paste"),
+        ("FS_MCP_CTL_TYPE_INTERVAL_MS", "12"),
+        ("FS_MCP_CTL_ARM_TTL_MS", "30000"),
+        ("FS_MCP_CTL_OPS_PER_MIN", "240"),
+    ] {
+        env.entry(k.to_string()).or_insert_with(|| v.to_string());
+    }
+}
+
 fn default_env() -> BTreeMap<String, String> {
     #[allow(unused_mut)]
     let mut env = BTreeMap::new();
@@ -50,6 +71,8 @@ fn default_env() -> BTreeMap<String, String> {
         "FS_MCP_S3_ALLOW_LIST".to_string(),
         DEFAULT_S3_ALLOW_LIST.to_string(),
     );
+    #[cfg(any(feature = "ctl-input", feature = "ctl-uia"))]
+    push_computer_env(&mut env);
     env
 }
 

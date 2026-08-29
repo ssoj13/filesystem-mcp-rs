@@ -35,7 +35,9 @@ consumed from GitHub (ssh ref). Build: `cargo build` / test: `cargo test` / lint
   S1 spike). Gate: safety::init_gate/gate() OnceLock. --ctl-ops-per-min CLI. Matrix: default +
   every ctl-* alone = green; clippy clean (only pre-existing line_edit.rs j-loop warning);
   452 tests + canary PASS. Unicode typing drops chars at 3ms interval in Win11 Notepad —
-  paste mode (default) or ≥10ms; see PLAN2 §6.7.
+  paste mode (default) or ≥12ms; see PLAN2 §6.7. Env config: FS_MCP_CTL_TYPE_MODE/
+  TYPE_INTERVAL_MS (default 12ms in chars mode)/ARM_TTL_MS/OPS_PER_MIN — resolver arg > env >
+  default, unknown env value = loud error; install writes all 4 with defaults into client configs.
 - rmcp 3.1.3 facts: with_structured is fs's own WithStructured trait (main.rs), ToolRouter::merge
   exists, tool_router attr takes router=/vis=/server_handler=.
 - 2026-08-28: computer-control planning DONE → PLAN2.md final (3 planners + self critic §10 + forks §11 resolved). Separate repo cglibs/computer-mcp-rs (lib+bin), 20 tools, uiautomation=0.25.

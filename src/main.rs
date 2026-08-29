@@ -156,9 +156,10 @@ struct ServerArgs {
     log: Option<String>,
 
     /// Computer-control executed-input ops per minute cap (needs ctl-input/ctl-uia features).
+    /// Precedence: this flag > FS_MCP_CTL_OPS_PER_MIN env > 240.
     #[cfg(any(feature = "ctl-input", feature = "ctl-uia"))]
-    #[arg(long = "ctl-ops-per-min", value_name = "N", default_value_t = 240)]
-    ctl_ops_per_min: u32,
+    #[arg(long = "ctl-ops-per-min", value_name = "N")]
+    ctl_ops_per_min: Option<u32>,
 
     /// HTTP allowlist domains (repeatable). Use "*" to allow all.
     #[cfg(feature = "http-tools")]
@@ -7524,7 +7525,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         std::process::exit(1);
     }
     #[cfg(any(feature = "ctl-input", feature = "ctl-uia"))]
-    crate::tools::computer::safety::init_gate(args.ctl_ops_per_min);
+    crate::tools::computer::safety::init_gate(
+        crate::tools::computer::safety::resolve_ops_per_min(args.ctl_ops_per_min),
+    );
 
     // Handle --list-features
     if args.list_features {

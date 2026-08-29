@@ -21,7 +21,12 @@
 - **Safety model:** process-global arm gate (`arm {ttl_ms}`, TTL auto-expiry,
   ops-per-minute cap, JSONL audit), pastes are refused when focus moved,
   `win_close` is a separate tool name so per-tool allowlists can exclude it.
-- `--ctl-ops-per-min` CLI flag (input ops/min cap, default 240).
+- `--ctl-ops-per-min` CLI flag; typing mode/interval, arm TTL and ops cap are also
+  configurable via env vars (`FS_MCP_CTL_TYPE_MODE`, `FS_MCP_CTL_TYPE_INTERVAL_MS`,
+  `FS_MCP_CTL_ARM_TTL_MS`, `FS_MCP_CTL_OPS_PER_MIN`) with precedence arg > env > default.
+  `install` writes all four into every client config's `env` with their default values
+  (JSON configs cannot hold comments — flipping behavior = editing the value; empty = unset;
+  invalid value = loud error). rmcp bumped to 3.1.4 (latest).
 - Install hints append the arm-gate policy only when the feature is built in.
 - Real-machine canary (interactive desktop): spawn Notepad → focus-verify →
   type ASCII+Unicode → hash-change → OCR match → cleanup

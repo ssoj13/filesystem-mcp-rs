@@ -34,9 +34,10 @@ impl FileSystemServer {
         &self,
         Parameters(ArmArgs { ttl_ms }): Parameters<ArmArgs>,
     ) -> Result<CallToolResult, McpError> {
-        let until = super::safety::gate().arm(std::time::Duration::from_millis(
-            ttl_ms.unwrap_or(30_000) as u64,
-        ));
+        let ttl = std::time::Duration::from_millis(
+            super::safety::resolve_arm_ttl_ms(ttl_ms) as u64,
+        );
+        let until = super::safety::gate().arm(ttl);
         ok_json(json!({ "armed_until": until }))
     }
 
@@ -129,7 +130,10 @@ impl FileSystemServer {
         Parameters(TypeArgs { text, paste, interval_ms, target }): Parameters<TypeArgs>,
     ) -> Result<CallToolResult, McpError> {
         let gate = super::safety::gate();
-        let paste = paste.unwrap_or(true);
+        // Mode/interval: explicit arg > FS_MCP_CTL_TYPE_MODE/INTERVAL_MS env > defaults.
+        let paste = super::safety::resolve_paste(paste).map_err(super::ctl_err)?;
+        let interval = super::safety::resolve_interval_ms(interval_ms, paste)
+            .map_err(super::ctl_err)?;
         // Focus gate for paste: resolve the target window first so the paste
         // can never land in a wrong app (critic §10.2).
         let expect = match target {
@@ -145,13 +149,13 @@ impl FileSystemServer {
             None => None,
         };
         let res = tokio::task::spawn_blocking(move || {
-            input::type_text(&gate, &text, paste, interval_ms.unwrap_or(0), expect)
+            input::type_text(&gate, &text, paste, interval, expect)
         })
         .await
         .map_err(|e| McpError::internal_error(e.to_string(), None))?
         .map_err(ctl_err)?;
         ok_json(json!({
-            "mode": res.mode, "chars": res.chars,
+            "mode": res.mode, "chars": res.chars, "interval_ms": interval,
             "clipboard_restored": res.clipboard_restored, "focus": res.focus,
         }))
     }

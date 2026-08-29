@@ -57,6 +57,71 @@ pub fn gate() -> std::sync::Arc<SafetyGate> {
     GATE.get().cloned().expect("computer safety gate not initialized (init_gate)")
 }
 
+// ---- Environment configuration (set in mcpServers env; empty = unset) ----
+
+/// key_type mode: `paste` (clipboard roundtrip, default) or `chars`
+/// (per-char KEYEVENTF_UNICODE with delay).
+pub const ENV_TYPE_MODE: &str = "FS_MCP_CTL_TYPE_MODE";
+/// Per-char delay for `chars` mode (ms). Win11 Notepad drops chars below ~10 ms.
+pub const ENV_TYPE_INTERVAL_MS: &str = "FS_MCP_CTL_TYPE_INTERVAL_MS";
+/// Default arm TTL (ms).
+pub const ENV_ARM_TTL_MS: &str = "FS_MCP_CTL_ARM_TTL_MS";
+/// Input ops per minute runaway cap.
+pub const ENV_OPS_PER_MIN: &str = "FS_MCP_CTL_OPS_PER_MIN";
+
+fn env_trimmed(name: &str) -> Option<String> {
+    std::env::var(name).ok().map(|v| v.trim().to_string()).filter(|v| !v.is_empty())
+}
+
+/// Effective paste flag: explicit arg > env > default (paste).
+/// Unknown env values are a loud error, never a silent fallback.
+#[cfg(feature = "ctl-input")]
+pub fn resolve_paste(explicit: Option<bool>) -> anyhow::Result<bool> {
+    if let Some(p) = explicit {
+        return Ok(p);
+    }
+    match env_trimmed(ENV_TYPE_MODE) {
+        None => Ok(true),
+        Some(v) if v.eq_ignore_ascii_case("paste") => Ok(true),
+        Some(v) if v.eq_ignore_ascii_case("chars") => Ok(false),
+        Some(other) => Err(anyhow::anyhow!(
+            "{ENV_TYPE_MODE}={other:?} is invalid (paste|chars)"
+        )),
+    }
+}
+
+/// Effective per-char interval: explicit arg > env > default (paste: 0,
+/// chars: 12 ms — the safe floor: Win11 Notepad drops unicode chars below
+/// ~10 ms, PLAN2 §6.7).
+#[cfg(feature = "ctl-input")]
+pub fn resolve_interval_ms(explicit: Option<u32>, paste: bool) -> anyhow::Result<u32> {
+    if let Some(v) = explicit {
+        return Ok(v);
+    }
+    match env_trimmed(ENV_TYPE_INTERVAL_MS) {
+        Some(v) => v.parse::<u32>().map_err(|_| {
+            anyhow::anyhow!("{ENV_TYPE_INTERVAL_MS}={v:?} is not a number (ms)")
+        }),
+        None => Ok(if paste { 0 } else { 12 }),
+    }
+}
+
+/// Effective arm TTL: explicit arg > env > default (30 s).
+#[cfg(feature = "ctl-input")]
+pub fn resolve_arm_ttl_ms(explicit: Option<u32>) -> u32 {
+    explicit
+        .or_else(|| env_trimmed(ENV_ARM_TTL_MS).and_then(|v| v.parse().ok()))
+        .unwrap_or(30_000)
+}
+
+/// Effective ops-per-minute cap: CLI arg > env > default (240).
+#[cfg(any(feature = "ctl-input", feature = "ctl-uia"))]
+pub fn resolve_ops_per_min(explicit: Option<u32>) -> u32 {
+    explicit
+        .or_else(|| env_trimmed(ENV_OPS_PER_MIN).and_then(|v| v.parse().ok()))
+        .unwrap_or(240)
+}
+
 struct GateState {
     armed_until: Option<Instant>,
     armed_at_epoch_ms: u64,
