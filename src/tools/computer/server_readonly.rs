@@ -56,6 +56,64 @@ impl FileSystemServer {
     }
 
     #[tool(
+        name = "color",
+        description = "Screen pixel color at x,y (virtual-screen px). Read-only, no arm.\n\
+            Returns {rgb:[r,g,b], hex}."
+    )]
+    async fn color(
+        &self,
+        Parameters(ColorArgs { x, y }): Parameters<ColorArgs>,
+    ) -> Result<CallToolResult, McpError> {
+        let rgb = tokio::task::spawn_blocking(move || super::input::color_at(x, y))
+            .await
+            .map_err(|e| McpError::internal_error(e.to_string(), None))?
+            .map_err(super::ctl_err)?;
+        let hex = format!("#{:02x}{:02x}{:02x}", rgb.0, rgb.1, rgb.2);
+        ok_json(json!({ "rgb": [rgb.0, rgb.1, rgb.2], "hex": hex }))
+    }
+
+    #[tool(
+        name = "find_image",
+        description = "Find a template image inside a screen capture (UIA -> OCR -> template -> pixels ladder).\n\
+            template: PNG path (capture a small unique element first), target: where to search.\n\
+            threshold: 0.5..=1.0 (default 0.85). Returns {found, matches:[{x,y,w,h,score}]} —\n\
+            screen-space coords ready for mouse_click. Fixed-scale (same-DPI) matching."
+    )]
+    async fn find_image(
+        &self,
+        Parameters(FindArgs { template, target, threshold, max }): Parameters<FindArgs>,
+    ) -> Result<CallToolResult, McpError> {
+        let res = tokio::task::spawn_blocking(move || -> anyhow::Result<serde_json::Value> {
+            let cap = target.unwrap_or(CapTarget::Monitor { monitor: 0 });
+            let captured = super::capture::capture(cap)?;
+            let scene = image::open(&captured.path).map_err(|e| anyhow::anyhow!("open capture: {e}"))?.to_rgba8();
+            let tpl = image::open(&template).map_err(|e| anyhow::anyhow!("open template: {e}"))?.to_rgba8();
+            let thr = threshold.unwrap_or(0.85);
+            let matches = super::find::find_template(&scene, &tpl, thr, max.unwrap_or(5).max(1) as usize)?;
+            // Screen-space: add the capture rect origin.
+            let ox = captured.rect.x;
+            let oy = captured.rect.y;
+            let matches: Vec<_> = matches
+                .into_iter()
+                .map(|mut m| {
+                    m.x += ox;
+                    m.y += oy;
+                    m
+                })
+                .collect();
+            Ok(serde_json::json!({
+                "found": !matches.is_empty(),
+                "capture_rect": captured.rect,
+                "matches": matches,
+            }))
+        })
+        .await
+        .map_err(|e| McpError::internal_error(e.to_string(), None))?
+        .map_err(super::ctl_err)?;
+        ok_json(res)
+    }
+
+    #[tool(
         name = "win_list",
         description = "List visible windows: id(=HWND), title, exe, pid, rect, z-order, active flag.\n\
             query: {title?, exe?} case-insensitive substrings. Read-only, no arm needed."
@@ -84,6 +142,24 @@ pub struct CapArgs {
 pub struct ListArgs {
     /// {title?, exe?} case-insensitive substrings.
     pub query: Option<WinQuery>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct FindArgs {
+    /// PNG path of the template to search for.
+    pub template: String,
+    /// Where to search (default primary monitor).
+    pub target: Option<CapTarget>,
+    /// Score threshold 0.5..=1.0 (default 0.85).
+    pub threshold: Option<f32>,
+    /// Max matches (default 5).
+    pub max: Option<u32>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct ColorArgs {
+    pub x: i32,
+    pub y: i32,
 }
 
 fn base64_encode(data: &[u8]) -> String {

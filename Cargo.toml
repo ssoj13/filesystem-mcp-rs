@@ -40,7 +40,7 @@ regex = "1.13.1"
 fancy-regex = "0.19"
 chardetng = "1.0.0"
 encoding_rs = "0.8"
-reqwest = { version = "0.13", features = ["json", "stream"] }
+reqwest = { version = "0.13", features = ["json", "stream", "blocking"] }
 image = { version = "0.25", default-features = false, features = ["png"], optional = true }
 xcap = { version = "0.9", optional = true }
 arboard = { version = "3", optional = true }
@@ -51,6 +51,7 @@ windows = { version = "0.62", optional = true, features = [
     "Win32_UI_WindowsAndMessaging",
     "Win32_UI_Input_KeyboardAndMouse",
     "Win32_Graphics_Dwm",
+    "Win32_Graphics_Gdi",
     "Win32_UI_HiDpi",
     "Win32_System_Threading",
     "Win32_System_DataExchange",
@@ -62,6 +63,9 @@ windows = { version = "0.62", optional = true, features = [
     "Globalization",
 ] }
 uiautomation = { version = "0.25", optional = true }
+# Local neural OCR (pure Rust, RTen CPU inference) + model auto-download.
+ocrs = { version = "0.13", optional = true }
+rten = { version = "0.26", optional = true }
 tauri-winrt-notification = { version = "0.7", optional = true }
 clipboard-win = { version = "5.4", optional = true }
 
@@ -141,7 +145,7 @@ ctl-input = ["dep:windows", "screenshot-tools"]
 # fallback needs SendInput, and Invoke-only clicking is a broken half-state.
 ctl-uia = ["ctl-input", "dep:uiautomation"]
 # WinRT OCR (Windows.Media.Ocr): text + bbox find. Needs a capture source.
-ctl-ocr = ["dep:windows", "screenshot-tools"]
+ctl-ocr = ["dep:windows", "dep:ocrs", "dep:rten", "screenshot-tools"]
 # Toast notifications.
 ctl-notify = ["dep:tauri-winrt-notification"]
 # CF_HDROP clipboard file lists.

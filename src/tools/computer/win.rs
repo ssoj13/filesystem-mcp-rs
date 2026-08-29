@@ -292,6 +292,26 @@ pub fn active() -> anyhow::Result<Option<WinInfo>> {
     Ok(Some(info_of(hwnd, 0)))
 }
 
+/// Move a window fully onto monitor `idx` (top-left corner at the monitor's
+/// origin, sized to the monitor) and return fresh geometry. Useful after
+/// monitor changes or for multi-monitor layouts.
+pub fn to_monitor(hwnd: HWND, monitor: u32) -> anyhow::Result<WinInfo> {
+    let ms = super::capture::monitors()?;
+    let m = ms
+        .get(monitor as usize)
+        .ok_or_else(|| anyhow::anyhow!("monitor {monitor} not found (0..={})", ms.len() - 1))?;
+    // Restore first: a maximized window ignores MoveWindow geometry.
+    if unsafe { IsIconic(hwnd) }.as_bool() {
+        let shown = unsafe { ShowWindow(hwnd, SW_RESTORE) };
+        if !shown.as_bool() {
+            tracing::debug!("ShowWindow(SW_RESTORE) returned false for {hwnd:?}");
+        }
+    }
+    unsafe { MoveWindow(hwnd, m.x, m.y, m.w as i32, m.h as i32, true) }
+        .map_err(|e| anyhow::anyhow!("MoveWindow({hwnd:?} -> monitor {monitor}): {e}"))?;
+    Ok(info_of(hwnd, 0))
+}
+
 /// Move/resize and/or set window state (`min` | `max` | `restore`).
 /// State applies first, then geometry (all four of x/y/w/h must be given).
 /// Returns fresh geometry after the operation.

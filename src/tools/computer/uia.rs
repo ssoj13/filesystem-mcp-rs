@@ -150,7 +150,7 @@ pub fn click(
         return Err(anyhow::anyhow!("element {name:?} has an empty rect and no Invoke pattern"));
     }
     let (cx, cy) = (x + w / 2, y + h / 2);
-    let focus = input::click(gate, Some(cx), Some(cy), input::Btn::Left, 1)?;
+    let focus = input::click(gate, Some(cx), Some(cy), input::Btn::Left, 1, &[])?;
     gate.record("ui_click", serde_json::json!({ "via": "click", "name": name, "idx": idx, "pos": [cx, cy] }))?;
     Ok(serde_json::json!({ "via": "click", "pos": [cx, cy], "focus": focus }))
 }

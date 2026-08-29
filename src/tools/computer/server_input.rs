@@ -49,12 +49,13 @@ impl FileSystemServer {
     )]
     async fn ctl_mouse_click(
         &self,
-        Parameters(ClickArgs { x, y, button, clicks }): Parameters<ClickArgs>,
+        Parameters(ClickArgs { x, y, button, clicks, mods }): Parameters<ClickArgs>,
     ) -> Result<CallToolResult, McpError> {
         let btn = parse_btn(button.as_deref())?;
+        let mod_keys = parse_mods(mods.as_deref())?;
         let gate = super::safety::gate();
         let focus = tokio::task::spawn_blocking(move || {
-            input::click(&gate, x, y, btn, clicks.unwrap_or(1))
+            input::click(&gate, x, y, btn, clicks.unwrap_or(1), &mod_keys)
         })
         .await
         .map_err(|e| McpError::internal_error(e.to_string(), None))?
@@ -241,6 +242,27 @@ impl FileSystemServer {
     }
 
     #[tool(
+        name = "win_to_monitor",
+        description = "Move a window fully onto monitor `monitor` (restore -> MoveWindow to the\n\
+            monitor rect) and return fresh geometry. Requires arm."
+    )]
+    async fn ctl_win_to_monitor(
+        &self,
+        Parameters(MonitorArgs { target, monitor }): Parameters<MonitorArgs>,
+    ) -> Result<CallToolResult, McpError> {
+        let gate = super::safety::gate();
+        let res = tokio::task::spawn_blocking(move || {
+            gate.check()?;
+            let hwnd = win::resolve_target(&target)?;
+            win::to_monitor(hwnd, monitor)
+        })
+        .await
+        .map_err(|e| McpError::internal_error(e.to_string(), None))?
+        .map_err(ctl_err)?;
+        ok_json(json!({ "win": res }))
+    }
+
+    #[tool(
         name = "win_layout",
         description = "Save/restore positions of all visible windows (name identifies the snapshot).\n\
             op: save|load; load applies unless dry_run=true. Per-window applied flags — HWND-bound:\n\
@@ -300,15 +322,24 @@ impl FileSystemServer {
     )]
     async fn ctl_wait(
         &self,
-        Parameters(WaitArgs { kind, target, query, since, timeout_ms, poll_ms }): Parameters<WaitArgs>,
+        Parameters(WaitArgs { kind, target, query, since, color, timeout_ms, poll_ms }): Parameters<WaitArgs>,
     ) -> Result<CallToolResult, McpError> {
         let kind = parse_wait_kind(&kind)?;
+        let color_target = color.map(|c| super::wait::ColorTarget {
+            x: c.x,
+            y: c.y,
+            r: c.r,
+            g: c.g,
+            b: c.b,
+            tol: c.tol.unwrap_or(12),
+        });
         let res = tokio::task::spawn_blocking(move || {
             super::wait::wait(
                 kind,
                 query,
                 target,
                 since,
+                color_target,
                 timeout_ms.unwrap_or(3000),
                 poll_ms.unwrap_or(200),
             )
@@ -326,8 +357,20 @@ fn parse_wait_kind(s: &str) -> Result<super::wait::Kind, McpError> {
         "screen_change" => Ok(super::wait::Kind::ScreenChange),
         "window" => Ok(super::wait::Kind::Window),
         "clipboard" => Ok(super::wait::Kind::Clipboard),
+        "color" => Ok(super::wait::Kind::Color),
         other => Err(McpError::invalid_params(format!("unknown kind {other:?}"), None)),
     }
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct ColorWaitArgs {
+    pub x: i32,
+    pub y: i32,
+    pub r: u8,
+    pub g: u8,
+    pub b: u8,
+    /// Max per-channel delta (default 12).
+    pub tol: Option<u8>,
 }
 
 /// Button string -> Btn.
@@ -346,6 +389,21 @@ fn parse_ease(s: Option<&str>) -> Result<super::input::Ease, McpError> {
         "out" => Ok(super::input::Ease::Out),
         other => Err(McpError::invalid_params(format!("unknown ease {other:?}"), None)),
     }
+}
+
+/// Modifier names -> VK codes (loud error on unknown names).
+fn parse_mods(mods: Option<&[String]>) -> Result<Vec<windows::Win32::UI::Input::KeyboardAndMouse::VIRTUAL_KEY>, McpError> {
+    let Some(names) = mods else {
+        return Ok(Vec::new());
+    };
+    names
+        .iter()
+        .map(|n| {
+            super::input::vk(n).ok_or_else(|| {
+                McpError::invalid_params(format!("unknown modifier {n:?} (ctrl|alt|shift|win)"), None)
+            })
+        })
+        .collect()
 }
 
 /// Downcast CtlError for a stable wire code prefix (see mod.rs ctl_err).
@@ -368,6 +426,8 @@ pub struct ClickArgs {
     pub button: Option<String>,
     /// 0 = hover, 1 = single, 2 = double (default 1).
     pub clicks: Option<u32>,
+    /// Modifier keys held across the click: ctrl/alt/shift/win.
+    pub mods: Option<Vec<String>>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -434,6 +494,13 @@ pub struct GeomArgs {
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
+pub struct MonitorArgs {
+    pub target: WinTarget,
+    /// Monitor index (see `monitors`).
+    pub monitor: u32,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
 pub struct LayoutArgs {
     /// save | load.
     pub op: String,
@@ -444,9 +511,10 @@ pub struct LayoutArgs {
 }
 
 /// Step sequence for input_macro, e.g. [{t:"click",x,y},{t:"type",text},{t:"key",key:"enter"}].
+/// String values may reference earlier step results: "${0.hash}", "${2.matches.0.x}".
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct MacroArgs {
-    pub steps: Vec<super::steps::Step>,
+    pub steps: Vec<serde_json::Value>,
     /// Delay between steps (ms, default 30).
     pub gap_ms: Option<u32>,
     /// Stop at first failed step (default true).
@@ -455,7 +523,7 @@ pub struct MacroArgs {
 
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct WaitArgs {
-    /// screen_change | window | clipboard.
+    /// screen_change | window | clipboard | color.
     pub kind: String,
     /// screen_change: capture target (default cursor square).
     pub target: Option<CapTarget>,
@@ -463,6 +531,8 @@ pub struct WaitArgs {
     pub query: Option<win::WinQuery>,
     /// screen_change: previous dhash (omitted -> hash now, wait for change).
     pub since: Option<u64>,
+    /// color: pixel + target RGB (tol = max per-channel delta, default 12).
+    pub color: Option<ColorWaitArgs>,
     pub timeout_ms: Option<u32>,
     pub poll_ms: Option<u32>,
 }

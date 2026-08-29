@@ -183,6 +183,19 @@ fn kill(pid: u32) {
         .status();
 }
 
+/// ocrs engine smoke: models auto-download on first use, then recognize a
+/// SMALL region — full-monitor inference in a DEBUG build takes minutes
+/// (upstream limitation); the deployed server is release-built. Latin-only.
+#[test]
+#[ignore = "interactive; downloads ~12 MB of models on first run"]
+fn ocrs_smoke() {
+    super::ensure_dpi_aware().unwrap();
+    let cap = super::capture::capture(CapTarget::Rect { x: 100, y: 100, w: 400, h: 200 }).unwrap();
+    let img = image::open(&cap.path).unwrap().to_rgba8();
+    let out = super::ocrs_local::recognize(&img, None).unwrap();
+    println!("ocrs text ({} lines): {}", out.lines.len(), out.text);
+}
+
 /// Controlled typing-matrix experiment: does Notepad really drop chars at
 /// fast KEYEVENTF_UNICODE intervals? Same text, separate Notepad instance per
 /// scenario, read-back via the window title (mirrors the document first line

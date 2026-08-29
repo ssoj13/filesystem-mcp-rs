@@ -24,19 +24,23 @@ use crate::FileSystemServer;
 impl FileSystemServer {
     #[tool(
         name = "ocr",
-        description = "OCR a screen region (Windows.Media.Ocr, offline). target = capture target.\n\
-            find (case-insensitive) switches on bbox matches — click-by-text: ocr -> mouse_click.\n\
-            No per-word confidence exists in WinRT OCR. Missing language pack = explicit error."
+        description = "OCR a screen region, 100% local (no LLM tokens).\n\
+            engine: \"media\" (default; Windows.Media.Ocr, Cyrillic OK) | \"ocrs\" (better Latin, models auto-download ~12 MB on first use).\n\
+            target = capture target; find (case-insensitive) switches on bbox matches — click-by-text ladder."
     )]
     async fn ctl_ocr(
         &self,
-        Parameters(OcrArgs { target, find }): Parameters<OcrArgs>,
+        Parameters(OcrArgs { target, find, engine }): Parameters<OcrArgs>,
     ) -> Result<CallToolResult, McpError> {
         let res = tokio::task::spawn_blocking(move || -> anyhow::Result<serde_json::Value> {
             let cap = target.unwrap_or(super::capture::CapTarget::Monitor { monitor: 0 });
             let captured = super::capture::capture(cap)?;
-            let img = image::open(&captured.path).map_err(|e| anyhow::anyhow!("open capture: {e}"))?;
-            let out = super::ocr::recognize(&img.to_rgba8(), find.as_deref())?;
+            let img = image::open(&captured.path).map_err(|e| anyhow::anyhow!("open capture: {e}"))?.to_rgba8();
+            let out = match engine.as_deref().unwrap_or("media") {
+                "ocrs" => super::ocrs_local::recognize(&img, find.as_deref())?,
+                "media" => super::ocr::recognize(&img, find.as_deref())?,
+                other => anyhow::bail!("unknown engine {other:?} (media|ocrs)"),
+            };
             Ok(serde_json::to_value(&out)?)
         })
         .await
@@ -53,6 +57,8 @@ pub struct OcrArgs {
     pub target: Option<CapTarget>,
     /// Case-insensitive substring to match lines (returns bbox matches).
     pub find: Option<String>,
+    /// \"media\" (default, Cyrillic-capable) | \"ocrs\" (better Latin).
+    pub engine: Option<String>,
 }
 
 // ---- server_misc: notify (ctl-notify) + clipboard files (ctl-clip-files) ----

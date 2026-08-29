@@ -266,13 +266,16 @@ pub fn move_cursor(x: i32, y: i32) -> anyhow::Result<FocusInfo> {
     Ok(focus())
 }
 
-/// Click: optional pre-move, N clicks (0 = hover only). Returns post-click focus.
+/// Click: optional pre-move, N clicks (0 = hover only), optional modifier keys
+/// held across the clicks (ctrl/alt/shift/win — resolved via [`vk`]).
+/// Returns post-click focus.
 pub fn click(
     gate: &SafetyGate,
     x: Option<i32>,
     y: Option<i32>,
     btn: Btn,
     clicks: u32,
+    mods: &[VIRTUAL_KEY],
 ) -> anyhow::Result<FocusInfo> {
     gate.check()?;
     let pos = match (x, y) {
@@ -284,17 +287,47 @@ pub fn click(
         return Ok(focus());
     }
     let (down, up) = btn.flags();
-    let mut batch = Vec::with_capacity(clicks as usize * 2);
+    // One batch: modifiers down -> click pairs -> modifiers up (reversed), so
+    // ctrl/shift state cannot leak between the atomic click sequence.
+    let mut batch = Vec::with_capacity(mods.len() * 2 + clicks as usize * 2);
+    for m in mods {
+        batch.push(key(m.0, KEYBD_EVENT_FLAGS(0)));
+    }
     for _ in 0..clicks {
         batch.push(mouse(down, 0, 0, 0));
         batch.push(mouse(up, 0, 0, 0));
     }
+    for m in mods.iter().rev() {
+        batch.push(key(m.0, KEYEVENTF_KEYUP));
+    }
     send_batch(&batch)?;
     gate.record(
         "mouse_click",
-        serde_json::json!({ "btn": btn, "clicks": clicks, "pos": [pos.hwnd, pos.title] }),
+        serde_json::json!({ "btn": btn, "clicks": clicks, "mods": mods.len(), "pos": [pos.hwnd, pos.title] }),
     )?;
     Ok(focus())
+}
+
+/// Screen pixel color at virtual-screen coords. GetPixel returns 0x00BBGGRR;
+/// CLR_INVALID (0xFFFFFFFF) means the coords are outside the screen.
+pub fn color_at(x: i32, y: i32) -> anyhow::Result<(u8, u8, u8)> {
+    use windows::Win32::Foundation::COLORREF;
+    use windows::Win32::Graphics::Gdi::{GetDC, GetPixel, ReleaseDC};
+    // SAFETY: screen DC acquired and released symmetrically.
+    let hdc = unsafe { GetDC(None) };
+    if hdc.is_invalid() {
+        return Err(anyhow::anyhow!("GetDC(screen) failed"));
+    }
+    let px = unsafe { GetPixel(hdc, x, y) };
+    unsafe { ReleaseDC(None, hdc) };
+    if px == COLORREF(0xFFFF_FFFF) {
+        return Err(anyhow::anyhow!("({x},{y}) is outside the visible screen"));
+    }
+    Ok((
+        (px.0 & 0xFF) as u8,
+        ((px.0 >> 8) & 0xFF) as u8,
+        ((px.0 >> 16) & 0xFF) as u8,
+    ))
 }
 
 /// Drag trajectory easing (agent-facing, serde lowercase).

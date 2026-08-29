@@ -39,12 +39,17 @@ pub mod win;
 // Passive capture extensions (cursor-anchor, dhash) — needs xcap/image.
 #[cfg(any(feature = "ctl-input", feature = "ctl-ocr"))]
 pub mod capture;
+// Template matching (find_image) — same passive class, same deps.
+#[cfg(any(feature = "ctl-input", feature = "ctl-ocr"))]
+pub mod find;
 
 // Screen understanding + extras.
 #[cfg(feature = "ctl-uia")]
 pub mod uia;
 #[cfg(feature = "ctl-ocr")]
 pub mod ocr;
+#[cfg(feature = "ctl-ocr")]
+pub mod ocrs_local;
 #[cfg(feature = "ctl-notify")]
 pub mod notify;
 #[cfg(feature = "ctl-clip-files")]

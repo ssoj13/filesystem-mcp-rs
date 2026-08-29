@@ -30,7 +30,14 @@ pub struct Pt {
 #[serde(tag = "t", rename_all = "snake_case")]
 pub enum Step {
     Move { x: i32, y: i32 },
-    Click { x: Option<i32>, y: Option<i32>, button: Option<Btn>, clicks: Option<u32> },
+    Click {
+        x: Option<i32>,
+        y: Option<i32>,
+        button: Option<Btn>,
+        clicks: Option<u32>,
+        /// Modifier keys held across the click: ctrl/alt/shift/win.
+        mods: Option<Vec<String>>,
+    },
     Drag {
         from: Option<Pt>,
         to: Pt,
@@ -77,19 +84,22 @@ pub struct MacroResult {
 const MAX_STEPS: usize = 40;
 const MAX_WALL: Duration = Duration::from_secs(30);
 
-/// Execute `steps` under `gate`. Results are index-aligned with the input.
+/// Execute raw JSON steps under `gate`. Each step is deserialized lazily so
+/// string values can reference earlier results: `${0.hash}`, `${2.matches.0.x}`.
+/// A whole-string ref keeps the referenced JSON type; an inline ref inside a
+/// longer string is stringified. Unresolvable refs are loud errors.
 pub fn run(
     gate: &SafetyGate,
-    steps: &[Step],
+    raw_steps: &[serde_json::Value],
     gap_ms: u32,
     stop_on_fail: bool,
 ) -> anyhow::Result<MacroResult> {
-    if steps.len() > MAX_STEPS {
-        return Err(anyhow::anyhow!("{MAX_STEPS}-step cap exceeded ({})", steps.len()));
+    if raw_steps.len() > MAX_STEPS {
+        return Err(anyhow::anyhow!("{MAX_STEPS}-step cap exceeded ({})", raw_steps.len()));
     }
     let started = Instant::now();
-    let mut results = Vec::with_capacity(steps.len());
-    for (idx, step) in steps.iter().enumerate() {
+    let mut results: Vec<StepResult> = Vec::with_capacity(raw_steps.len());
+    for (idx, raw) in raw_steps.iter().enumerate() {
         if started.elapsed() > MAX_WALL {
             results.push(StepResult {
                 ok: false,
@@ -101,7 +111,12 @@ pub fn run(
         if gap_ms > 0 && idx > 0 {
             std::thread::sleep(Duration::from_millis(gap_ms as u64));
         }
-        let res = run_step(gate, step);
+        let mut raw_step = raw.clone();
+        resolve_refs(&mut raw_step, &results)?;
+        let step: Step = serde_json::from_value(raw_step).map_err(|e| {
+            anyhow::anyhow!("step {idx}: invalid step definition: {e}")
+        })?;
+        let res = run_step(gate, &step);
         let ok = res.is_ok();
         let value = res.as_ref().ok().cloned();
         let err = res.as_ref().err().map(|e| e.to_string());
@@ -120,9 +135,17 @@ fn run_step(gate: &SafetyGate, step: &Step) -> anyhow::Result<serde_json::Value>
             let f = input::move_cursor(*x, *y)?;
             Ok(serde_json::json!({ "focus": f }))
         }
-        Step::Click { x, y, button, clicks } => {
+        Step::Click { x, y, button, clicks, mods } => {
             let btn = *button.as_ref().unwrap_or(&Btn::Left);
-            let f = input::click(gate, *x, *y, btn, clicks.unwrap_or(1))?;
+            let mod_keys: Vec<_> = mods
+                .as_deref()
+                .unwrap_or(&[])
+                .iter()
+                .map(|n| {
+                    input::vk(n).ok_or_else(|| anyhow::anyhow!("unknown modifier {n:?}"))
+                })
+                .collect::<Result<_, _>>()?;
+            let f = input::click(gate, *x, *y, btn, clicks.unwrap_or(1), &mod_keys)?;
             Ok(serde_json::json!({ "focus": f }))
         }
         Step::Drag { from, to, button, duration_ms, ease, hold_ms } => {
@@ -194,6 +217,147 @@ fn run_step(gate: &SafetyGate, step: &Step) -> anyhow::Result<serde_json::Value>
             win::focus_window(hwnd)?;
             Ok(serde_json::json!({ "focus": input::focus() }))
         }
+    }
+}
+
+/// Reference pattern: `${N}` or `${N.path.segments}` — step index into the
+/// results array, then a dot-path into that step's result value.
+fn resolve_refs(value: &mut serde_json::Value, results: &[StepResult]) -> anyhow::Result<()> {
+    match value {
+        serde_json::Value::String(s) => {
+            let mut out = String::with_capacity(s.len());
+            let mut rest = s.as_str();
+            let mut replaced = false;
+            while let Some(start) = rest.find("${") {
+                let Some(end) = rest[start..].find('}') else {
+                    break;
+                };
+                // `end` is relative to `start`; the closing brace is absolute.
+                let token = &rest[start + 2..start + end];
+                let (idx, path) = parse_ref(token)
+                    .ok_or_else(|| anyhow::anyhow!("invalid ref ${{{token}}} (want N or N.path)"))?;
+                let v = lookup_ref(results, idx, &path)?;
+                replaced = true;
+                let whole_string = start == 0 && start + end == rest.len() - 1;
+                if whole_string {
+                    *value = v;
+                    return Ok(());
+                }
+                out.push_str(&rest[..start]);
+                // Inline string refs splice the raw text; other types keep
+                // their JSON representation.
+                match &v {
+                    serde_json::Value::String(s2) => out.push_str(s2),
+                    other => out.push_str(&other.to_string()),
+                }
+                rest = &rest[start + end + 1..];
+            }
+            if replaced {
+                out.push_str(rest);
+                *value = serde_json::Value::String(out);
+            }
+            Ok(())
+        }
+        serde_json::Value::Array(items) => {
+            for it in items {
+                resolve_refs(it, results)?;
+            }
+            Ok(())
+        }
+        serde_json::Value::Object(map) => {
+            for (_, v) in map.iter_mut() {
+                resolve_refs(v, results)?;
+            }
+            Ok(())
+        }
+        _ => Ok(()),
+    }
+}
+
+/// `"5"` / `"5.hash"` / `"5.matches.0.x"` -> (5, path segments).
+fn parse_ref(token: &str) -> Option<(usize, Vec<String>)> {
+    let mut segs = token.split('.');
+    let idx = segs.next()?.parse::<usize>().ok()?;
+    Some((idx, segs.map(str::to_string).collect()))
+}
+
+fn lookup_ref(
+    results: &[StepResult],
+    idx: usize,
+    path: &[String],
+) -> anyhow::Result<serde_json::Value> {
+    let res = results.get(idx).ok_or_else(|| {
+        anyhow::anyhow!("ref ${{{idx}}} points ahead (only steps 0..{} have run)", results.len())
+    })?;
+    let Some(v) = &res.value else {
+        return Err(anyhow::anyhow!("ref ${{{idx}}}: step failed, no result"));
+    };
+    let mut cur = v;
+    for seg in path {
+        // Numeric segments index arrays; everything else keys objects.
+        cur = match cur {
+            serde_json::Value::Array(items) => {
+                let i: usize = seg.parse().map_err(|_| {
+                    anyhow::anyhow!("ref ${{{idx}}}: {seg:?} is not an array index")
+                })?;
+                items.get(i).ok_or_else(|| {
+                    anyhow::anyhow!("ref ${{{idx}}}: array index {i} out of range")
+                })?
+            }
+            obj => obj.get(seg).ok_or_else(|| {
+                anyhow::anyhow!("ref ${{{idx}}}: no key {seg:?} in result")
+            })?,
+        };
+    }
+    Ok(cur.clone())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn res(idx_ok: bool, v: serde_json::Value) -> StepResult {
+        StepResult { ok: idx_ok, value: Some(v), err: None }
+    }
+
+    #[test]
+    fn refs_whole_string_keeps_type() {
+        let mut v = serde_json::json!("${0.hash}");
+        let results = vec![res(true, serde_json::json!({ "hash": 42u64 }))];
+        resolve_refs(&mut v, &results).unwrap();
+        assert_eq!(v, serde_json::json!(42u64));
+    }
+
+    #[test]
+    fn refs_inline_stringifies() {
+        let mut v = serde_json::json!("step0=${0.a} and ${0.b.c}");
+        let results = vec![res(true, serde_json::json!({ "a": 7, "b": { "c": "x" } }))];
+        resolve_refs(&mut v, &results).unwrap();
+        assert_eq!(v, serde_json::json!("step0=7 and x"));
+    }
+
+    #[test]
+    fn refs_walk_arrays() {
+        let mut v = serde_json::json!("${1.matches.0.x}");
+        let results = vec![
+            res(true, serde_json::json!({})),
+            res(true, serde_json::json!({ "matches": [ { "x": 99 } ] })),
+        ];
+        resolve_refs(&mut v, &results).unwrap();
+        assert_eq!(v, serde_json::json!(99));
+    }
+
+    #[test]
+    fn refs_errors_are_loud() {
+        let results = vec![res(false, serde_json::json!({}))];
+        let mut v = serde_json::json!("${0.hash}");
+        assert!(resolve_refs(&mut v, &results).is_err()); // step failed
+        let mut v = serde_json::json!("${3.hash}");
+        assert!(resolve_refs(&mut v, &results).is_err()); // points ahead
+        let mut v = serde_json::json!("${0.nope}");
+        assert!(resolve_refs(&mut v, &results).is_err()); // missing key
+        let mut v = serde_json::json!("${xx}");
+        assert!(resolve_refs(&mut v, &results).is_err()); // malformed
     }
 }
 
