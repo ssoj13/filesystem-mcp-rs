@@ -62,7 +62,10 @@ pub fn gate() -> std::sync::Arc<SafetyGate> {
 /// key_type mode: `paste` (clipboard roundtrip, default) or `chars`
 /// (per-char KEYEVENTF_UNICODE with delay).
 pub const ENV_TYPE_MODE: &str = "FS_MCP_CTL_TYPE_MODE";
-/// Per-char delay for `chars` mode (ms). Win11 Notepad drops chars below ~10 ms.
+/// Per-char delay for `chars` mode (ms). Empirically verified on Win11
+/// Notepad (typing_mode_matrix): intervals below ~25 ms deterministically
+/// mangle runs of chars into repeats of the LAST char ("123"->"333");
+/// 30 ms is clean ×3.
 pub const ENV_TYPE_INTERVAL_MS: &str = "FS_MCP_CTL_TYPE_INTERVAL_MS";
 /// Default arm TTL (ms).
 pub const ENV_ARM_TTL_MS: &str = "FS_MCP_CTL_ARM_TTL_MS";
@@ -102,7 +105,7 @@ pub fn resolve_interval_ms(explicit: Option<u32>, paste: bool) -> anyhow::Result
         Some(v) => v.parse::<u32>().map_err(|_| {
             anyhow::anyhow!("{ENV_TYPE_INTERVAL_MS}={v:?} is not a number (ms)")
         }),
-        None => Ok(if paste { 0 } else { 12 }),
+        None => Ok(if paste { 0 } else { 30 }),
     }
 }
 

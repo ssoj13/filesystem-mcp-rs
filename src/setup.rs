@@ -25,7 +25,7 @@ const MCP_POLICY: &str = if cfg!(any(feature = "ctl-input", feature = "ctl-uia")
         "Read-only ctl tools (capture, monitors, win_list) work without arming.\n",
         "\n== COMPUTER CONTROL ENV (set in mcpServers env; empty = unset; arg > env > default) ==\n",
         "FS_MCP_CTL_TYPE_MODE=paste|chars  - typing mode (default paste)\n",
-        "FS_MCP_CTL_TYPE_INTERVAL_MS=12    - per-char delay for chars mode (safe floor 12 ms)\n",
+        "FS_MCP_CTL_TYPE_INTERVAL_MS=30    - per-char delay for chars mode (safe floor 30 ms)\n",
         "FS_MCP_CTL_ARM_TTL_MS=30000       - arm TTL (ms)\n",
         "FS_MCP_CTL_OPS_PER_MIN=240        - input ops/minute cap\n"
     )
@@ -50,7 +50,7 @@ const DEFAULT_S3_ALLOW_LIST: &str = "*";
 fn push_computer_env(env: &mut BTreeMap<String, String>) {
     for (k, v) in [
         ("FS_MCP_CTL_TYPE_MODE", "paste"),
-        ("FS_MCP_CTL_TYPE_INTERVAL_MS", "12"),
+        ("FS_MCP_CTL_TYPE_INTERVAL_MS", "30"),
         ("FS_MCP_CTL_ARM_TTL_MS", "30000"),
         ("FS_MCP_CTL_OPS_PER_MIN", "240"),
     ] {

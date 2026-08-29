@@ -111,3 +111,116 @@ fn kill(pid: u32) {
         .creation_flags(0x0800_0000)
         .status();
 }
+
+/// Controlled typing-matrix experiment: does Notepad really drop chars at
+/// fast KEYEVENTF_UNICODE intervals? Same text, separate Notepad instance per
+/// scenario, read-back via the window title (mirrors the document first line
+/// exactly — no OCR noise). Focus verified before every burst.
+///
+/// ```sh
+/// cargo test --features computer-tools typing_mode_matrix -- --ignored --nocapture
+/// ```
+#[test]
+#[ignore = "interactive desktop experiment; run explicitly with --ignored"]
+fn typing_mode_matrix() {
+    if let Err(e) = matrix_run() {
+        panic!("MATRIX FAIL: {e:#}");
+    }
+}
+
+/// (label, paste, interval_ms) — boundary probing: 20/30 ms stability ×2.
+const SCENARIOS: &[(&str, bool, u32)] = &[
+    ("paste      ", true, 0),
+    ("chars 12ms", false, 12),
+    ("chars 20ms", false, 20),
+    ("chars 20ms", false, 20),
+    ("chars 25ms", false, 25),
+    ("chars 30ms", false, 30),
+    ("chars 30ms", false, 30),
+];
+
+fn matrix_run() -> anyhow::Result<()> {
+    super::ensure_dpi_aware()?;
+    let gate = SafetyGate::new(600);
+    gate.arm(Duration::from_secs(120));
+    let q = WinQuery { exe: Some("notepad".into()), title: None };
+    let text = "canary 123";
+    println!("typed text: {text:?}  (read-back = window title)");
+    println!("{:<12} {:>5} {:>6}  result", "mode", "ms", "exact");
+
+    for (label, paste, interval) in SCENARIOS {
+        // Win11 Notepad restores force-killed unsaved docs from TabState —
+        // that contamination invalidates read-back. Wipe it while closed.
+        kill_all_notepads();
+        clear_notepad_session();
+        // Fresh instance per scenario; own pid for cleanup.
+        let before: Vec<u32> = win::list_windows(Some(q.clone()))?.iter().map(|w| w.id).collect();
+        let pid = std::process::Command::new("notepad.exe").spawn()?.id();
+        let mut id = 0u32;
+        for _ in 0..50 {
+            std::thread::sleep(Duration::from_millis(100));
+            let fresh = win::list_windows(Some(q.clone()))?
+                .into_iter()
+                .filter(|w| !before.contains(&w.id))
+                .collect::<Vec<_>>();
+            if let Some(w) = fresh.first() {
+                id = w.id;
+                break;
+            }
+        }
+        if id == 0 {
+            kill(pid);
+            return Err(anyhow::anyhow!("notepad window did not appear"));
+        }
+        // Focus + verify immediately before typing.
+        let hwnd = windows::Win32::Foundation::HWND(id as usize as *mut core::ffi::c_void);
+        win::focus_window(hwnd)?;
+        let active = win::active()?.ok_or_else(|| anyhow::anyhow!("no active window"))?;
+        if active.id != id {
+            kill(pid);
+            return Err(anyhow::anyhow!("focus verify failed before {label:?}"));
+        }
+        let r = input::type_text(&gate, text, *paste, *interval, Some(id))?;
+        std::thread::sleep(Duration::from_millis(300));
+        let title = win::list_windows(Some(q.clone()))?
+            .into_iter()
+            .find(|w| w.id == id)
+            .map(|w| w.title)
+            .unwrap_or_default();
+        let shown = title
+            .trim_start_matches('*')
+            .trim_end_matches(" - Notepad")
+            .trim_end_matches(" - Блокнот")
+            .to_string();
+        let exact = shown == text;
+        let flag = if exact { "EXACT" } else { "DIFF " };
+        println!(
+            "{label:<12} {interval:>5}ms {flag}  got={shown:?} (mode={} sent={})",
+            r.mode, r.chars
+        );
+        kill(pid);
+        std::thread::sleep(Duration::from_millis(200));
+    }
+    Ok(())
+}
+
+/// Kill every Notepad (this test owns the machine's Notepad state while running).
+fn kill_all_notepads() {
+    use std::os::windows::process::CommandExt;
+    let _ = std::process::Command::new("taskkill")
+        .args(["/IM", "Notepad.exe", "/F"])
+        .creation_flags(0x0800_0000)
+        .status();
+    std::thread::sleep(Duration::from_millis(300));
+}
+
+/// Wipe Win11 Notepad's unsaved-tab restore state (contaminates titles).
+fn clear_notepad_session() {
+    let Some(local) = std::env::var_os("LOCALAPPDATA") else { return };
+    let dir = std::path::PathBuf::from(local)
+        .join(r"Packages\Microsoft.WindowsNotepad_8wekyb3d8bbwe\LocalState\TabState");
+    if dir.is_dir() {
+        let _ = std::fs::remove_dir_all(&dir);
+        let _ = std::fs::create_dir_all(&dir);
+    }
+}
