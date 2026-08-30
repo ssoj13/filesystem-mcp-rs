@@ -30,19 +30,37 @@ pub struct MonInfo {
 /// centered on the cursor — the "look where I am" probe. Untagged serde type:
 /// the MCP layer, macro steps and wait all reuse it directly (dedup).
 ///
-/// The Cursor variant also accepts a bare number (`{cursor: 400}`) and a bare
-/// null/absent-object (default size) — hosts wrap the value inconsistently
-/// (BUG.md serialization quirks), and untagged enums fail closed on the
-/// mismatched shape, so both loose forms are tolerated explicitly.
+/// Wire shapes accepted (hosts wrap values inconsistently — BUG.md quirks —
+/// and untagged enums fail closed, so every loose form is explicit):
 #[derive(Debug, Clone, serde::Deserialize, schemars::JsonSchema)]
 #[serde(untagged)]
 pub enum CapTarget {
     Monitor { monitor: u32 },
     Win { win: u32 },
     Rect { x: i32, y: i32, w: u32, h: u32 },
+    /// {"size": N} — cursor square by side.
     Cursor { size: u32 },
-    /// Loose form: {"cursor": 400} — bare number = square side.
-    CursorBare(u32),
+    /// Nested rect: {"rect": {x, y, w, h}}.
+    RectNested { rect: RectArgs },
+    /// {"cursor": ...} — value is an object {size:N} or a bare number.
+    CursorKey { cursor: CursorSize },
+}
+
+/// Value of the `cursor` key: object or bare number.
+#[derive(Debug, Clone, serde::Deserialize, schemars::JsonSchema)]
+#[serde(untagged)]
+pub enum CursorSize {
+    Object { size: u32 },
+    Bare(u32),
+}
+
+/// Nested rect for the `rect` key.
+#[derive(Debug, Clone, serde::Deserialize, schemars::JsonSchema)]
+pub struct RectArgs {
+    pub x: i32,
+    pub y: i32,
+    pub w: u32,
+    pub h: u32,
 }
 
 /// Default cursor-square side (PLAN2.md §3).
@@ -107,11 +125,16 @@ pub fn capture(target: CapTarget) -> anyhow::Result<CapResult> {
             let half = (size / 2) as i32;
             Rect::new(cx - half, cy - half, size, size)
         }
-        CapTarget::CursorBare(size) => {
-            let (cx, cy) = cursor()?;
+        CapTarget::CursorKey { cursor } => {
+            let size = match cursor {
+                CursorSize::Object { size } => size,
+                CursorSize::Bare(size) => size,
+            };
+            let (cx, cy) = super::driver::cursor_pos()?;
             let half = (size / 2) as i32;
             Rect::new(cx - half, cy - half, size, size)
         }
+        CapTarget::RectNested { rect } => Rect::new(rect.x, rect.y, rect.w, rect.h),
         CapTarget::Win { .. } => unreachable!("handled above"),
     };
     let rect = wanted
