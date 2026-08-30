@@ -29,6 +29,11 @@ pub struct MonInfo {
 /// Capture target (PLAN2.md §3 `capture`). `Cursor` is a square of `size` px
 /// centered on the cursor — the "look where I am" probe. Untagged serde type:
 /// the MCP layer, macro steps and wait all reuse it directly (dedup).
+///
+/// The Cursor variant also accepts a bare number (`{cursor: 400}`) and a bare
+/// null/absent-object (default size) — hosts wrap the value inconsistently
+/// (BUG.md serialization quirks), and untagged enums fail closed on the
+/// mismatched shape, so both loose forms are tolerated explicitly.
 #[derive(Debug, Clone, serde::Deserialize, schemars::JsonSchema)]
 #[serde(untagged)]
 pub enum CapTarget {
@@ -36,6 +41,8 @@ pub enum CapTarget {
     Win { win: u32 },
     Rect { x: i32, y: i32, w: u32, h: u32 },
     Cursor { size: u32 },
+    /// Loose form: {"cursor": 400} — bare number = square side.
+    CursorBare(u32),
 }
 
 /// Default cursor-square side (PLAN2.md §3).
@@ -96,6 +103,11 @@ pub fn capture(target: CapTarget) -> anyhow::Result<CapResult> {
         }
         CapTarget::Rect { x, y, w, h } => Rect::new(x, y, w, h),
         CapTarget::Cursor { size } => {
+            let (cx, cy) = cursor()?;
+            let half = (size / 2) as i32;
+            Rect::new(cx - half, cy - half, size, size)
+        }
+        CapTarget::CursorBare(size) => {
             let (cx, cy) = cursor()?;
             let half = (size / 2) as i32;
             Rect::new(cx - half, cy - half, size, size)
