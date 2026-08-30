@@ -10,23 +10,33 @@ use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 /// Domain errors surfaced to MCP as typed codes (PLAN2.md §3).
+///
+/// Every message carries its payload: these strings are what an agent reads to
+/// decide what to do next, so "no window match" without the candidates, or an
+/// op-cap error without the back-off, forces blind retries.
 #[derive(Debug, thiserror::Error)]
 pub enum CtlError {
     /// Input attempted while the gate is not armed. `remaining_ms` is always 0
     /// while disarmed; the field keeps the wire shape stable for future pre-warn.
-    #[error("not armed")]
+    #[error("not armed (arm first; {remaining_ms} ms left on the current window)")]
     NotArmed { remaining_ms: u64 },
 
     /// Runaway protection tripped: too many input ops in the sliding window.
-    #[error("op cap exceeded")]
+    #[error("op cap exceeded, retry after {retry_after_ms} ms")]
     OpCapExceeded { retry_after_ms: u64 },
 
     /// Window target resolved to zero or several windows.
-    #[error("no window match")]
+    #[error("no window match: {reason}")]
     NoMatch { reason: String },
 
     /// Foreground change did not verify within the settle window.
-    #[error("focus failed")]
+    ///
+    /// Every backend that can focus a window is expected to raise it; today
+    /// only win32 implements focusing, so a non-Windows build genuinely never
+    /// constructs this variant. Remove the attribute when the second backend
+    /// lands — it is a dated note, not blanket permission.
+    #[cfg_attr(not(windows), allow(dead_code))]
+    #[error("focus failed for window {hwnd}")]
     FocusFailed { hwnd: u32 },
 }
 

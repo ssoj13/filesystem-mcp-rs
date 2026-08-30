@@ -38,7 +38,7 @@ impl FileSystemServer {
             let img = image::open(&captured.path).map_err(|e| anyhow::anyhow!("open capture: {e}"))?.to_rgba8();
             let out = match engine.as_deref().unwrap_or("media") {
                 "ocrs" => super::ocrs_local::recognize(&img, find.as_deref())?,
-                "media" => super::ocr::recognize(&img, find.as_deref())?,
+                "media" => super::driver::ocr_media(&img, find.as_deref())?,
                 other => anyhow::bail!("unknown engine {other:?} (media|ocrs)"),
             };
             Ok(serde_json::to_value(&out)?)

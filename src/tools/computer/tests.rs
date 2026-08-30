@@ -14,9 +14,8 @@
 use std::time::Duration;
 
 use super::capture::{self, CapTarget, hash_dist};
-use super::input;
 use super::safety::SafetyGate;
-use super::win::{self, WinQuery};
+use super::driver::{self, WinQuery};
 
 /// Full acceptance loop: focus → type → hash-change → OCR. #[ignore]d by
 /// default (needs a human-visible desktop, no CI).
@@ -35,7 +34,7 @@ fn canary_run() -> anyhow::Result<()> {
 
     // 1. Snapshot existing Notepad windows; ours is the diff.
     let q = WinQuery { exe: Some("notepad".into()), title: None };
-    let before: Vec<u32> = win::list_windows(Some(q.clone()))?.iter().map(|w| w.id).collect();
+    let before: Vec<u32> = driver::list_windows(Some(q.clone()))?.iter().map(|w| w.id).collect();
 
     // 2. Spawn Notepad; pid kept for cleanup.
     let child = std::process::Command::new("notepad.exe")
@@ -48,7 +47,7 @@ fn canary_run() -> anyhow::Result<()> {
     let mut id = 0u32;
     for _ in 0..50 {
         std::thread::sleep(Duration::from_millis(100));
-        let fresh = win::list_windows(Some(q.clone()))?
+        let fresh = driver::list_windows(Some(q.clone()))?
             .into_iter()
             .filter(|w| !before.contains(&w.id))
             .collect::<Vec<_>>();
@@ -64,9 +63,11 @@ fn canary_run() -> anyhow::Result<()> {
     println!("notepad window id={id}");
 
     // 4. Focus + verify foreground is our window.
-    let hwnd = windows::Win32::Foundation::HWND(id as usize as *mut core::ffi::c_void);
-    win::focus_window(hwnd)?;
-    let active = win::active()?.ok_or_else(|| anyhow::anyhow!("no active window"))?;
+    driver::focus_window(id)?;
+    let active = driver::list_windows(None)?
+        .into_iter()
+        .find(|w| w.active)
+        .ok_or_else(|| anyhow::anyhow!("no active window"))?;
     assert_eq!(active.id, id, "focus verify failed");
     println!("focused: {} ({})", active.title, active.exe);
 
@@ -76,7 +77,7 @@ fn canary_run() -> anyhow::Result<()> {
     println!("baseline hash={:016x}", base.hash);
 
     // 6. Type ASCII + unicode synthetically (KEYEVENTF_UNICODE, paste=false).
-    let r = input::type_text(&gate, "canary 123 — тест", false, 3, Some(id))?;
+    let r = driver::type_text(&gate, "canary 123 — тест", false, 3, Some(id))?;
     println!("typed: mode={} chars={}", r.mode, r.chars);
     std::thread::sleep(Duration::from_millis(300));
 
@@ -88,7 +89,7 @@ fn canary_run() -> anyhow::Result<()> {
     // 8. OCR the whole window: the typed ASCII must appear (PLAN2 §9).
     let win_cap = capture::capture(CapTarget::Win { win: id })?;
     let img = image::open(&win_cap.path)?;
-    let ocr = super::ocr::recognize(&img.to_rgba8(), Some("canary"))?;
+    let ocr = super::driver::win32::ocr::recognize(&img.to_rgba8(), Some("canary"))?;
     let hits: Vec<&str> = ocr.matches.iter().map(|m| m.text.as_str()).collect();
     println!("ocr matches: {hits:?}");
 
@@ -100,13 +101,13 @@ fn canary_run() -> anyhow::Result<()> {
     // 9. Timed-drag acceptance: hold 10 ms at the start point, drag for 1 s
     // with ease-out, release. Wall-clock must land near the target duration.
     let drag_t0 = std::time::Instant::now();
-    let f = input::drag(
+    let f = driver::drag(
         &gate,
         (active.x + 60, active.y + 100),
         (active.x + 260, active.y + 100),
-        input::Btn::Left,
+        driver::Btn::Left,
         1000,
-        crate::tools::computer::input::Ease::Out,
+        driver::Ease::Out,
         10,
     )?;
     let drag_ms = drag_t0.elapsed().as_millis();
@@ -147,12 +148,12 @@ fn juggle_run() -> anyhow::Result<()> {
     cb.set_text(marker.to_string())?;
     // 2. Paste-type into our Notepad (this MUST temporarily take the clipboard).
     let q = WinQuery { exe: Some("notepad".into()), title: None };
-    let before: Vec<u32> = win::list_windows(Some(q.clone()))?.iter().map(|w| w.id).collect();
+    let before: Vec<u32> = driver::list_windows(Some(q.clone()))?.iter().map(|w| w.id).collect();
     let pid = std::process::Command::new("notepad.exe").spawn()?.id();
     let mut id = 0u32;
     for _ in 0..50 {
         std::thread::sleep(Duration::from_millis(100));
-        if let Some(w) = win::list_windows(Some(q.clone()))?
+        if let Some(w) = driver::list_windows(Some(q.clone()))?
             .into_iter()
             .find(|w| !before.contains(&w.id))
         {
@@ -160,9 +161,8 @@ fn juggle_run() -> anyhow::Result<()> {
             break;
         }
     }
-    let hwnd = windows::Win32::Foundation::HWND(id as usize as *mut core::ffi::c_void);
-    win::focus_window(hwnd)?;
-    let r = input::type_text(&gate, marker, true, 0, Some(id))?;
+    driver::focus_window(id)?;
+    let r = driver::type_text(&gate, marker, true, 0, Some(id))?;
     println!("paste mode={} restored={:?}", r.mode, r.clipboard_restored);
     assert_eq!(r.clipboard_restored, Some(true), "clipboard must be restored");
     // 3. The marker must be back.
@@ -238,12 +238,12 @@ fn matrix_run() -> anyhow::Result<()> {
         kill_all_notepads();
         clear_notepad_session();
         // Fresh instance per scenario; own pid for cleanup.
-        let before: Vec<u32> = win::list_windows(Some(q.clone()))?.iter().map(|w| w.id).collect();
+        let before: Vec<u32> = driver::list_windows(Some(q.clone()))?.iter().map(|w| w.id).collect();
         let pid = std::process::Command::new("notepad.exe").spawn()?.id();
         let mut id = 0u32;
         for _ in 0..50 {
             std::thread::sleep(Duration::from_millis(100));
-            let fresh = win::list_windows(Some(q.clone()))?
+            let fresh = driver::list_windows(Some(q.clone()))?
                 .into_iter()
                 .filter(|w| !before.contains(&w.id))
                 .collect::<Vec<_>>();
@@ -257,16 +257,18 @@ fn matrix_run() -> anyhow::Result<()> {
             return Err(anyhow::anyhow!("notepad window did not appear"));
         }
         // Focus + verify immediately before typing.
-        let hwnd = windows::Win32::Foundation::HWND(id as usize as *mut core::ffi::c_void);
-        win::focus_window(hwnd)?;
-        let active = win::active()?.ok_or_else(|| anyhow::anyhow!("no active window"))?;
+        driver::focus_window(id)?;
+        let active = driver::list_windows(None)?
+        .into_iter()
+        .find(|w| w.active)
+        .ok_or_else(|| anyhow::anyhow!("no active window"))?;
         if active.id != id {
             kill(pid);
             return Err(anyhow::anyhow!("focus verify failed before {label:?}"));
         }
-        let r = input::type_text(&gate, text, *paste, *interval, Some(id))?;
+        let r = driver::type_text(&gate, text, *paste, *interval, Some(id))?;
         std::thread::sleep(Duration::from_millis(300));
-        let title = win::list_windows(Some(q.clone()))?
+        let title = driver::list_windows(Some(q.clone()))?
             .into_iter()
             .find(|w| w.id == id)
             .map(|w| w.title)
@@ -343,7 +345,7 @@ fn mixed_dpi_run() -> anyhow::Result<()> {
     // expected; a scale-factor error would be off by tens of percent.
     for m in &mons {
         let (cx, cy) = (m.x + m.w as i32 / 2, m.y + m.h as i32 / 2);
-        input::move_cursor(cx, cy)?;
+        driver::move_cursor(cx, cy)?;
         std::thread::sleep(Duration::from_millis(60));
         let (gx, gy) = super::driver::cursor_pos()?;
         let (dx, dy) = ((gx - cx).abs(), (gy - cy).abs());
@@ -358,12 +360,12 @@ fn mixed_dpi_run() -> anyhow::Result<()> {
 
     // 3. A window moved to each monitor must actually land inside it.
     let q = WinQuery { exe: Some("notepad".into()), title: None };
-    let before: Vec<u32> = win::list_windows(Some(q.clone()))?.iter().map(|w| w.id).collect();
+    let before: Vec<u32> = driver::list_windows(Some(q.clone()))?.iter().map(|w| w.id).collect();
     let pid = std::process::Command::new("notepad.exe").spawn()?.id();
     let mut id = 0u32;
     for _ in 0..50 {
         std::thread::sleep(Duration::from_millis(100));
-        if let Some(w) = win::list_windows(Some(q.clone()))?.into_iter().find(|w| !before.contains(&w.id)) {
+        if let Some(w) = driver::list_windows(Some(q.clone()))?.into_iter().find(|w| !before.contains(&w.id)) {
             id = w.id;
             break;
         }
@@ -372,10 +374,9 @@ fn mixed_dpi_run() -> anyhow::Result<()> {
         kill(pid);
         return Err(anyhow::anyhow!("notepad window did not appear in 5 s"));
     }
-    let hwnd = windows::Win32::Foundation::HWND(id as usize as *mut core::ffi::c_void);
     let mut placement_err = None;
     for m in &mons {
-        match win::to_monitor(hwnd, m.id) {
+        match driver::to_monitor(id, m.id) {
             Ok(info) => {
                 let (wcx, wcy) = (info.x + info.w / 2, info.y + info.h / 2);
                 let inside = wcx >= m.x && wcx < m.x + m.w as i32 && wcy >= m.y && wcy < m.y + m.h as i32;

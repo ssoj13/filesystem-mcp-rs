@@ -18,10 +18,10 @@
 //! feature; every input tool re-checks it per call. Coordinates are
 //! virtual-screen physical px (multi-monitor, negative origins allowed).
 
-// Input core: gate, mouse/keyboard, windows, macros, waits. On non-Windows
-// builds these compile against the driver fallback (loud unsupported errors).
-#[cfg(all(windows, feature = "ctl-input"))]
-pub mod input;
+// Portable core: arm gate, macro steps, waits. These are OS-independent — they
+// reach the machine only through `driver`, so they compile on every platform
+// and simply surface the backend's `unsupported` errors where a domain is
+// missing. (The OS-specific code lives under `driver/<backend>/`.)
 #[cfg(any(
     feature = "ctl-input",
     feature = "ctl-uia",
@@ -30,12 +30,10 @@ pub mod input;
     feature = "ctl-clip-files"
 ))]
 pub mod safety;
-#[cfg(all(windows, feature = "ctl-input"))]
+#[cfg(feature = "ctl-input")]
 pub mod steps;
-#[cfg(all(windows, feature = "ctl-input"))]
+#[cfg(feature = "ctl-input")]
 pub mod wait;
-#[cfg(all(windows, any(feature = "ctl-input", feature = "ctl-uia", feature = "ctl-ocr")))]
-pub mod win;
 
 // Platform driver: OS seam — portable core calls only this layer.
 #[cfg(any(
@@ -57,17 +55,11 @@ pub mod find;
 #[cfg(any(feature = "ctl-input", feature = "ctl-ocr"))]
 pub mod annotate;
 
-// Screen understanding + extras.
-#[cfg(feature = "ctl-uia")]
-pub mod uia;
-#[cfg(feature = "ctl-ocr")]
-pub mod ocr;
+// Screen understanding. The engines differ per OS (WinRT OCR lives in the
+// win32 backend), but the RESULT SHAPE is engine- and platform-independent and
+// therefore lives here — see `OcrMatch` / `OcrOut` below.
 #[cfg(feature = "ctl-ocr")]
 pub mod ocrs_local;
-#[cfg(feature = "ctl-notify")]
-pub mod notify;
-#[cfg(feature = "ctl-clip-files")]
-pub mod clip;
 
 /// Downcast CtlError for a stable wire code prefix (PLAN2.md §3 codes:
 /// not_armed / op_cap / no_match / focus_failed). Shared by all server files.
@@ -92,7 +84,7 @@ pub(crate) fn ctl_err(e: anyhow::Error) -> rmcp::ErrorData {
 pub(crate) mod server_input;
 #[cfg(any(feature = "ctl-input", feature = "ctl-uia", feature = "ctl-ocr"))]
 pub(crate) mod server_readonly;
-#[cfg(feature = "ctl-uia")]
+#[cfg(all(windows, feature = "ctl-uia"))]
 pub(crate) mod server_uia;
 #[cfg(any(feature = "ctl-ocr", feature = "ctl-notify", feature = "ctl-clip-files"))]
 pub(crate) mod server_misc;
@@ -113,6 +105,29 @@ pub(crate) fn ok_json(
     use crate::WithStructured;
     use rmcp::model::{CallToolResult, ContentBlock};
     Ok(CallToolResult::success(vec![ContentBlock::text(v.to_string())]).with_structured(v))
+}
+
+/// One matched text occurrence (per line; rect = union of its word boxes).
+/// Shared by every OCR engine so callers never care which one ran.
+#[cfg(feature = "ctl-ocr")]
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct OcrMatch {
+    pub text: String,
+    pub x: i32,
+    pub y: i32,
+    pub w: i32,
+    pub h: i32,
+}
+
+/// OCR outcome: full text, per-line rects, optional matches for `find`.
+#[cfg(feature = "ctl-ocr")]
+#[derive(Debug, serde::Serialize)]
+pub struct OcrOut {
+    pub text: String,
+    pub lines: Vec<OcrMatch>,
+    /// Only when `find` was given.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub matches: Vec<OcrMatch>,
 }
 
 /// Virtual-screen rectangle in physical pixels (may have negative origin).
@@ -165,6 +180,16 @@ impl Rect {
     feature = "ctl-ocr"
 ))]
 pub fn ensure_dpi_aware() -> anyhow::Result<()> {
+    #[cfg(not(windows))]
+    {
+        // No process-wide DPI mode exists off Windows: X11 reports physical
+        // pixels already, and Wayland/macOS scaling is per-surface, handled by
+        // the compositor. Nothing to assert, so this is a genuine no-op rather
+        // than a papered-over failure.
+        return Ok(());
+    }
+    #[cfg(windows)]
+    {
     use windows::Win32::UI::HiDpi::{
         AreDpiAwarenessContextsEqual, GetThreadDpiAwarenessContext, DPI_AWARENESS_CONTEXT,
         DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE, DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2,
@@ -191,6 +216,7 @@ pub fn ensure_dpi_aware() -> anyhow::Result<()> {
         Err(anyhow::anyhow!(
             "process DPI awareness is fixed to a non-aware context; input/capture would misalign"
         ))
+    }
     }
 }
 

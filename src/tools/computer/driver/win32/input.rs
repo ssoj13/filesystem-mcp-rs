@@ -25,8 +25,8 @@ use windows::Win32::UI::WindowsAndMessaging::{
 
 // Platform-neutral types: defined in the driver, re-exported for callers that
 // historically imported them from input (input::Btn etc.).
-pub use super::driver::{Btn, Ease, FocusInfo, TypeResult};
-use super::safety::{CtlError, SafetyGate};
+pub use crate::tools::computer::driver::{Btn, Ease, FocusInfo, TypeResult};
+use crate::tools::computer::safety::{CtlError, SafetyGate};
 use super::win;
 
 /// One mutex serializes every SendInput batch (macro down/up ordering, §5).

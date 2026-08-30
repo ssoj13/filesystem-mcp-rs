@@ -15,7 +15,7 @@ use rmcp::{
 use schemars::JsonSchema;
 use serde_json::json;
 
-use super::{annotate::{self, Shape}, capture::{self, CapTarget}, ok_json, win::{self, WinQuery}};
+use super::{annotate::{self, Shape}, capture::{self, CapTarget}, driver::{self, WinQuery}, ok_json};
 use crate::FileSystemServer;
 
 #[cfg(any(feature = "ctl-input", feature = "ctl-uia", feature = "ctl-ocr"))]
@@ -174,7 +174,7 @@ impl FileSystemServer {
             Read-only, no arm. Use it to adapt automation plans per platform."
     )]
     async fn ctl_caps(&self) -> Result<CallToolResult, McpError> {
-        ok_json(serde_json::to_value(super::driver::CAPS).map_err(|e| McpError::internal_error(e.to_string(), None))?)
+        ok_json(serde_json::to_value(super::driver::caps()).map_err(|e| McpError::internal_error(e.to_string(), None))?)
     }
 
     #[tool(
@@ -186,7 +186,7 @@ impl FileSystemServer {
         &self,
         Parameters(ListArgs { query }): Parameters<ListArgs>,
     ) -> Result<CallToolResult, McpError> {
-        let wins = tokio::task::spawn_blocking(move || win::list_windows(query))
+        let wins = tokio::task::spawn_blocking(move || driver::list_windows(query))
             .await
             .map_err(|e| McpError::internal_error(e.to_string(), None))?
             .map_err(super::ctl_err)?;

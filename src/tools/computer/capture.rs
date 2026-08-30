@@ -11,7 +11,7 @@ use serde::Serialize;
 use xcap::Monitor;
 
 use super::Rect;
-use super::win;
+
 
 /// Monitor info (agent-facing shape).
 #[derive(Debug, Clone, Serialize)]
@@ -111,7 +111,7 @@ pub fn capture(target: CapTarget) -> anyhow::Result<CapResult> {
         return save(img, rect);
     }
     // Monitor / Rect / Cursor: resolve a rect, then monitor-crop.
-    let (vx, vy, vw, vh) = win::virtual_screen();
+    let (vx, vy, vw, vh) = super::driver::virtual_screen()?;
     let bounds = Rect::new(vx, vy, vw as u32, vh as u32);
     let wanted = match target {
         CapTarget::Monitor { monitor: idx } => {

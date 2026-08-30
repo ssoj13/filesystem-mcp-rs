@@ -7,27 +7,10 @@
 
 use image::RgbaImage;
 use image::ImageEncoder as _;
-use serde::Serialize;
 
-/// One matched text occurrence (per line; rect = union of its word boxes).
-#[derive(Debug, Clone, Serialize)]
-pub struct OcrMatch {
-    pub text: String,
-    pub x: i32,
-    pub y: i32,
-    pub w: i32,
-    pub h: i32,
-}
-
-/// OCR outcome: full text, per-line rects, optional matches for `find`.
-#[derive(Debug, Serialize)]
-pub struct OcrOut {
-    pub text: String,
-    pub lines: Vec<OcrMatch>,
-    /// Only when `find` was given.
-    #[serde(skip_serializing_if = "Vec::is_empty")]
-    pub matches: Vec<OcrMatch>,
-}
+// The result shape is engine-independent and lives in the computer module, so
+// `ocr` (WinRT, here) and `ocrs_local` (portable) return the very same type.
+use crate::tools::computer::{OcrMatch, OcrOut};
 
 /// Recognize `img` (RGBA). `find` (case-insensitive) switches on bbox-matching.
 pub fn recognize(img: &RgbaImage, find: Option<&str>) -> anyhow::Result<OcrOut> {

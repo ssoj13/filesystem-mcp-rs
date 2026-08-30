@@ -13,7 +13,7 @@ use rmcp::{
 use schemars::JsonSchema;
 use serde_json::json;
 
-use super::{ok_json, uia, win::WinTarget};
+use super::{driver::WinTarget, driver::win32::uia, ok_json};
 use crate::FileSystemServer;
 
 #[cfg(feature = "ctl-uia")]

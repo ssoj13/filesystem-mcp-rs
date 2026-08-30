@@ -844,7 +844,7 @@ pub async fn run_command(
     // Create new process group for tree-kill support
     #[cfg(unix)]
     {
-        use std::os::unix::process::CommandExt;
+        // `pre_exec` is an inherent method on tokio's Command — no std trait import.
         // SAFETY: setpgid is async-signal-safe
         unsafe {
             cmd.pre_exec(|| {

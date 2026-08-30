@@ -16,13 +16,13 @@ use windows::Win32::UI::Input::KeyboardAndMouse::{
 use windows::Win32::UI::WindowsAndMessaging::{
     EnumWindows, GetForegroundWindow, GetSystemMetrics, GetWindowRect, GetWindowTextW,
     GetWindowThreadProcessId, IsIconic, IsWindow, IsWindowVisible, IsZoomed,
-    MoveWindow, PostMessageW, SetForegroundWindow, SetWindowPos, ShowWindow,
+    MoveWindow, PostMessageW, SetForegroundWindow, ShowWindow,
     SM_CXVIRTUALSCREEN, SM_CYVIRTUALSCREEN, SM_XVIRTUALSCREEN, SM_YVIRTUALSCREEN,
-    SW_MAXIMIZE, SW_MINIMIZE, SW_RESTORE, SWP_NOACTIVATE, SWP_NOZORDER, WM_CLOSE,
+    SW_MAXIMIZE, SW_MINIMIZE, SW_RESTORE, WM_CLOSE,
 };
 
-pub use super::driver::{LayoutEntry, WinInfo, WinQuery, WinTarget};
-use super::safety::CtlError;
+pub use crate::tools::computer::driver::{WinInfo, WinQuery, WinTarget};
+use crate::tools::computer::safety::CtlError;
 
 /// Virtual screen metrics: (x, y, width, height) in physical pixels.
 pub fn virtual_screen() -> (i32, i32, i32, i32) {
@@ -132,9 +132,6 @@ fn info_of(hwnd: HWND, z: i32) -> WinInfo {
 /// Visible top-level windows, optionally filtered (case-insensitive substrings).
 pub fn list_windows(query: Option<WinQuery>) -> anyhow::Result<Vec<WinInfo>> {
     let q = query.unwrap_or_default();
-    let ci = |hay: &str, needle: &Option<String>| {
-        needle.as_ref().is_none_or(|n| hay.to_lowercase().contains(&n.to_lowercase()))
-    };
     let mut out = Vec::new();
     for (z, hwnd) in hwnds()?.into_iter().enumerate() {
         // SAFETY: plain window queries.
@@ -147,7 +144,7 @@ pub fn list_windows(query: Option<WinQuery>) -> anyhow::Result<Vec<WinInfo>> {
         if info.title.is_empty() {
             continue;
         }
-        if !ci(&info.title, &q.title) || !ci(&info.exe, &q.exe) {
+        if !q.accepts(&info.title, &info.exe) {
             continue;
         }
         out.push(info);
@@ -155,33 +152,6 @@ pub fn list_windows(query: Option<WinQuery>) -> anyhow::Result<Vec<WinInfo>> {
     Ok(out)
 }
 
-/// Resolve a [`WinTarget`] to exactly one HWND; ambiguity or zero hits is an
-/// explicit [`CtlError::NoMatch`] (never "first match wins").
-pub fn resolve_target(target: &WinTarget) -> anyhow::Result<HWND> {
-    let wins = list_windows(None)?;
-    let hit = |w: &WinInfo| match target {
-        WinTarget::Id { id } => w.id == *id,
-        WinTarget::Title { title } => w.title.to_lowercase().contains(&title.to_lowercase()),
-        WinTarget::Exe { exe } => w.exe.to_lowercase().contains(&exe.to_lowercase()),
-    };
-    let matches: Vec<&WinInfo> = wins.iter().filter(|w| hit(w)).collect();
-    match matches.len() {
-        1 => Ok(HWND(matches[0].id as usize as *mut core::ffi::c_void)),
-        0 => Err(anyhow::Error::new(CtlError::NoMatch {
-            reason: format!("no visible window matches {target:?}"),
-        })),
-        n => {
-            let names: Vec<String> = matches
-                .iter()
-                .take(5)
-                .map(|w| format!("{}({})", w.title, w.exe))
-                .collect();
-            Err(anyhow::Error::new(CtlError::NoMatch {
-                reason: format!("{n} windows match {target:?}: {}", names.join(", ")),
-            }))
-        }
-    }
-}
 
 fn alt_input(up: bool) -> INPUT {
     INPUT {
@@ -246,37 +216,6 @@ pub fn focus_window(hwnd: HWND) -> anyhow::Result<()> {
     Err(anyhow::Error::new(CtlError::FocusFailed { hwnd: hwnd.0 as u32 }))
 }
 
-/// Currently focused window (None on the rare empty foreground).
-/// Used by the canary test; kept as part of the extractable module API.
-#[cfg_attr(not(test), allow(dead_code))]
-pub fn active() -> anyhow::Result<Option<WinInfo>> {
-    let hwnd = unsafe { GetForegroundWindow() };
-    if hwnd.0.is_null() {
-        return Ok(None);
-    }
-    Ok(Some(info_of(hwnd, 0)))
-}
-
-/// Move a window fully onto monitor `idx` (top-left corner at the monitor's
-/// origin, sized to the monitor) and return fresh geometry. Useful after
-/// monitor changes or for multi-monitor layouts.
-pub fn to_monitor(hwnd: HWND, monitor: u32) -> anyhow::Result<WinInfo> {
-    let ms = super::capture::monitors()?;
-    let m = ms
-        .get(monitor as usize)
-        .ok_or_else(|| anyhow::anyhow!("monitor {monitor} not found (0..={})", ms.len() - 1))?;
-    // Restore first: a maximized window ignores MoveWindow geometry.
-    if unsafe { IsIconic(hwnd) }.as_bool() {
-        let shown = unsafe { ShowWindow(hwnd, SW_RESTORE) };
-        if !shown.as_bool() {
-            tracing::debug!("ShowWindow(SW_RESTORE) returned false for {hwnd:?}");
-        }
-    }
-    unsafe { MoveWindow(hwnd, m.x, m.y, m.w as i32, m.h as i32, true) }
-        .map_err(|e| anyhow::anyhow!("MoveWindow({hwnd:?} -> monitor {monitor}): {e}"))?;
-    Ok(info_of(hwnd, 0))
-}
-
 /// Move/resize and/or set window state (`min` | `max` | `restore`).
 /// State applies first, then geometry (all four of x/y/w/h must be given).
 /// Returns fresh geometry after the operation.
@@ -327,53 +266,5 @@ pub fn close(hwnd: HWND) -> anyhow::Result<()> {
     ))
 }
 
-/// Snapshot every visible top-level window into `<data>/computer-mcp-rs/layouts/<name>.json`.
-pub fn layout_save(name: &str) -> anyhow::Result<Vec<LayoutEntry>> {
-    let entries: Vec<LayoutEntry> = list_windows(None)?
-        .into_iter()
-        .filter(|w| w.w > 0 && w.h > 0)
-        .map(|w| LayoutEntry { id: w.id, title: w.title, exe: w.exe, x: w.x, y: w.y, w: w.w, h: w.h })
-        .collect();
-    let path = layout_path(name)?;
-    let json = serde_json::to_string_pretty(&entries)?;
-    std::fs::write(&path, json)?;
-    Ok(entries)
-}
 
-/// Restore a layout by window id. `dry_run` reports what WOULD move without
-/// touching anything. Ids are HWND-bound: windows reopened since the save keep
-/// their id only by luck — the response lists applied/skipped so the agent sees it.
-pub fn layout_load(name: &str, dry_run: bool) -> anyhow::Result<Vec<(LayoutEntry, bool)>> {
-    let raw = std::fs::read_to_string(layout_path(name)?)?;
-    let entries: Vec<LayoutEntry> = serde_json::from_str(&raw)?;
-    let mut out = Vec::with_capacity(entries.len());
-    for e in entries {
-        if dry_run {
-            out.push((e, false));
-            continue;
-        }
-        let hwnd = HWND(e.id as usize as *mut core::ffi::c_void);
-        if !unsafe { IsWindow(Some(hwnd)) }.as_bool() {
-            out.push((e, false));
-            continue;
-        }
-        let placed = unsafe {
-            SetWindowPos(hwnd, None, e.x, e.y, e.w, e.h, SWP_NOZORDER | SWP_NOACTIVATE)
-        };
-        out.push((e, placed.is_ok()));
-    }
-    Ok(out)
-}
 
-fn layout_path(name: &str) -> anyhow::Result<std::path::PathBuf> {
-    let safe: String = name.chars().filter(|c| c.is_ascii_alphanumeric() || *c == '-' || *c == '_').collect();
-    if safe.is_empty() {
-        return Err(anyhow::anyhow!("layout name must be alphanumeric"));
-    }
-    let dir = dirs::data_dir()
-        .unwrap_or_else(std::env::temp_dir)
-        .join("computer-mcp-rs")
-        .join("layouts");
-    std::fs::create_dir_all(&dir)?;
-    Ok(dir.join(format!("{safe}.json")))
-}

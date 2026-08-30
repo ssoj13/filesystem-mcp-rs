@@ -20,8 +20,8 @@ use uiautomation::types::Handle;
 use uiautomation::{UIAutomation, UIMatcher, UIElement};
 
 use super::input;
-use super::safety::SafetyGate;
-use super::win::{self, WinTarget};
+use crate::tools::computer::safety::SafetyGate;
+use super::win::WinTarget;
 
 /// One UI element (agent-facing shape).
 #[derive(Debug, Clone, Serialize)]
@@ -53,7 +53,7 @@ pub struct UiElem {
 /// Resolve the window to work in (target or active foreground).
 fn target_hwnd(win_target: Option<WinTarget>) -> anyhow::Result<windows::Win32::Foundation::HWND> {
     match win_target {
-        Some(t) => win::resolve_target(&t),
+        Some(t) => crate::tools::computer::driver::resolve_target(&t).map(super::hwnd),
         None => {
             let fg = unsafe { windows::Win32::UI::WindowsAndMessaging::GetForegroundWindow() };
             if fg.0.is_null() {

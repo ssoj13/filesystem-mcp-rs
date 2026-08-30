@@ -46,28 +46,12 @@ xcap = { version = "0.9", optional = true }
 arboard = { version = "3", optional = true }
 
 # Computer-control optional deps (features ctl-*; see docs/computer_module.md).
-windows = { version = "0.62", optional = true, features = [
-    "Win32_Foundation",
-    "Win32_UI_WindowsAndMessaging",
-    "Win32_UI_Input_KeyboardAndMouse",
-    "Win32_Graphics_Dwm",
-    "Win32_Graphics_Gdi",
-    "Win32_UI_HiDpi",
-    "Win32_System_Threading",
-    "Win32_System_DataExchange",
-    # WinRT OCR (ctl-ocr): Media_Ocr + imaging/streams/globalization.
-    "Foundation",
-    "Media_Ocr",
-    "Graphics_Imaging",
-    "Storage_Streams",
-    "Globalization",
-] }
-uiautomation = { version = "0.25", optional = true }
+# OS-specific ones live in the target tables at the bottom of this file: a
+# `dep:` in a feature is simply a no-op on a target that does not declare it,
+# so `computer-tools` stays one name on every platform.
 # Local neural OCR (pure Rust, RTen CPU inference) + model auto-download.
 ocrs = { version = "0.13", optional = true }
 rten = { version = "0.26", optional = true }
-tauri-winrt-notification = { version = "0.7", optional = true }
-clipboard-win = { version = "5.4", optional = true }
 
 # Hashing
 sha1 = "0.11"
@@ -156,3 +140,32 @@ ctl-clip-files = ["dep:clipboard-win"]
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
+
+# --- Computer control, Windows backend -------------------------------------
+[target.'cfg(windows)'.dependencies]
+windows = { version = "0.62", optional = true, features = [
+    "Win32_Foundation",
+    "Win32_UI_WindowsAndMessaging",
+    "Win32_UI_Input_KeyboardAndMouse",
+    "Win32_Graphics_Dwm",
+    "Win32_Graphics_Gdi",
+    "Win32_UI_HiDpi",
+    "Win32_System_Threading",
+    "Win32_System_DataExchange",
+    # WinRT OCR (ctl-ocr): Media_Ocr + imaging/streams/globalization.
+    "Foundation",
+    "Media_Ocr",
+    "Graphics_Imaging",
+    "Storage_Streams",
+    "Globalization",
+] }
+uiautomation = { version = "0.25", optional = true }
+tauri-winrt-notification = { version = "0.7", optional = true }
+clipboard-win = { version = "5.4", optional = true }
+
+# --- Computer control, mac/Linux backends ----------------------------------
+# Own backends, not a third-party input crate: the X11 path is pure Rust
+# (x11rb XTEST + core GetKeyboardMapping + xkeysym tables, no libxkbcommon),
+# and the tuned semantics above the seam (paste-mode typing, focus gating,
+# timed drag) belong to us on every OS. Deps land here as each backend is
+# implemented — see src/tools/computer/driver/CLAUDE.md for the status matrix.

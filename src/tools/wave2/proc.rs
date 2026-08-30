@@ -1,6 +1,12 @@
 //! Process utilities - proc_tree, proc_env, proc_files.
 
-#[cfg(not(target_os = "windows"))]
+// Only `proc_files_bsd` uses it, and that is BSD/macOS-only.
+#[cfg(any(
+    target_os = "macos",
+    target_os = "freebsd",
+    target_os = "openbsd",
+    target_os = "netbsd"
+))]
 use anyhow::Context;
 use anyhow::{Result, bail};
 use serde_json::{Value, json};

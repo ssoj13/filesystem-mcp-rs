@@ -16,10 +16,8 @@ use serde_json::json;
 
 use super::{
     capture::CapTarget,
-    driver,
-    input::Btn,
+    driver::{self, Btn, WinQuery, WinTarget},
     ok_json,
-    win::{self, WinTarget},
 };
 use crate::FileSystemServer;
 
@@ -151,7 +149,7 @@ impl FileSystemServer {
         let expect = match target {
             Some(t) => {
                 let hwnd_id = tokio::task::spawn_blocking(move || {
-                    win::resolve_target(&t).map(|h| h.0 as u32)
+                    driver::resolve_target(&t)
                 })
                 .await
                 .map_err(|e| McpError::internal_error(e.to_string(), None))?
@@ -187,7 +185,7 @@ impl FileSystemServer {
             let id = driver::resolve_target(&target)?;
             gate.check()?;
             driver::focus_window(id)?;
-            driver::list_windows(Some(win::WinQuery::default()))?
+            driver::list_windows(Some(WinQuery::default()))?
                 .into_iter()
                 .find(|w| w.id == id)
                 .ok_or_else(|| anyhow::anyhow!("focused window vanished"))
@@ -384,10 +382,10 @@ fn parse_btn(s: Option<&str>) -> Result<Btn, McpError> {
     }
 }
 
-fn parse_ease(s: Option<&str>) -> Result<super::input::Ease, McpError> {
+fn parse_ease(s: Option<&str>) -> Result<super::driver::Ease, McpError> {
     match s.unwrap_or("linear") {
-        "linear" => Ok(super::input::Ease::Linear),
-        "out" => Ok(super::input::Ease::Out),
+        "linear" => Ok(super::driver::Ease::Linear),
+        "out" => Ok(super::driver::Ease::Out),
         other => Err(McpError::invalid_params(format!("unknown ease {other:?}"), None)),
     }
 }
@@ -515,7 +513,7 @@ pub struct WaitArgs {
     /// screen_change: capture target (default cursor square).
     pub target: Option<CapTarget>,
     /// window: filter (title/exe substrings).
-    pub query: Option<win::WinQuery>,
+    pub query: Option<WinQuery>,
     /// screen_change: previous dhash (omitted -> hash now, wait for change).
     pub since: Option<u64>,
     /// color: pixel + target RGB (tol = max per-channel delta, default 12).

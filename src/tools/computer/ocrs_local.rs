@@ -19,7 +19,7 @@ use std::sync::OnceLock;
 use ocrs::{ImageSource, OcrEngine, OcrEngineParams};
 use rten::Model;
 
-use super::ocr::{OcrMatch, OcrOut};
+use super::{OcrMatch, OcrOut};
 
 const DETECT_URL: &str = "https://ocrs-models.s3-accelerate.amazonaws.com/text-detection.rten";
 const RECOG_URL: &str = "https://ocrs-models.s3-accelerate.amazonaws.com/text-recognition.rten";

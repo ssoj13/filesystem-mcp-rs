@@ -4,11 +4,10 @@
 use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
-use windows::Win32::System::DataExchange::GetClipboardSequenceNumber;
 
 use super::capture::{self, CapTarget, hash_dist, default_cursor_size};
 use super::driver;
-use super::win::WinQuery;
+use super::driver::WinQuery;
 
 /// Default dhash distance for "screen changed" (§6.6).
 const CHANGE_EPS: u32 = 6;
@@ -101,13 +100,13 @@ pub fn wait(
             }
         }
         Kind::Clipboard => {
-            let base = clipboard_seq();
+            let base = super::driver::clipboard_seq()?;
             loop {
                 if started.elapsed() > deadline {
                     return Ok(WaitResult { ok: false, hash: None, wins: None, rgb: None });
                 }
                 std::thread::sleep(poll);
-                if clipboard_seq() != base {
+                if super::driver::clipboard_seq()? != base {
                     return Ok(WaitResult { ok: true, hash: None, wins: None, rgb: None });
                 }
             }
@@ -133,8 +132,3 @@ pub fn wait(
     }
 }
 
-/// Clipboard change counter (cheap; no clipboard open needed).
-fn clipboard_seq() -> u32 {
-    // SAFETY: pure query.
-    unsafe { GetClipboardSequenceNumber() }
-}

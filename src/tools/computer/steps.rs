@@ -142,9 +142,12 @@ fn run_step(gate: &SafetyGate, step: &Step) -> anyhow::Result<serde_json::Value>
         }
         Step::Drag { from, to, button, duration_ms, ease, hold_ms } => {
             let btn = *button.as_ref().unwrap_or(&Btn::Left);
+            // No explicit start = drag from where the cursor is. A failed
+            // query must NOT fall back to (0,0): that would silently drag from
+            // the screen corner instead of refusing.
             let start = match from {
                 Some(p) => (p.x, p.y),
-                None => cursor_now(),
+                None => driver::cursor_pos()?,
             };
             let f = driver::drag(
                 gate,
@@ -169,7 +172,7 @@ fn run_step(gate: &SafetyGate, step: &Step) -> anyhow::Result<serde_json::Value>
             let paste = paste.unwrap_or(true);
             // Paste safety: the expected window is whatever is focused NOW —
             // a focus change between steps refuses the paste (critic §10.2).
-            let expect = if paste { Some(driver::focus().hwnd) } else { None };
+            let expect = if paste { Some(driver::focus()?.hwnd) } else { None };
             let r = driver::type_text(gate, text, paste, 0, expect)?;
             Ok(serde_json::json!({ "mode": r.mode, "chars": r.chars, "focus": r.focus, "clipboard_restored": r.clipboard_restored }))
         }
@@ -207,7 +210,7 @@ fn run_step(gate: &SafetyGate, step: &Step) -> anyhow::Result<serde_json::Value>
             gate.check()?;
             let id = driver::resolve_target(target)?;
             driver::focus_window(id)?;
-            Ok(serde_json::json!({ "focus": driver::focus() }))
+            Ok(serde_json::json!({ "focus": driver::focus()? }))
         }
     }
 }
@@ -304,14 +307,6 @@ fn lookup_ref(
     Ok(cur.clone())
 }
 
-
-fn cursor_now() -> (i32, i32) {
-    use windows::Win32::Foundation::POINT;
-    use windows::Win32::UI::WindowsAndMessaging::GetCursorPos;
-    let mut p = POINT::default();
-    // SAFETY: out-pointer only.
-    unsafe { GetCursorPos(&mut p) }.ok().map(|_| (p.x, p.y)).unwrap_or((0, 0))
-}
 
 #[cfg(test)]
 mod tests {
