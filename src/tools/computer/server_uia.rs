@@ -21,7 +21,8 @@ use crate::FileSystemServer;
 impl FileSystemServer {
     #[tool(
         name = "ui",
-        description = "UI Automation element list for a window (target | active): name, role, rect, enabled.\n\
+        description = "UI Automation element list for a window (target | active): name, auto_id, role,\n\
+            class, patterns, toggle state, value, rect, enabled, offscreen.\n\
             query filters names case-insensitively; max caps output (server-side filter is mandatory)."
     )]
     async fn ctl_ui(
@@ -39,8 +40,9 @@ impl FileSystemServer {
 
     #[tool(
         name = "ui_click",
-        description = "Click a UI element by name (Invoke pattern first, synthesized click at center as\n\
-            fallback). Most reliable click path: UIA -> OCR -> pixels. Requires arm."
+        description = "Click a UI element by name or automation id. Pattern-aware: Invoke -> Toggle ->\n\
+            ExpandCollapse -> SelectionItem -> synthesized click fallback; offscreen elements are\n\
+            scrolled into view first. Most reliable click path: UIA -> OCR -> pixels. Requires arm."
     )]
     async fn ctl_ui_click(
         &self,
@@ -53,6 +55,23 @@ impl FileSystemServer {
         .await
         .map_err(|e| McpError::internal_error(e.to_string(), None))?
         .map_err(super::ctl_err)?;
+        ok_json(res)
+    }
+
+    #[tool(
+        name = "ui_get",
+        description = "Read one UI element's full state by name or automation id: name, role, auto_id,\n\
+            class, patterns, toggle state, value, rect, enabled, offscreen, total matches.\n\
+            The \"look before acting\" for UIA. No arm needed."
+    )]
+    async fn ctl_ui_get(
+        &self,
+        Parameters(UiClickArgs { target, name, idx }): Parameters<UiClickArgs>,
+    ) -> Result<CallToolResult, McpError> {
+        let res = tokio::task::spawn_blocking(move || uia::get(target, &name, idx.unwrap_or(0)))
+            .await
+            .map_err(|e| McpError::internal_error(e.to_string(), None))?
+            .map_err(super::ctl_err)?;
         ok_json(res)
     }
 
