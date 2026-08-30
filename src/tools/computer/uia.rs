@@ -165,20 +165,6 @@ fn value_of(el: &UIElement) -> Option<String> {
     v.get_value().ok()
 }
 
-/// Find elements by name (CI substring) under a window, depth-limited.
-/// Superseded by [`find_2`] (name-or-automation-id); kept for direct callers.
-#[cfg(test)]
-fn find_named(automation: UIAutomation, hwnd: windows::Win32::Foundation::HWND, name: &str, depth: u32) -> anyhow::Result<Vec<UIElement>> {
-    let needle = name.to_lowercase();
-    let elements = matcher(automation, hwnd, depth)?
-        .find_all()
-        .map_err(|e| anyhow::anyhow!("find_all: {e}"))?;
-    Ok(elements
-        .into_iter()
-        .filter(|el| el.get_name().unwrap_or_default().to_lowercase().contains(&needle))
-        .collect())
-}
-
 fn rect_of(el: &UIElement) -> (i32, i32, i32, i32) {
     match el.get_bounding_rectangle() {
         Ok(r) => (r.get_left(), r.get_top(), r.get_width(), r.get_height()),
@@ -186,7 +172,7 @@ fn rect_of(el: &UIElement) -> (i32, i32, i32, i32) {
     }
 }
 
-/// Click an element matched by name (or automation id — see `find_2`).
+/// Click an element matched by name (or automation id — see `find_el`).
 /// Pattern-aware action order: Invoke (buttons/links) → Toggle (checkboxes)
 /// → ExpandCollapse (dropdowns) → SelectionItem (list items) → synthesized
 /// click at element center as last resort (requires the gate).
@@ -198,7 +184,7 @@ pub fn click(
 ) -> anyhow::Result<serde_json::Value> {
     let hwnd = target_hwnd(win_target)?;
     let automation = UIAutomation::new().map_err(|e| anyhow::anyhow!("COM/UIA init: {e}"))?;
-    let matches = find_2(automation, hwnd, name, 8)?;
+    let matches = find_el(automation, hwnd, name, 8)?;
     let el = matches
         .get(idx)
         .ok_or_else(|| anyhow::anyhow!("{}/{} matches for {name:?}", matches.len(), idx))?;
@@ -240,7 +226,7 @@ pub fn click(
 
 /// Find by name OR automation id (exact match on auto_id preferred — it's
 /// the stable handle; falls back to CI-substring name match).
-fn find_2(automation: UIAutomation, hwnd: windows::Win32::Foundation::HWND, name: &str, depth: u32) -> anyhow::Result<Vec<UIElement>> {
+fn find_el(automation: UIAutomation, hwnd: windows::Win32::Foundation::HWND, name: &str, depth: u32) -> anyhow::Result<Vec<UIElement>> {
     let elements = matcher(automation, hwnd, depth)?
         .find_all()
         .map_err(|e| anyhow::anyhow!("find_all: {e}"))?;
@@ -269,7 +255,7 @@ pub fn get(
 ) -> anyhow::Result<serde_json::Value> {
     let hwnd = target_hwnd(win_target)?;
     let automation = UIAutomation::new().map_err(|e| anyhow::anyhow!("COM/UIA init: {e}"))?;
-    let matches = find_2(automation, hwnd, name, 8)?;
+    let matches = find_el(automation, hwnd, name, 8)?;
     let el = matches
         .get(idx)
         .ok_or_else(|| anyhow::anyhow!("{}/{} matches for {name:?}", matches.len(), idx))?;
@@ -298,7 +284,7 @@ pub fn set_value(
 ) -> anyhow::Result<()> {
     let hwnd = target_hwnd(win_target)?;
     let automation = UIAutomation::new().map_err(|e| anyhow::anyhow!("COM/UIA init: {e}"))?;
-    let matches = find_2(automation, hwnd, name, 8)?;
+    let matches = find_el(automation, hwnd, name, 8)?;
     let el = matches
         .get(idx)
         .ok_or_else(|| anyhow::anyhow!("{}/{} matches for {name:?}", matches.len(), idx))?;

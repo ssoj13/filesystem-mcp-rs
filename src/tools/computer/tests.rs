@@ -288,6 +288,148 @@ fn matrix_run() -> anyhow::Result<()> {
     Ok(())
 }
 
+/// Mixed-DPI field test: with per-monitor-v2 awareness the WHOLE stack must
+/// speak one coordinate space — virtual-screen physical px — no matter what
+/// scale factor each monitor runs at. A system-aware (or unaware) process
+/// would pass on the primary monitor and quietly misalign on the scaled one,
+/// which is exactly the bug class this test exists to catch.
+///
+/// Skips itself (prints SKIP, does not fail) unless the machine actually has
+/// two monitors with DIFFERENT scale factors — that is the only configuration
+/// where the check means anything.
+///
+/// ```sh
+/// cargo test --features computer-tools mixed_dpi_fields -- --ignored --nocapture
+/// ```
+#[test]
+#[ignore = "interactive desktop; needs >=2 monitors with different scale factors"]
+fn mixed_dpi_fields() {
+    if let Err(e) = mixed_dpi_run() {
+        panic!("MIXED-DPI FAIL: {e:#}");
+    }
+}
+
+fn mixed_dpi_run() -> anyhow::Result<()> {
+    super::ensure_dpi_aware()?;
+    let gate = SafetyGate::new(240);
+    gate.arm(Duration::from_secs(60));
+
+    let mons = capture::monitors()?;
+    for m in &mons {
+        println!("monitor {}: {:>5}x{:<5} at {:>6},{:<6} scale={} primary={}", m.id, m.w, m.h, m.x, m.y, m.scale, m.primary);
+    }
+    let scales: Vec<f32> = mons.iter().map(|m| m.scale).collect();
+    let mixed = scales.iter().any(|s| (s - scales[0]).abs() > f32::EPSILON);
+    if mons.len() < 2 || !mixed {
+        println!("SKIP: need >=2 monitors with different scale factors (have {} monitor(s), scales {scales:?})", mons.len());
+        return Ok(());
+    }
+
+    // 1. capture{monitor:i} must report exactly the rect `monitors` advertises.
+    // A DPI-unaware capture path returns logical (scaled) sizes here.
+    for m in &mons {
+        let cap = capture::capture(CapTarget::Monitor { monitor: m.id })?;
+        if (cap.rect.x, cap.rect.y, cap.rect.w, cap.rect.h) != (m.x, m.y, m.w, m.h) {
+            return Err(anyhow::anyhow!(
+                "monitor {} capture rect {:?} != advertised {}x{} at {},{} (scale {})",
+                m.id, cap.rect, m.w, m.h, m.x, m.y, m.scale
+            ));
+        }
+        println!("monitor {} capture rect OK ({:?})", m.id, cap.rect);
+    }
+
+    // 2. Cursor round-trip through every monitor center. SendInput normalizes
+    // to a 0..65535 virtual-desk grid, so a pixel or two of rounding is
+    // expected; a scale-factor error would be off by tens of percent.
+    for m in &mons {
+        let (cx, cy) = (m.x + m.w as i32 / 2, m.y + m.h as i32 / 2);
+        input::move_cursor(cx, cy)?;
+        std::thread::sleep(Duration::from_millis(60));
+        let (gx, gy) = super::driver::cursor_pos()?;
+        let (dx, dy) = ((gx - cx).abs(), (gy - cy).abs());
+        println!("monitor {} cursor round-trip: wanted {cx},{cy} got {gx},{gy} (d={dx},{dy})", m.id);
+        if dx > 2 || dy > 2 {
+            return Err(anyhow::anyhow!(
+                "monitor {} (scale {}): cursor landed {dx},{dy} px off — coordinate spaces disagree",
+                m.id, m.scale
+            ));
+        }
+    }
+
+    // 3. A window moved to each monitor must actually land inside it.
+    let q = WinQuery { exe: Some("notepad".into()), title: None };
+    let before: Vec<u32> = win::list_windows(Some(q.clone()))?.iter().map(|w| w.id).collect();
+    let pid = std::process::Command::new("notepad.exe").spawn()?.id();
+    let mut id = 0u32;
+    for _ in 0..50 {
+        std::thread::sleep(Duration::from_millis(100));
+        if let Some(w) = win::list_windows(Some(q.clone()))?.into_iter().find(|w| !before.contains(&w.id)) {
+            id = w.id;
+            break;
+        }
+    }
+    if id == 0 {
+        kill(pid);
+        return Err(anyhow::anyhow!("notepad window did not appear in 5 s"));
+    }
+    let hwnd = windows::Win32::Foundation::HWND(id as usize as *mut core::ffi::c_void);
+    let mut placement_err = None;
+    for m in &mons {
+        match win::to_monitor(hwnd, m.id) {
+            Ok(info) => {
+                let (wcx, wcy) = (info.x + info.w / 2, info.y + info.h / 2);
+                let inside = wcx >= m.x && wcx < m.x + m.w as i32 && wcy >= m.y && wcy < m.y + m.h as i32;
+                println!("win -> monitor {}: rect {},{} {}x{} center {wcx},{wcy} inside={inside}", m.id, info.x, info.y, info.w, info.h);
+                if !inside {
+                    placement_err = Some(format!("window center {wcx},{wcy} is not on monitor {}", m.id));
+                    break;
+                }
+            }
+            Err(e) => {
+                placement_err = Some(format!("to_monitor({}) failed: {e:#}", m.id));
+                break;
+            }
+        }
+    }
+
+    // 4. Template matching is FIXED-SCALE by design: a patch cut from one
+    // monitor is only expected to match on that same monitor. Verify the
+    // same-scale case round-trips to the exact screen coords it came from.
+    let mut match_err = None;
+    for m in &mons {
+        let patch_rect = super::Rect::new(m.x + 40, m.y + 40, 60, 40);
+        let patch = capture::capture(CapTarget::Rect { x: patch_rect.x, y: patch_rect.y, w: patch_rect.w, h: patch_rect.h })?;
+        let tpl = image::open(&patch.path)?.to_rgba8();
+        let scene_cap = capture::capture(CapTarget::Monitor { monitor: m.id })?;
+        let scene = image::open(&scene_cap.path)?.to_rgba8();
+        let hits = super::find::find_template(&scene, &tpl, 0.9, 1)?;
+        match hits.first() {
+            Some(hit) => {
+                let (sx, sy) = (hit.x + scene_cap.rect.x, hit.y + scene_cap.rect.y);
+                println!("monitor {} template found at screen {sx},{sy} (cut from {},{}) score={:.3}", m.id, patch_rect.x, patch_rect.y, hit.score);
+                if (sx - patch_rect.x).abs() > 2 || (sy - patch_rect.y).abs() > 2 {
+                    match_err = Some(format!("monitor {}: template mapped back to {sx},{sy}, cut from {},{}", m.id, patch_rect.x, patch_rect.y));
+                    break;
+                }
+            }
+            None => {
+                match_err = Some(format!("monitor {}: a patch cut from this very monitor did not match itself", m.id));
+                break;
+            }
+        }
+    }
+
+    kill(pid);
+    if let Some(e) = placement_err {
+        return Err(anyhow::anyhow!(e));
+    }
+    if let Some(e) = match_err {
+        return Err(anyhow::anyhow!(e));
+    }
+    println!("MIXED-DPI OK across {} monitors, scales {scales:?}", mons.len());
+    Ok(())
+}
+
 /// Kill every Notepad (this test owns the machine's Notepad state while running).
 fn kill_all_notepads() {
     use std::os::windows::process::CommandExt;

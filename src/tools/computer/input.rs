@@ -119,34 +119,6 @@ pub fn parse_combo(combo: &str) -> anyhow::Result<Vec<VIRTUAL_KEY>> {
     Ok(mods)
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn combo_parser() {
-        let codes = parse_combo("ctrl+shift+t").unwrap();
-        assert_eq!(codes.iter().map(|c| c.0).collect::<Vec<_>>(), vec![0x11, 0x10, 0x54]); // shift = 0x10
-        assert_eq!(parse_combo("Enter").unwrap()[0].0, VK_RETURN.0);
-        assert_eq!(parse_combo("f5").unwrap()[0].0, VK_F1.0 + 4);
-        assert_eq!(parse_combo("ctrl+alt+del").unwrap()[0].0, 0x11); // ctrl before alt
-    }
-
-    #[test]
-    fn combo_errors() {
-        assert!(parse_combo("ctrl+shift").is_err()); // no main key
-        assert!(parse_combo("ctrl++").is_err()); // empty part
-        assert!(parse_combo("ctrl+wat+enter").is_err()); // unknown key
-        assert!(parse_combo("ctrl+enter+tab").is_err()); // two mains
-    }
-
-    #[test]
-    fn vk_names() {
-        assert_eq!(vk("ctrl").unwrap().0, VK_CONTROL.0);
-        assert_eq!(vk("pgdn").unwrap().0, VK_NEXT.0);
-        assert!(vk("wat").is_none());
-    }
-}
 /// Dispatch one SendInput batch; error on partial delivery (never silently drop).
 fn send_batch(batch: &[INPUT]) -> anyhow::Result<()> {
     if batch.is_empty() {
@@ -523,4 +495,33 @@ pub fn type_text(
     }
     gate.record("key_type", serde_json::json!({ "mode": "unicode", "chars": chars }))?;
     Ok(TypeResult { mode: "unicode", chars, clipboard_restored: None, focus: focus() })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn combo_parser() {
+        let codes = parse_combo("ctrl+shift+t").unwrap();
+        assert_eq!(codes.iter().map(|c| c.0).collect::<Vec<_>>(), vec![0x11, 0x10, 0x54]); // shift = 0x10
+        assert_eq!(parse_combo("Enter").unwrap()[0].0, VK_RETURN.0);
+        assert_eq!(parse_combo("f5").unwrap()[0].0, VK_F1.0 + 4);
+        assert_eq!(parse_combo("ctrl+alt+del").unwrap()[0].0, 0x11); // ctrl before alt
+    }
+
+    #[test]
+    fn combo_errors() {
+        assert!(parse_combo("ctrl+shift").is_err()); // no main key
+        assert!(parse_combo("ctrl++").is_err()); // empty part
+        assert!(parse_combo("ctrl+wat+enter").is_err()); // unknown key
+        assert!(parse_combo("ctrl+enter+tab").is_err()); // two mains
+    }
+
+    #[test]
+    fn vk_names() {
+        assert_eq!(vk("ctrl").unwrap().0, VK_CONTROL.0);
+        assert_eq!(vk("pgdn").unwrap().0, VK_NEXT.0);
+        assert!(vk("wat").is_none());
+    }
 }

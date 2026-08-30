@@ -120,20 +120,12 @@ pub fn capture(target: CapTarget) -> anyhow::Result<CapResult> {
             Rect::new(m.x, m.y, m.w, m.h)
         }
         CapTarget::Rect { x, y, w, h } => Rect::new(x, y, w, h),
-        CapTarget::Cursor { size } => {
-            let (cx, cy) = cursor()?;
-            let half = (size / 2) as i32;
-            Rect::new(cx - half, cy - half, size, size)
-        }
-        CapTarget::CursorKey { cursor } => {
-            let size = match cursor {
-                CursorSize::Object { size } => size,
-                CursorSize::Bare(size) => size,
-            };
-            let (cx, cy) = super::driver::cursor_pos()?;
-            let half = (size / 2) as i32;
-            Rect::new(cx - half, cy - half, size, size)
-        }
+        // Both cursor wire shapes reduce to one side length, one rect.
+        CapTarget::Cursor { size } => cursor_rect(size)?,
+        CapTarget::CursorKey { cursor } => cursor_rect(match cursor {
+            CursorSize::Object { size } => size,
+            CursorSize::Bare(size) => size,
+        })?,
         CapTarget::RectNested { rect } => Rect::new(rect.x, rect.y, rect.w, rect.h),
         CapTarget::Win { .. } => unreachable!("handled above"),
     };
@@ -174,10 +166,13 @@ fn monitor_for(rect: &Rect) -> anyhow::Result<Monitor> {
         .ok_or_else(|| anyhow::anyhow!("no monitor contains rect {rect:?}"))
 }
 
-/// Cursor position via the platform driver (real on win32; unsupported
-/// elsewhere until a non-Windows cursor backend lands).
-fn cursor() -> anyhow::Result<(i32, i32)> {
-    super::driver::cursor_pos()
+/// Square of side `size` centered on the cursor. Cursor position comes from
+/// the platform driver (real on win32; unsupported elsewhere until a
+/// non-Windows cursor backend lands).
+fn cursor_rect(size: u32) -> anyhow::Result<Rect> {
+    let (cx, cy) = super::driver::cursor_pos()?;
+    let half = (size / 2) as i32;
+    Ok(Rect::new(cx - half, cy - half, size, size))
 }
 
 fn save(img: RgbaImage, rect: Rect) -> anyhow::Result<CapResult> {
@@ -188,7 +183,8 @@ fn save(img: RgbaImage, rect: Rect) -> anyhow::Result<CapResult> {
     Ok(CapResult { path: path.display().to_string(), hash: dhash64(&img), rect })
 }
 
-fn now_ms() -> u128 {
+/// Millisecond timestamp for artifact filenames (shared with `annotate`).
+pub(super) fn now_ms() -> u128 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_millis())

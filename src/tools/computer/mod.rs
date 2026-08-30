@@ -53,6 +53,9 @@ pub mod capture;
 // Template matching (find_image) — same passive class, same deps.
 #[cfg(any(feature = "ctl-input", feature = "ctl-ocr"))]
 pub mod find;
+// Draw found rects back onto a capture (verify coordinates before clicking).
+#[cfg(any(feature = "ctl-input", feature = "ctl-ocr"))]
+pub mod annotate;
 
 // Screen understanding + extras.
 #[cfg(feature = "ctl-uia")]
@@ -66,13 +69,6 @@ pub mod notify;
 #[cfg(feature = "ctl-clip-files")]
 pub mod clip;
 
-#[cfg(any(
-    feature = "ctl-input",
-    feature = "ctl-uia",
-    feature = "ctl-ocr",
-    feature = "ctl-notify",
-    feature = "ctl-clip-files"
-))]
 /// Downcast CtlError for a stable wire code prefix (PLAN2.md §3 codes:
 /// not_armed / op_cap / no_match / focus_failed). Shared by all server files.
 #[cfg(any(

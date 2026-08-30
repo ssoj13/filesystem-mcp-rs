@@ -122,6 +122,9 @@ dirs = "6.0"
 # must be rewritten through a CST to preserve comments and formatting). See src/mcp_setup/VENDOR.md.
 toml_edit = "0.25"
 jsonc-parser = { version = "0.33.1", features = ["cst", "serde"] }
+# Public-domain 8x8 bitmap font (const tables only, no_std) — `annotate` label
+# text. default-features off: we read `legacy::BASIC_LEGACY` and nothing else.
+font8x8 = { version = "0.3", default-features = false, optional = true }
 
 [dev-dependencies]
 tempfile = "3.27.0"
@@ -140,12 +143,12 @@ screenshot-tools = ["dep:image", "dep:xcap", "dep:arboard"]
 computer-tools = ["ctl-input", "ctl-uia", "ctl-ocr", "ctl-notify", "ctl-clip-files"]
 # Input core: SendInput mouse/keys, arm gate, window mgmt, macro/wait, capture extensions.
 # Pulls screenshot-tools for xcap/arboard (capture + paste-mode clipboard).
-ctl-input = ["dep:windows", "screenshot-tools"]
+ctl-input = ["dep:windows", "screenshot-tools", "dep:font8x8"]
 # UI Automation (COM): ui/ui_click/ui_set. Requires ctl-input: the click
 # fallback needs SendInput, and Invoke-only clicking is a broken half-state.
 ctl-uia = ["ctl-input", "dep:uiautomation"]
 # WinRT OCR (Windows.Media.Ocr): text + bbox find. Needs a capture source.
-ctl-ocr = ["dep:windows", "dep:ocrs", "dep:rten", "screenshot-tools"]
+ctl-ocr = ["dep:windows", "dep:ocrs", "dep:rten", "screenshot-tools", "dep:font8x8"]
 # Toast notifications.
 ctl-notify = ["dep:tauri-winrt-notification"]
 # CF_HDROP clipboard file lists.

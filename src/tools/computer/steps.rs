@@ -304,6 +304,15 @@ fn lookup_ref(
     Ok(cur.clone())
 }
 
+
+fn cursor_now() -> (i32, i32) {
+    use windows::Win32::Foundation::POINT;
+    use windows::Win32::UI::WindowsAndMessaging::GetCursorPos;
+    let mut p = POINT::default();
+    // SAFETY: out-pointer only.
+    unsafe { GetCursorPos(&mut p) }.ok().map(|_| (p.x, p.y)).unwrap_or((0, 0))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -351,12 +360,4 @@ mod tests {
         let mut v = serde_json::json!("${xx}");
         assert!(resolve_refs(&mut v, &results).is_err()); // malformed
     }
-}
-
-fn cursor_now() -> (i32, i32) {
-    use windows::Win32::Foundation::POINT;
-    use windows::Win32::UI::WindowsAndMessaging::GetCursorPos;
-    let mut p = POINT::default();
-    // SAFETY: out-pointer only.
-    unsafe { GetCursorPos(&mut p) }.ok().map(|_| (p.x, p.y)).unwrap_or((0, 0))
 }
