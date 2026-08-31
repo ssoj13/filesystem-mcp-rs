@@ -314,7 +314,7 @@ pub trait Backend: Send + Sync {
 pub fn backend() -> &'static dyn Backend {
     static SELECTED: std::sync::OnceLock<&'static dyn Backend> = std::sync::OnceLock::new();
     *SELECTED.get_or_init(|| {
-        let pinned = std::env::var("FS_MCP_CTL_BACKEND").ok();
+        let pinned = crate::env_spec::get("FS_MCP_CTL_BACKEND");
         let chosen = select(pinned.as_deref());
         tracing::debug!("computer-control backend: {}", chosen.name());
         chosen

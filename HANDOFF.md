@@ -14,7 +14,8 @@
   `Caps` (ctl_caps тул показывает что реально на этой OS).
 - Флаги: `computer-tools` = umbrella над `ctl-input`(ядро, тянет screenshot-tools) /
   `ctl-uia`(тянет ctl-input) / `ctl-ocr` / `ctl-notify` / `ctl-clip-files`.
-  НЕ в default features.
+  В default features с 2026-08-30 (было opt-in). Собрать без него:
+  `--no-default-features --features http-tools,s3-tools,screenshot-tools`.
 - rmcp 3.1.4 НЕ умеет cfg-gate #[tool] методы в одном impl (S1 spike) → per-domain
   #[tool_router(router = X, vis = "pub(crate)")] + ToolRouter::merge в FileSystemServer::new.
 - 26 ctl-тулов: arm, ctl_caps, monitors, capture, mouse_click/drag/scroll, key_tap,
@@ -61,12 +62,13 @@
    тестовый харнесс должен чистить %LOCALAPPDATA%\Packages\...\TabState.
 
 ## Деплой / сборка
-- `cargo build --release --features computer-tools` -> target\release\filesystem-mcp-rs.exe
+- `cargo build --release` -> target\release\filesystem-mcp-rs.exe (computer-tools в default)
 - Деплой: скопировать в C:\Users\joss1\.cargo\bin\filesystem-mcp-rs.exe. Файл может быть
   залочен живым сервером — тогда rename старый (.old.N) и копировать новый.
 - `filesystem-mcp-rs install` регистрирует во все клиентские конфиги + пишет env
   (FS_MCP_CTL_TYPE_MODE=paste|chars, TYPE_INTERVAL_MS=30, ARM_TTL_MS=30000, OPS_PER_MIN=240).
-- Тесты: cargo test --features computer-tools (464+4+64, все зелёные). Clippy чист
+  Реестр всех FS_MCP_* переменных -> src/env_spec.rs; посмотреть: `filesystem-mcp-rs --list-env`.
+- Тесты: cargo test (479+4+64 = 547, все зелёные). Clippy чист
   (кроме pre-existing line_edit.rs j-loop и integration.rs assert warnings).
 
 ## Прожитая сессия (хронология решений)

@@ -61,8 +61,8 @@ fn reject_overlapping_edits(edits: &[LineEdit]) -> Result<()> {
                 a.1
             );
         }
-        for j in (i + 1)..edits.len() {
-            let b = edit_span(&edits[j]);
+        for other in &edits[i + 1..] {
+            let b = edit_span(other);
             if b.0 == 0 || b.1 == 0 {
                 continue;
             }

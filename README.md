@@ -9,29 +9,27 @@ Rust allows for supereasy combining of any crates, so when I ported/created a do
 It's not about "memory safety" or something like that, I'm doing that just because I can and having fun doing that.
 
 
-To the bone:
+## What's new
 
-> **`edit_file` / `bulk_edits` accept plain strings again.** `oldText`/`newText` take a UTF-8 string (ContentRef objects still work, e.g. for blobs) — fixes hosts that dropped a nested `{kind:inline,text}` object when the snippet contained `{`, which used to die as `missing field newText`. **`grep_files.path`** now defaults to empty and accepts `root` / `dir` / `directory`; a missing path is a readable error naming the accepted keys instead of a bare `missing field path`. See [CHANGELOG.md](CHANGELOG.md).
+> **Computer control ships in the default build.** `computer-tools` (mouse, keyboard, windows,
+> UI Automation, OCR, notifications) is no longer opt-in — a server that silently lacks half its
+> tools is worse than a longer build. Input tools still require `arm {ttl_ms}` first; read-only
+> ones (`capture`, `monitors`, `win_list`) do not. Opt out with
+> `--no-default-features --features http-tools,s3-tools,screenshot-tools`.
 >
-> **Breaking — Content Plane SSOT.** `write_file` / `edit_file` / `write_binary` / `run_command.stdin` take a **ContentRef** object (`inline` / `base64` / `path` / `blob`), not a bare mega-string. Large payloads: `blob_begin` → `blob_append` (≤8 KiB) → `blob_finalize` → `{kind:"blob",id}`. Never `python -c` to dodge JSON. See [CHANGELOG.md](CHANGELOG.md).
+> **You can now ask which environment variables exist:** `filesystem-mcp-rs --list-env` prints
+> every key this build supports with its default and what it does. One registry
+> (`src/env_spec.rs`) feeds that listing, the `install` config block, and the policy text written
+> into `CLAUDE.md` / `AGENTS.md` — they can no longer drift apart.
 >
-> **`read_pdf` tells you when extraction is junk.** Default `normalize=true` repairs ZWSP / spaced glyphs; structured `quality.score` / `warnings` / `suspiciousTokens` flag broken ToUnicode maps — low score means do not treat the text as source of truth.
+> **`install` writes the whole knob set, not just two keys.** Every supported `FS_MCP_*` variable
+> lands in the client's `env` with its default value, so the config documents itself (JSON cannot
+> hold comments — a key present with its default is the equivalent of a commented-out line).
+> Optional knobs are written blank, and **blank now consistently means "unset"**: previously an
+> empty `FS_MCP_MEMORY_ACCESS_MODE` aborted startup and an empty `FS_MCP_MEMORY_DB` became a
+> literal empty path that killed the memory store.
 >
-> **`edit_lines` no longer mangles range replaces** — snake_case keys like `end_line` / `dry_run` are accepted alongside camelCase (`endLine`, `dryRun`); overlapping edits fail up front instead of leaving a broken tail. Same alias pattern on `edit_file` / `extract_*` / `bulk_edits`. See [CHANGELOG.md](CHANGELOG.md).
->
-> **v0.1.17** — **Scoped memory is stricter.** Memory tools now use a clear, flat shape (`workspaceId`, `actorId`, `item`). Old shortcuts like `"scope": "my-project"` no longer work — update your calls once and you get predictable behavior. Summaries default to the whole workspace, so a simple recall call works without extra IDs.
->
-> **MCP session lock** — After any tool call, the server reminds the agent to keep using filesystem-mcp-rs for file and shell work (instead of built-in editor tools). That reduces “it worked in chat but broke on disk” drift. Install also embeds the same policy into client config files (`CLAUDE.md`, `AGENTS.md`, etc.).
->
-> **`run_command` is easier for agents to get right** — snake_case options are accepted alongside camelCase; head/tail/filter output is reliable again; tool descriptions now spell out that paths like `cwd` must be quoted JSON strings. **`install`** sets permissive HTTP/S3 allowlists by default so outbound tools work out of the box (you can tighten them later).
->
-> **`install` with no directory arguments now defaults to the whole disk** (`/` on Unix, every mounted drive root on Windows) instead of failing closed with "No allowed directories configured" — the same permissive-by-default posture already used for HTTP/S3. Run `filesystem-mcp-rs install <DIR>...` to scope it down instead.
->
-> See [CHANGELOG.md](CHANGELOG.md) for the full list and migration examples.
->
-> **v0.1.10–0.1.16** — A big stretch of quality-of-life work: a much stronger **`run_command`** (sync / managed / detached modes, progress during long builds, filtered output, safer process cleanup), **system utilities** (ports, processes, disk, env, diffs), optional **HTTP / S3 / screenshots**, **LLM / Excel / Word** helpers, **flexible JSON parsing** so common agent mistakes don’t fail the call, plus faster **hashing** and better **client compatibility** (Gemini, Qwen). See [CHANGELOG.md](CHANGELOG.md).
->
-> **v0.1.8 and earlier** — Core filesystem tools, comparison, archives, watching files, and early process support. See CHANGELOG.md.
+> See [CHANGELOG.md](CHANGELOG.md) for the full history, earlier releases, and migration examples.
 
 **LLM-friendly type coercion**: All parameters use flexible types that tolerate common LLM serialization quirks:
 - **Numbers**: `42` and `"42"` both work (`FlexU32`, `FlexUsize`, etc.)
@@ -59,6 +57,7 @@ To the bone:
 - Network (feature): `http_request`, `http_request_batch`, `http_download`, `http_download_batch`
 - S3 (feature): `s3_list_buckets`, `s3_list`, `s3_stat`, `s3_get`, `s3_put`, `s3_delete`, `s3_copy`, `s3_presign`, batch ops
 - Screenshot (feature): `screenshot_list_monitors`, `screenshot_list_windows`, `screenshot_capture_screen`, `screenshot_capture_window`, `screenshot_capture_region`, `screenshot_copy_to_clipboard`
+- Computer control (`computer-tools`, on by default; Windows backend): mouse/keyboard input, `win_*` window management, cursor-anchored `capture`, macro/wait steps, UI Automation (`ui`, `ui_click`, `ui_set`, `ui_get`), OCR `find`, toasts, clipboard file lists — input gated behind `arm {ttl_ms}` with a TTL and an ops/minute cap
 - Safety: allowlist/roots validation, escape protection, optional `--allow_symlink_escape`
 - Wave2: `port_users`, `net_connections`, `port_available`, `proc_tree`, `proc_env`, `proc_files`, `disk_usage`, `sys_info`, `file_diff`, `file_touch`, `clipboard_*`, `env_*`, `which`
 - Document: `xlsx_read`, `xlsx_info` (Excel), `docx_read`, `docx_info` (Word)
@@ -67,14 +66,29 @@ To the bone:
 
 ## Environment Variables
 
+Run **`filesystem-mcp-rs --list-env`** for the authoritative list for *your* build — the table
+below, the `env` block written by `install`, and that command all come from one registry
+(`src/env_spec.rs`), and only keys whose feature is compiled in are shown. Precedence is
+**CLI arg > env > default**, and a blank value means "unset", not "empty".
+
 ### Core
-| Variable | Description |
-|----------|-------------|
-| `FS_MCP_HTTP_ALLOW_LIST` | HTTP allowlist domains (comma/semicolon/whitespace separated). Use `*` to allow all |
-| `FS_MCP_S3_ALLOW_LIST` | S3 allowlist buckets (comma/semicolon/whitespace separated). Use `*` to allow all |
-| `FS_MCP_MEMORY_DB` | Memory database path (default: system data dir) |
-| `FS_MCP_MEMORY_ACCESS_MODE` | Memory access mode: `enforce_private_only` (default), `allow_all`, or `enforce_visibility` |
-| `DISABLE_THOUGHT_LOGGING` | Set to `true` to disable thought logging |
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `FS_MCP_HTTP_ALLOW_LIST` | `*` | HTTP allowlist domains (comma/semicolon/whitespace separated). Use `*` to allow all |
+| `FS_MCP_S3_ALLOW_LIST` | `*` | S3 allowlist buckets (comma/semicolon/whitespace separated). Use `*` to allow all |
+| `FS_MCP_MEMORY_ACCESS_MODE` | `enforce_private_only` | Memory access mode: `enforce_private_only`, `allow_all`, or `enforce_visibility` |
+| `FS_MCP_MEMORY_DB` | *(unset)* | Memory database path. Unset = system data dir |
+| `DISABLE_THOUGHT_LOGGING` | *(unset)* | Set to `true` to disable thought logging |
+
+### Computer control (`ctl-*` features)
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `FS_MCP_CTL_TYPE_MODE` | `paste` | `key_type` strategy: `paste` (clipboard, ~100× faster) or `chars` (per-char Unicode) |
+| `FS_MCP_CTL_TYPE_INTERVAL_MS` | `30` | `chars`-mode per-char delay. Below ~25 ms Windows 11 mangles runs into repeats |
+| `FS_MCP_CTL_ARM_TTL_MS` | `30000` | How long one `arm` call keeps input tools unlocked |
+| `FS_MCP_CTL_OPS_PER_MIN` | `240` | Runaway cap on executed input ops per minute (also `--ctl-ops-per-min`) |
+| `FS_MCP_CTL_BACKEND` | *(unset)* | Pin the desktop backend. Unset = auto-detect; `null` disables input (testing) |
+| `FS_MCP_CTL_OCRS_MODELS_DIR` | *(unset)* | Cache dir for downloaded `ocrs` models |
 
 ### LLM API Keys
 | Variable | Description |
@@ -106,11 +120,22 @@ To the bone:
 
 ## Feature Flags
 
-HTTP/S3/screenshot tools are enabled by default. To disable, build with `--no-default-features`.
+HTTP, S3, screenshot **and computer-control** tools are all enabled by default:
 
 ```bash
 cargo build
 ```
+
+To build without computer control (much faster: no `ocrs` / `rten` / `windows` crates):
+
+```bash
+cargo build --no-default-features --features http-tools,s3-tools,screenshot-tools
+```
+
+`computer-tools` is an umbrella over `ctl-input` (core; `ctl-uia` implies it) / `ctl-uia` /
+`ctl-ocr` / `ctl-notify` / `ctl-clip-files`, so you can also enable just the domains you want.
+The desktop backend is Windows today; elsewhere the driver seam resolves to a `null` backend
+that reports "unsupported" instead of pretending to work.
 
 HTTP/S3 tools require allowlists at runtime (CLI flags or env vars):
 - `--http-allowlist-domain example.com --http-allowlist-domain "*.example.org"`
@@ -119,7 +144,7 @@ Alternatively via env vars (comma/semicolon/whitespace separated):
 - `FS_MCP_HTTP_ALLOW_LIST=example.com,*.example.org` (use `*` to allow all)
 - `FS_MCP_S3_ALLOW_LIST=my-bucket;other-bucket` (use `*` to allow all)
 
-`filesystem-mcp-rs install` (mcp-setup) writes `FS_MCP_HTTP_ALLOW_LIST=*` and `FS_MCP_S3_ALLOW_LIST=*` into client MCP config by default. Override with `--http-allowlist-domain` / `--s3-allowlist-bucket` or `--env FS_MCP_HTTP_ALLOW_LIST=...`.
+`filesystem-mcp-rs install` (mcp-setup) writes **every** supported `FS_MCP_*` key into the client MCP config with its default value — including `FS_MCP_HTTP_ALLOW_LIST=*` and `FS_MCP_S3_ALLOW_LIST=*` — so the config lists the available knobs instead of hiding them. Override with `--http-allowlist-domain` / `--s3-allowlist-bucket` or `--env FS_MCP_HTTP_ALLOW_LIST=...`.
 
 `filesystem-mcp-rs install` also defaults the server's allowed directories to the whole disk when you pass none (`/` on Unix, every mounted drive root such as `C:\`, `D:\`, … on Windows). Pass explicit directories to scope it down: `filesystem-mcp-rs install C:\projects D:\data`.
 

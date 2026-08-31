@@ -116,14 +116,18 @@ serial_test = "4.0"
 rust_xlsxwriter = "0.98"
 
 [features]
-default = ["http-tools", "s3-tools", "screenshot-tools"]
+default = ["http-tools", "s3-tools", "screenshot-tools", "computer-tools"]
 http-tools = []
 s3-tools = ["dep:aws-config", "dep:aws-sdk-s3", "dep:aws-credential-types", "dep:aws-types"]
 screenshot-tools = ["dep:image", "dep:xcap", "dep:arboard"]
 
 # Computer control (mouse/keyboard/windows/UIA/OCR) — self-contained module
-# `src/tools/computer/`, extractable back into a standalone crate. Opt-in:
-# NOT in default features. See docs/computer_module.md.
+# `src/tools/computer/`, extractable back into a standalone crate. On by
+# default: an installed server that silently lacks half its tools is worse
+# than a longer build. One name on every platform — off-Windows the driver seam
+# resolves to the `null` backend at runtime (see docs/computer_module.md);
+# non-Windows builds are unverified from a Windows host (no cross toolchain).
+# Opt out with `--no-default-features --features http-tools,s3-tools,screenshot-tools`.
 computer-tools = ["ctl-input", "ctl-uia", "ctl-ocr", "ctl-notify", "ctl-clip-files"]
 # Input core: SendInput mouse/keys, arm gate, window mgmt, macro/wait, capture extensions.
 # Pulls screenshot-tools for xcap/arboard (capture + paste-mode clipboard).

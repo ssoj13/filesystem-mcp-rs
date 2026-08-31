@@ -2,6 +2,37 @@
 
 ## [Unreleased]
 
+### Computer control on by default; one registry for every `FS_MCP_*` variable
+
+- **`computer-tools` moved into `default` features.** An installed server that silently lacks
+  half of its tools is worse than a longer build. Opt out with
+  `--no-default-features --features http-tools,s3-tools,screenshot-tools`. Off-Windows the
+  driver seam still resolves to the `null` backend, so the feature name stays one name on every
+  platform (non-Windows builds unverified from a Windows host — no cross toolchain).
+- **New `src/env_spec.rs` — single source of truth for every `FS_MCP_*` variable.** Three
+  consumers used to hardcode their own copy and had already drifted apart (the installed hint
+  text advertised a 12 ms typing floor while the code used 30 ms). All three now render from the
+  registry: the `env` block `install` writes, the `SUPPORTED ENV` section of the policy text
+  injected into `CLAUDE.md` / `AGENTS.md`, and the new listing command. Keys gated out of the
+  build are neither written nor advertised.
+- **New `--list-env`**: prints every variable this build supports with its default and one line
+  of explanation. Previously there was no way for a user to discover the supported keys — four of
+  them (`FS_MCP_MEMORY_ACCESS_MODE`, `FS_MCP_MEMORY_DB`, `FS_MCP_CTL_BACKEND`,
+  `FS_MCP_CTL_OCRS_MODELS_DIR`) appeared in no documentation at all.
+- **`install` now writes all supported keys**, not just the two allowlists, each with its default
+  value. JSON configs cannot hold comments, so the config itself is the documentation: a key
+  present with its default is the equivalent of a commented-out line.
+- **Fixed: a blank value is now consistently "unset".** Since optional keys are written blank,
+  every reader had to agree on that — and two did not. `FS_MCP_MEMORY_ACCESS_MODE=""` aborted
+  startup with `Invalid memory access mode ''`, and `FS_MCP_MEMORY_DB=""` became a literal empty
+  path that failed to open the memory store. Both, plus `FS_MCP_CTL_BACKEND`, now read through
+  `env_spec::get` (trim, empty → `None`); the `ctl-*` readers already behaved this way.
+- Cleanup: `reject_overlapping_edits` iterates the tail slice instead of indexing by `j`
+  (last clippy warning in the crate).
+- Verified: `cargo build` and `cargo clippy` clean (zero warnings), 547 tests green
+  (479 unit + 4 + 64 integration), and a project-scope `install` writes all 10 keys plus the
+  rendered `SUPPORTED ENV` block into the client's context file.
+
 ### Content Plane: tolerant `content` parsing, actionable errors, 64 KiB inline (BUG.md resolution)
 
 - **`content` accepts bare strings** (write_file / edit_file sides / run_command stdin /
@@ -28,8 +59,8 @@
   (`ToolRouter::merge`) — rmcp cannot cfg-gate methods inside one impl.
 - **Feature matrix:** `computer-tools` = umbrella over `ctl-input` / `ctl-uia`
   (implies ctl-input: the click fallback needs SendInput) / `ctl-ocr` /
-  `ctl-notify` / `ctl-clip-files`. Default build unchanged — the feature is
-  opt-in, no new default deps.
+  `ctl-notify` / `ctl-clip-files`. Introduced as opt-in; promoted to a default
+  feature later in this same unreleased cycle (see the section above).
 - **Safety model:** process-global arm gate (`arm {ttl_ms}`, TTL auto-expiry,
   ops-per-minute cap, JSONL audit), pastes are refused when focus moved,
   `win_close` is a separate tool name so per-tool allowlists can exclude it.
@@ -41,9 +72,10 @@
 - `--ctl-ops-per-min` CLI flag; typing mode/interval, arm TTL and ops cap are also
   configurable via env vars (`FS_MCP_CTL_TYPE_MODE`, `FS_MCP_CTL_TYPE_INTERVAL_MS`,
   `FS_MCP_CTL_ARM_TTL_MS`, `FS_MCP_CTL_OPS_PER_MIN`) with precedence arg > env > default.
-  `install` writes all four into every client config's `env` with their default values
+  `install` writes them into every client config's `env` with their default values
   (JSON configs cannot hold comments — flipping behavior = editing the value; empty = unset;
-  invalid value = loud error). rmcp bumped to 3.1.4 (latest).
+  invalid value = loud error); this later grew to cover every supported key, see above.
+  rmcp bumped to 3.1.4 (latest).
 - Install hints append the arm-gate policy only when the feature is built in.
 - Real-machine canary (interactive desktop): spawn Notepad → focus-verify →
   type ASCII+Unicode → hash-change → OCR match → cleanup

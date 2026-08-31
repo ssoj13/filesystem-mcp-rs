@@ -14,66 +14,50 @@ use crate::mcp_setup::host::HostSpec;
 pub const SERVER_KEY: &str = "filesystem-mcp-rs";
 
 /// Session policy: this server is mandatory once connected. Written into the agent's context file.
-/// When computer-control features are built in, the arm-gate policy is appended
-/// inline in `MCP_POLICY` (concat! accepts literals only).
-const MCP_POLICY: &str = if cfg!(any(feature = "ctl-input", feature = "ctl-uia")) {
-    concat!(
-        include_str!("docs/mcp_policy.md"),
-        "\n== COMPUTER CONTROL POLICY ==\n",
-        "This build can move the mouse and type into real windows. Input tools REQUIRE ",
-        "`arm {ttl_ms}` first (TTL gate, default 30000 ms, ops-per-minute cap enforced).\n",
-        "Read-only ctl tools (capture, monitors, win_list) work without arming.\n",
-        "\n== COMPUTER CONTROL ENV (set in mcpServers env; empty = unset; arg > env > default) ==\n",
-        "FS_MCP_CTL_TYPE_MODE=paste|chars  - typing mode (default paste)\n",
-        "FS_MCP_CTL_TYPE_INTERVAL_MS=30    - per-char delay for chars mode (safe floor 30 ms)\n",
-        "FS_MCP_CTL_ARM_TTL_MS=30000       - arm TTL (ms)\n",
-        "FS_MCP_CTL_OPS_PER_MIN=240        - input ops/minute cap\n"
-    )
-} else {
-    include_str!("docs/mcp_policy.md")
-};
+const MCP_POLICY: &str = include_str!("docs/mcp_policy.md");
+
+/// Arm-gate policy, appended only when this build can actually move the mouse.
+#[cfg(any(feature = "ctl-input", feature = "ctl-uia"))]
+const CTL_POLICY: &str = concat!(
+    "== COMPUTER CONTROL POLICY ==\n",
+    "This build can move the mouse and type into real windows. Input tools REQUIRE ",
+    "`arm {ttl_ms}` first (TTL gate, ops-per-minute cap enforced).\n",
+    "Read-only ctl tools (capture, monitors, win_list) work without arming.\n"
+);
+
+/// The context-file sections: policy, the arm gate when relevant, the env table, workflows.
+///
+/// The env table is rendered from [`crate::env_spec`] rather than written out here — the old
+/// hand-maintained copy had already drifted from the code it documented.
+fn hint_sections() -> Vec<String> {
+    #[allow(unused_mut)]
+    let mut policy = MCP_POLICY.to_string();
+    #[cfg(any(feature = "ctl-input", feature = "ctl-uia"))]
+    {
+        policy.push('\n');
+        policy.push_str(CTL_POLICY);
+    }
+    vec![
+        KARPATHY_RULES.to_string(),
+        policy,
+        crate::env_spec::render_table(),
+        MCP_WORKFLOWS.to_string(),
+    ]
+}
 /// Concrete tool workflows (search_files / grep_files / run_command …).
 const MCP_WORKFLOWS: &str = include_str!("docs/mcp_workflows.md");
 
-/// Outbound HTTP allowlist written by `install` unless `--env FS_MCP_HTTP_ALLOW_LIST=...` overrides.
-#[cfg(feature = "http-tools")]
-const DEFAULT_HTTP_ALLOW_LIST: &str = "*";
-/// S3 bucket allowlist written by `install` unless `--env FS_MCP_S3_ALLOW_LIST=...` overrides.
-#[cfg(feature = "s3-tools")]
-const DEFAULT_S3_ALLOW_LIST: &str = "*";
-
-/// Computer-control defaults written by `install` whenever any ctl feature is
-/// built in. Values are the built-in defaults (no-ops until edited); JSON
-/// configs cannot hold comments, so "commented out" is expressed as
-/// "present with the default value" — flipping behavior = editing the value.
-#[cfg(any(feature = "ctl-input", feature = "ctl-uia"))]
-fn push_computer_env(env: &mut BTreeMap<String, String>) {
-    for (k, v) in [
-        ("FS_MCP_CTL_TYPE_MODE", "paste"),
-        ("FS_MCP_CTL_TYPE_INTERVAL_MS", "30"),
-        ("FS_MCP_CTL_ARM_TTL_MS", "30000"),
-        ("FS_MCP_CTL_OPS_PER_MIN", "240"),
-    ] {
-        env.entry(k.to_string()).or_insert_with(|| v.to_string());
-    }
-}
-
+/// Every knob this build supports, written into the client config with its default value.
+///
+/// JSON configs cannot hold comments, so the config *is* the documentation: a key present with
+/// its default is the equivalent of a commented-out line, and changing behavior means editing a
+/// value that is already in front of the user. Optional knobs (no meaningful default) are
+/// written blank; `env_spec::get` reads blank as unset, so they stay no-ops until filled in.
 fn default_env() -> BTreeMap<String, String> {
-    #[allow(unused_mut)]
-    let mut env = BTreeMap::new();
-    #[cfg(feature = "http-tools")]
-    env.insert(
-        "FS_MCP_HTTP_ALLOW_LIST".to_string(),
-        DEFAULT_HTTP_ALLOW_LIST.to_string(),
-    );
-    #[cfg(feature = "s3-tools")]
-    env.insert(
-        "FS_MCP_S3_ALLOW_LIST".to_string(),
-        DEFAULT_S3_ALLOW_LIST.to_string(),
-    );
-    #[cfg(any(feature = "ctl-input", feature = "ctl-uia"))]
-    push_computer_env(&mut env);
-    env
+    crate::env_spec::vars()
+        .into_iter()
+        .map(|v| (v.key.to_string(), v.default.to_string()))
+        .collect()
 }
 
 /// Build the install spec: this executable, its allowlists, and its docs.
@@ -85,7 +69,7 @@ pub fn host_spec() -> Result<HostSpec> {
     let install_id = format!("{SERVER_KEY}:{}", env!("CARGO_PKG_VERSION"));
     Ok(HostSpec::from_current_exe(SERVER_KEY, install_id)?
         .with_env(default_env())
-        .with_docs(HintDocs::new([KARPATHY_RULES, MCP_POLICY, MCP_WORKFLOWS])))
+        .with_docs(HintDocs::new(hint_sections())))
 }
 
 /// Directories written into the server's command line when `install` is run with no trailing

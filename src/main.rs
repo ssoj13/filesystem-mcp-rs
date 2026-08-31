@@ -106,6 +106,7 @@ mod core;
 /// boundary rather than by deleting upstream items (which would diverge us from upstream).
 #[allow(dead_code, unused_imports)]
 mod mcp_setup;
+mod env_spec;
 mod setup;
 mod tools;
 
@@ -174,6 +175,10 @@ struct ServerArgs {
     /// List enabled features and exit
     #[arg(long = "list-features", short = 'L', action = clap::ArgAction::SetTrue)]
     list_features: bool,
+
+    /// List the environment variables this build supports (key, default, meaning) and exit.
+    #[arg(long = "list-env", action = clap::ArgAction::SetTrue)]
+    list_env: bool,
 
     /// Memory database path (default: system data dir/filesystem-mcp-rs/memory2.db)
     #[arg(long = "memory-db", value_name = "PATH")]
@@ -7517,6 +7522,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let args = top.server;
 
+    // Answered before any desktop bootstrap so it works on a headless box too.
+    if args.list_env {
+        print!("{}", env_spec::render_table());
+        return Ok(());
+    }
+
     // Computer-control bootstrap: DPI first (clicks/captures misalign without it),
     // then the process-global arm gate.
     #[cfg(any(feature = "ctl-input", feature = "ctl-uia", feature = "ctl-ocr"))]
@@ -7568,7 +7579,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         let access_mode = args
             .memory_access_mode
             .clone()
-            .or_else(|| std::env::var("FS_MCP_MEMORY_ACCESS_MODE").ok())
+            .or_else(|| env_spec::get("FS_MCP_MEMORY_ACCESS_MODE"))
             .map(|value| {
                 value.parse::<V2MemoryAccessMode>().map_err(|e| {
                     std::io::Error::new(
@@ -7581,7 +7592,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             .unwrap_or_default();
         let db_path = args
             .memory_db
-            .or_else(|| std::env::var("FS_MCP_MEMORY_DB").ok().map(PathBuf::from))
+            .or_else(|| env_spec::get("FS_MCP_MEMORY_DB").map(PathBuf::from))
             .unwrap_or_else(|| {
                 let mut path = dirs::data_local_dir().unwrap_or_else(|| PathBuf::from("."));
                 path.push("filesystem-mcp-rs");

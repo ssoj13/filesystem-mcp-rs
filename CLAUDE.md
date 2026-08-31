@@ -10,6 +10,11 @@ Build: `cargo build` / test: `cargo test` / lint: `cargo clippy`.
 - Tools live in `src/tools/*.rs`, registered via `#[cfg(feature = "...")]` in `src/tools/mod.rs`.
 - Feature flags in Cargo.toml: `http-tools`, `s3-tools`, `screenshot-tools` (dep:image, xcap, arboard),
   `computer-tools` umbrella + `ctl-input/uia/ocr/notify/clip-files` (ctl-uia implies ctl-input).
+  All four are in `default` since 2026-08-30 — computer-tools included.
+- `src/env_spec.rs` is the ONE registry of `FS_MCP_*` vars. `install` writes them all into the
+  client config (blank = unset), the hint block renders from it, `--list-env` prints it. Never
+  hardcode an env key or its default anywhere else; readers must go through `env_spec::get`
+  (blank/whitespace = unset) or a blank config value becomes a literal empty path/mode.
 - `src/tools/computer/` — self-contained computer-control module (extractable; recipe in mod.rs):
   driver/mod.rs = OS seam (imp backend selection, portable types, Caps), safety/input/win/capture/
   steps/wait/uia/ocr/ocrs_local/find/clip/notify + server_*.rs (per-domain #[tool_router] impls).
@@ -40,6 +45,13 @@ Build: `cargo build` / test: `cargo test` / lint: `cargo clippy`.
    since 0.2.1, but canonical form is ContentRef object).
 
 ## Session notes (FIFO, prune when stale)
+- 2026-08-30: env config overhaul. computer-tools now default; `src/env_spec.rs` registry feeds
+  install-env + hints + new `--list-env`; `FS_MCP_MEMORY_ACCESS_MODE`/`_DB` and `FS_MCP_CTL_BACKEND`
+  now read via `env_spec::get` (empty string used to crash the server / kill the memory store).
+  Verified: build+clippy clean (only pre-existing line_edit.rs:64 warning), 547 tests green,
+  project-scope install writes all 10 keys and the SUPPORTED ENV block. Non-Windows build of
+  computer-tools NOT verified — cross-check from this host fails in ring/aws-lc-sys/wayland-sys
+  (missing native toolchain, fails identically without computer-tools, so not a regression).
 - 2026-08-30: capture CapTarget shape fix — CursorSize untagged enum ({cursor:{size}}, {cursor:N},
   {size:N}); 4/4 forms verified live. v0.2.1 deployed to .cargo/bin (md5 867e065e). Pushed 4813941.
 - 2026-08-29: driver abstraction landed (driver/mod.rs as OS seam). Live probe found cursor-target
