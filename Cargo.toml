@@ -145,6 +145,28 @@ ctl-clip-files = ["dep:clipboard-win"]
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
 
+# --- Computer control, macOS backend ---------------------------------------
+[target.'cfg(target_os = "macos")'.dependencies]
+core-foundation = "0.9"
+core-graphics = { version = "0.23", features = ["link", "highsierra"] }
+foreign-types = "0.5"
+block2 = "0.6"
+objc2 = "0.6"
+objc2-app-kit = { version = "0.3.2", features = [
+    "NSRunningApplication",
+    "NSWorkspace",
+    "NSPasteboard",
+    "NSApplication",
+] }
+objc2-foundation = { version = "0.3.2", features = ["NSArray", "NSString", "NSURL", "NSUUID", "NSError"] }
+objc2-user-notifications = { version = "0.3.2", features = [
+    "UNUserNotificationCenter",
+    "UNNotificationContent",
+    "UNNotificationRequest",
+    "UNNotificationTrigger",
+    "block2",
+] }
+
 # --- Computer control, Windows backend -------------------------------------
 [target.'cfg(windows)'.dependencies]
 windows = { version = "0.62", optional = true, features = [

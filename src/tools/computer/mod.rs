@@ -84,7 +84,7 @@ pub(crate) fn ctl_err(e: anyhow::Error) -> rmcp::ErrorData {
 pub(crate) mod server_input;
 #[cfg(any(feature = "ctl-input", feature = "ctl-uia", feature = "ctl-ocr"))]
 pub(crate) mod server_readonly;
-#[cfg(all(windows, feature = "ctl-uia"))]
+#[cfg(all(any(windows, target_os = "macos"), feature = "ctl-uia"))]
 pub(crate) mod server_uia;
 #[cfg(any(feature = "ctl-ocr", feature = "ctl-notify", feature = "ctl-clip-files"))]
 pub(crate) mod server_misc;
@@ -222,3 +222,6 @@ pub fn ensure_dpi_aware() -> anyhow::Result<()> {
 
 #[cfg(all(test, windows, feature = "ctl-input"))]
 mod tests;
+
+#[cfg(all(test, target_os = "macos", feature = "ctl-input"))]
+mod tests_mac;

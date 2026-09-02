@@ -31,7 +31,19 @@ pub mod portable;
 #[cfg(windows)]
 pub mod win32;
 
+#[cfg(target_os = "macos")]
+pub mod mac;
+
 mod null;
+
+/// Platform UI automation (`ui_*` tools): UIA on Windows, Accessibility on macOS.
+#[cfg(feature = "ctl-uia")]
+pub mod uia {
+    #[cfg(windows)]
+    pub use super::win32::uia::*;
+    #[cfg(target_os = "macos")]
+    pub use super::mac::uia::*;
+}
 
 pub use portable::{layout_load, layout_save, resolve_target, to_monitor};
 
@@ -330,10 +342,17 @@ fn select(pinned: Option<&str>) -> &'static dyn Backend {
         // One desktop API on Windows; nothing to choose at runtime.
         &win32::Win32
     }
-    #[cfg(not(windows))]
+    #[cfg(target_os = "macos")]
     {
-        // x11/wayland/mac backends land here as they are implemented; until
-        // then the fallback is loud rather than silently pretending to work.
+        match pinned {
+            Some("mac") | None => &mac::Mac,
+            // x11/wayland pins on macOS are test hooks — fall through to null.
+            _ => &null::Null,
+        }
+    }
+    #[cfg(all(not(windows), not(target_os = "macos")))]
+    {
+        // Linux x11/wayland backends land here as they are implemented.
         &null::Null
     }
 }
@@ -516,6 +535,7 @@ mod seam_guard {
         ("server_input.rs", include_str!("../server_input.rs")),
         ("server_readonly.rs", include_str!("../server_readonly.rs")),
         ("server_misc.rs", include_str!("../server_misc.rs")),
+        ("server_uia.rs", include_str!("../server_uia.rs")),
         ("driver/portable.rs", include_str!("portable.rs")),
     ];
 

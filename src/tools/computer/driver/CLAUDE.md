@@ -37,7 +37,7 @@ Linux (X11 и Wayland) и macOS, не размазывая `#[cfg]` по все�
 | `win32` | SendInput | HWND/Win32 | GDI + SystemMetrics | CF_HDROP | WinRT toast | UIAutomation | **проверен живьём** |
 | `x11` | XTEST (x11rb) | ICCCM/EWMH | RandR | — | — | — | не начат |
 | `wayland` | wlr-virtual-\* / libei | wlr-foreign-toplevel | wl_output | — | — | — | не начат |
-| `mac` | CGEventPost | CGWindowList + AX | CGDisplay | — | — | AX (позже) | не начат |
+| `mac` | CGEventPost | CGWindowList + AX | CGDisplay | NSPasteboard | UNUserNotification | AX (`ui_*`) | implemented; live verify pending |
 | `null` | — | — | — | — | — | — | громкий unsupported |
 
 `verified_on_hardware` в `Caps` отражает эту колонку и выдаётся тулом

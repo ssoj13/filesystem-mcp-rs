@@ -227,7 +227,7 @@ impl FileSystemServer {
         tool_router.merge(Self::ctl_readonly_router());
         #[cfg(feature = "ctl-input")]
         tool_router.merge(Self::ctl_input_router());
-        #[cfg(all(windows, feature = "ctl-uia"))]
+        #[cfg(all(any(windows, target_os = "macos"), feature = "ctl-uia"))]
         tool_router.merge(Self::ctl_uia_router());
         #[cfg(feature = "ctl-ocr")]
         tool_router.merge(Self::ctl_ocr_router());
