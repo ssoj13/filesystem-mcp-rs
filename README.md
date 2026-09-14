@@ -29,6 +29,10 @@ It's not about "memory safety" or something like that, I'm doing that just becau
 > empty `FS_MCP_MEMORY_ACCESS_MODE` aborted startup and an empty `FS_MCP_MEMORY_DB` became a
 > literal empty path that killed the memory store.
 >
+> **`install` also snapshots `PATH`.** The installing process PATH is written into every client's
+> `env.PATH` (not read from the registry). GUI-launched Cursor often cannot see `git`; run
+> `filesystem-mcp-rs install` from a terminal that can, or edit `env.PATH` by hand.
+>
 > See [CHANGELOG.md](CHANGELOG.md) for the full history, earlier releases, and migration examples.
 
 **LLM-friendly type coercion**: All parameters use flexible types that tolerate common LLM serialization quirks:
@@ -52,8 +56,8 @@ It's not about "memory safety" or something like that, I'm doing that just becau
 - Introspection: `list_directory`, `list_directory_with_sizes`, `get_file_info`, `directory_tree` (depth/size/hash)
 - Search/roots: `search_files` (glob + type/size/time filters), `grep_files` (regex + exclude + invert/count modes), `grep_context` (context-aware), `list_allowed_directories`
 - **Session lock:** any MCP tool call → use this server only for file/shell on allowed paths (built-in Read/Grep/Shell forbidden). **Do not guess the code — re-check everything.** Favor systematic fixes over quick hacks. Every tool response includes a reminder; `mcp-setup` embeds Karpathy rules + policy into `CLAUDE.md` / `AGENTS.md` at install.
-- Process: `run_command` (3 modes: sync/managed/detached, progress heartbeat, output filter, shell mode, process tree kill), `kill_process` (tree kill), `list_processes`, `search_processes`
-  - **`run_command` JSON**: use **camelCase** keys (`streamOutput`, `timeoutMs`) or **snake_case** aliases (`stream_output`, `timeout_ms`). `args` may be an array or a JSON string. **`cwd` must be a quoted string** — e.g. `"C:/projects/repo"` (forward slashes). Unquoted `C:\...` is invalid JSON and fails in the MCP client before the server runs.
+- Process: `run_command` (3 modes: sync/managed/detached, progress heartbeat, output filter, named shells including `pwsh` vs `powershell`, `failFast`, process tree kill), `kill_process` (tree kill), `list_processes`, `search_processes`
+  - **`run_command` JSON**: use **camelCase** keys (`streamOutput`, `timeoutMs`, `failFast`) or **snake_case** aliases. `args` may be an array or a JSON string. **`cwd` must be a quoted string** — e.g. `"C:/projects/repo"` (forward slashes). Unquoted `C:\...` is invalid JSON and fails in the MCP client before the server runs. Do not put `$NAME` in `command`/`args` (host may strip them; the server rejects leftovers — use stdin or a script file).
 - Network (feature): `http_request`, `http_request_batch`, `http_download`, `http_download_batch`
 - S3 (feature): `s3_list_buckets`, `s3_list`, `s3_stat`, `s3_get`, `s3_put`, `s3_delete`, `s3_copy`, `s3_presign`, batch ops
 - Screenshot (feature): `screenshot_list_monitors`, `screenshot_list_windows`, `screenshot_capture_screen`, `screenshot_capture_window`, `screenshot_capture_region`, `screenshot_copy_to_clipboard`
@@ -145,6 +149,8 @@ Alternatively via env vars (comma/semicolon/whitespace separated):
 - `FS_MCP_S3_ALLOW_LIST=my-bucket;other-bucket` (use `*` to allow all)
 
 `filesystem-mcp-rs install` (mcp-setup) writes **every** supported `FS_MCP_*` key into the client MCP config with its default value — including `FS_MCP_HTTP_ALLOW_LIST=*` and `FS_MCP_S3_ALLOW_LIST=*` — so the config lists the available knobs instead of hiding them. Override with `--http-allowlist-domain` / `--s3-allowlist-bucket` or `--env FS_MCP_HTTP_ALLOW_LIST=...`.
+
+`filesystem-mcp-rs install` also snapshots the current process **`PATH`** into each client's `env.PATH` (the default install target is every supported client: Claude Code, Cursor, VS Code, Codex, …). That is how `git`/`cargo` stay visible when the GUI starts the server with a short PATH. Re-run install from a terminal that already has the PATH you want, or edit the key / pass `--env PATH=...`. The server does not read HKCU/HKLM.
 
 `filesystem-mcp-rs install` also defaults the server's allowed directories to the whole disk when you pass none (`/` on Unix, every mounted drive root such as `C:\`, `D:\`, … on Windows). Pass explicit directories to scope it down: `filesystem-mcp-rs install C:\projects D:\data`.
 
@@ -670,7 +676,7 @@ Robust process execution for LLM workflows. Cross-platform (Windows/macOS/Linux)
 | `detached` | Return immediately with PID. Use `tail_file` on log files for output. |
 
 **Parameters:**
-- **Core**: `command`, `args[]`, `cwd`, `mode`, `shell`, `timeoutMs`, `killAfterMs`
+- **Core**: `command`, `args[]`, `cwd`, `mode`, `shell`, `failFast` (default true), `timeoutMs`, `killAfterMs`
 - **Environment**: `env{}` (set/override), `envPrepend{}` (prepend to existing), `envAppend{}` (append to existing), `clearEnv`
 - **Stdin**: `stdin` ContentRef (`inline`/`base64`/`path`/`blob`)
 - **Output files**: `stdoutFile`, `stderrFile`, `streamOutput` (default: true), `streamDir`
@@ -683,7 +689,9 @@ Robust process execution for LLM workflows. Cross-platform (Windows/macOS/Linux)
 - **Progress heartbeat**: Prevents MCP client 120s timeout for long builds
 - **Process tree kill**: On timeout/cancel, kills all child processes (cargo build -> rustc, etc.)
 - **MCP cancellation**: Client can cancel, process tree is killed immediately
-- **Shell mode**: `shell: true` wraps in `cmd /C` (Win) or `sh -c` (Unix) for pipes, `&&`, etc.
+- **Shell mode**: `false` (default) = no shell; `true` = platform default (`cmd /C` / `sh -c`); `"bash"` = `bash -c`; `"pwsh"` = PowerShell 7 (`pwsh.exe`, error if missing); `"powershell"` / `"ps"` = Windows PowerShell 5. On Windows, GUI clients often have a short PATH — `install` snapshots PATH into `env.PATH`.
+- **`failFast`** (default true): stop after a failing simple `cmd` line; PowerShell uses ErrorAction Stop. `failFast: false` runs every line (old batch semantics).
+- **`$NAME` in `command`/`args`**: rejected when still present. Pass scripts via stdin ContentRef or `-File`. Hosts may strip tokens before the server sees them.
 - **Output filter**: Grep-like filtering with include/exclude regex and context lines. Only affects inline results; full output always goes to log files.
 
 **Examples:**

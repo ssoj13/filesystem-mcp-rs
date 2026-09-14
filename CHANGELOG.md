@@ -2,6 +2,26 @@
 
 ## [Unreleased]
 
+### `run_command` on Windows (bug5.md): loud `$` reject, fail-fast, `pwsh` vs `powershell`, PATH snapshot
+
+- **`$NAME` tokens in `command`/`args` are rejected** when they still reach the server. MCP hosts
+  may delete those tokens before JSON-RPC (empty expansion, no error). Scripts that need shell
+  variables must go via stdin ContentRef or a file (`powershell -NoProfile -File x.ps1`). If the
+  host already stripped the tokens, the server cannot see them.
+- **`failFast` defaults to true.** Multi-line `cmd` simple lines get `|| exit /b 1` (so a failed
+  clone no longer continues `cd` / `dir` in the wrong cwd). `if`/`for` / parenthesized blocks are
+  left alone. PowerShell gets `$ErrorActionPreference='Stop'` plus native `$LASTEXITCODE` checks.
+  Pass `failFast: false` for the old batch “run every line, exit code = last line” semantics.
+- **`shell: "pwsh"` is no longer an alias for Windows PowerShell.** `pwsh` spawns `pwsh.exe`
+  (PATH + well-known `Program Files\PowerShell\7`); missing binary is a loud error pointing at
+  `shell: "powershell"`. `"powershell"` / `"ps"` spawn `powershell.exe`.
+- **`install` snapshots the installing process `PATH` into every client `env.PATH`** (JSON and
+  TOML, the full client matrix unless `--client` is set). No registry read. GUI Cursor often has
+  a short PATH (`git` missing) — run install from a terminal that can run `git`, or edit
+  `env.PATH` / `run_command.envPrepend` by hand. `--env PATH=...` overrides the snapshot.
+- Hint text for the snapshot is injected with the rest of `install` docs. `bug5.md` / `task.md`
+  removed as leftover working notes.
+
 ### Computer control on by default; one registry for every `FS_MCP_*` variable
 
 - **`computer-tools` moved into `default` features.** An installed server that silently lacks

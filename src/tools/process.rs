@@ -286,6 +286,16 @@ pub enum RunMode {
     Detached,
 }
 
+/// Default-on fail-fast for `run_command` (BUG5). A bare `bool` would default to false.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FailFast(pub bool);
+
+impl Default for FailFast {
+    fn default() -> Self {
+        Self(true)
+    }
+}
+
 /// Parameters for running a command
 #[derive(Debug, Clone, Default)]
 pub struct RunParams {
@@ -323,6 +333,8 @@ pub struct RunParams {
     pub mode: RunMode,
     /// Which shell to wrap the command in (`ShellKind::None` = spawn directly).
     pub shell: ShellKind,
+    /// Abort later lines after a failing command (default true).
+    pub fail_fast: FailFast,
     /// Capture stdout/stderr in memory and return them in result (default: true when None)
     pub capture_output: Option<bool>,
 }
@@ -517,6 +529,15 @@ fn shell_wrap(kind: ShellKind, command: &str, args: &[&str]) -> Option<ShellSpaw
             ],
             windows_raw_arg: false,
         },
+        ShellKind::PowerShell => ShellSpawn {
+            program: "powershell".to_string(),
+            args: vec![
+                "-NoProfile".to_string(),
+                "-Command".to_string(),
+                build_line(quote_pwsh),
+            ],
+            windows_raw_arg: false,
+        },
         // None returned early above; Default was resolved to Cmd/Sh.
         ShellKind::None | ShellKind::Default => unreachable!("none/default resolved above"),
     };
@@ -568,6 +589,137 @@ fn quote_cmd(arg: &str) -> String {
     } else {
         arg.to_string()
     }
+}
+
+/// Suffix simple cmd lines so a failing command stops the rest of a temp `.bat`.
+fn cmd_fail_fast(line: &str) -> String {
+    if cmd_has_control_flow(line) {
+        return line.to_string();
+    }
+    line.split('\n')
+        .map(|l| {
+            let raw = l.strip_suffix('\r').unwrap_or(l);
+            let t = raw.trim();
+            if t.is_empty()
+                || t.eq_ignore_ascii_case("@echo off")
+                || t.to_ascii_lowercase().starts_with("rem ")
+                || t.starts_with("::")
+                || t.to_ascii_lowercase().starts_with("exit")
+            {
+                raw.to_string()
+            } else {
+                format!("{raw} || exit /b 1")
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+fn cmd_has_control_flow(line: &str) -> bool {
+    line.split('\n').any(|l| {
+        let t = l
+            .trim()
+            .trim_start_matches('@')
+            .to_ascii_lowercase();
+        t.starts_with("if ") || t.starts_with("for ") || t.contains('(')
+    })
+}
+
+fn ps_fail_fast(script: &str) -> String {
+    let d = '\u{24}';
+    let prefix = format!(
+        "{d}ErrorActionPreference='Stop'; try {{ {d}PSNativeCommandUseErrorActionPreference={d}true }} catch {{}}; "
+    );
+    if script.contains('{') {
+        return format!("{prefix}{script}");
+    }
+    let check = format!("\nif ({d}LASTEXITCODE) {{ exit {d}LASTEXITCODE }}");
+    let mut out = prefix;
+    for (i, line) in script.split('\n').enumerate() {
+        if i > 0 {
+            out.push('\n');
+        }
+        out.push_str(line);
+        let t = line.trim();
+        if !t.is_empty() && !t.starts_with('#') {
+            out.push_str(&check);
+        }
+    }
+    out
+}
+
+fn apply_fail_fast(spawn: &mut ShellSpawn) {
+    let Some(last) = spawn.args.last_mut() else {
+        return;
+    };
+    match spawn.program.as_str() {
+        "cmd" => *last = cmd_fail_fast(last),
+        "pwsh" | "powershell" => *last = ps_fail_fast(last),
+        _ => {}
+    }
+}
+
+fn find_on_path(name: &str) -> Option<std::path::PathBuf> {
+    let path = std::env::var_os("PATH")?;
+    let exts: Vec<String> = if cfg!(windows) {
+        std::env::var("PATHEXT")
+            .unwrap_or_else(|_| ".EXE;.CMD;.BAT;.COM".to_string())
+            .split(';')
+            .map(|e| e.trim().to_string())
+            .filter(|e| !e.is_empty())
+            .collect()
+    } else {
+        Vec::new()
+    };
+    for dir in std::env::split_paths(&path) {
+        if dir.as_os_str().is_empty() {
+            continue;
+        }
+        let direct = dir.join(name);
+        if direct.is_file() {
+            return Some(direct);
+        }
+        for ext in &exts {
+            let ext = if ext.starts_with('.') {
+                ext.clone()
+            } else {
+                format!(".{ext}")
+            };
+            let candidate = dir.join(format!("{name}{ext}"));
+            if candidate.is_file() {
+                return Some(candidate);
+            }
+        }
+    }
+    None
+}
+
+fn resolve_shell_program(program: &str) -> Result<String> {
+    if program != "pwsh" && program != "powershell" {
+        return Ok(program.to_string());
+    }
+    if let Some(p) = find_on_path(program) {
+        return Ok(p.to_string_lossy().into_owned());
+    }
+    let known: &[&str] = if program == "pwsh" {
+        &[
+            r"C:\Program Files\PowerShell\7\pwsh.exe",
+            r"C:\Program Files\PowerShell\7-preview\pwsh.exe",
+        ]
+    } else {
+        &[r"C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe"]
+    };
+    for path in known {
+        if std::path::Path::new(path).is_file() {
+            return Ok((*path).to_string());
+        }
+    }
+    if program == "pwsh" {
+        bail!(
+            "pwsh.exe not found on PATH. This host may only have Windows PowerShell — pass shell: \"powershell\"."
+        );
+    }
+    bail!("powershell.exe not found on PATH")
 }
 
 // ---------------------------------------------------------------------------
@@ -719,7 +871,12 @@ pub async fn run_command(
 
     // Shell wrapping. `shell_wrap` returns None for `ShellKind::None` (spawn the
     // program directly) or the resolved program + leading args otherwise.
-    let shell_spawn = shell_wrap(params.shell, command, args);
+    let mut shell_spawn = shell_wrap(params.shell, command, args);
+    if params.fail_fast.0
+        && let Some(ref mut spawn) = shell_spawn
+    {
+        apply_fail_fast(spawn);
+    }
 
     // BUG5: a multi-line command under cmd.exe (`shell:"cmd"`, or `shell:true`/
     // default on Windows, which both resolve to cmd) would lose every line past
@@ -760,13 +917,17 @@ pub async fn run_command(
     // on Windows so the flag is never an unused variable on Unix.
     #[cfg(windows)]
     let windows_raw_arg = shell_spawn.as_ref().is_some_and(|s| s.windows_raw_arg);
-    let (effective_cmd, effective_args_owned): (String, Vec<String>) = match shell_spawn {
+    let is_shell = shell_spawn.is_some();
+    let (mut effective_cmd, effective_args_owned): (String, Vec<String>) = match shell_spawn {
         Some(s) => (s.program, s.args),
         None => (
             command.to_string(),
             args.iter().map(|s| s.to_string()).collect(),
         ),
     };
+    if is_shell {
+        effective_cmd = resolve_shell_program(&effective_cmd)?;
+    }
     let effective_args: Vec<&str> = effective_args_owned.iter().map(|s| s.as_str()).collect();
 
     // Build command.
@@ -1557,6 +1718,69 @@ mod tests {
         assert_eq!(result.exit_code, Some(42), "stdout: {}", result.stdout);
     }
 
+    #[test]
+    fn cmd_fail_fast_suffixes_simple_lines() {
+        let out = cmd_fail_fast("echo A\necho B");
+        assert!(out.contains("echo A || exit /b 1"), "{out}");
+        assert!(out.contains("echo B || exit /b 1"), "{out}");
+    }
+
+    #[test]
+    fn cmd_fail_fast_skips_if_blocks() {
+        let src = "if exist foo (\n  echo x\n)";
+        assert_eq!(cmd_fail_fast(src), src);
+    }
+
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn test_cmd_multiline_fail_fast_stops() {
+        let params = RunParams {
+            shell: ShellKind::Cmd,
+            ..Default::default()
+        };
+        let result = run_command(
+            "cd /d C:\\fsmcp_no_such_dir_zzz\necho SHOULD_NOT_RUN",
+            &[],
+            params,
+            None,
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+        assert_ne!(result.exit_code, Some(0));
+        assert!(
+            !result.stdout.contains("SHOULD_NOT_RUN"),
+            "stdout: {}",
+            result.stdout
+        );
+    }
+
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn test_cmd_multiline_fail_fast_can_be_disabled() {
+        let params = RunParams {
+            shell: ShellKind::Cmd,
+            fail_fast: FailFast(false),
+            ..Default::default()
+        };
+        let result = run_command(
+            "cd /d C:\\fsmcp_no_such_dir_zzz\necho SHOULD_RUN",
+            &[],
+            params,
+            None,
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+        assert!(
+            result.stdout.contains("SHOULD_RUN"),
+            "stdout: {}",
+            result.stdout
+        );
+    }
+
     /// BUG5 secondary symptom: a multi-line `set "PATH=...;%PATH%"` (with
     /// parentheses in the value) plus a `>nul` redirect must run cleanly via the
     /// temp `.bat` — the fragile single-line `&&` chain was what failed before.
@@ -2183,6 +2407,10 @@ mod tests {
         let p = shell_wrap(ShellKind::Pwsh, "echo", &["hi"]).unwrap();
         assert_eq!(p.program, "pwsh");
         assert_eq!(p.args, vec!["-NoProfile", "-Command", "echo hi"]);
+
+        let winps = shell_wrap(ShellKind::PowerShell, "echo", &["hi"]).unwrap();
+        assert_eq!(winps.program, "powershell");
+        assert_eq!(winps.args, vec!["-NoProfile", "-Command", "echo hi"]);
 
         // None means no shell wrapping at all.
         assert!(shell_wrap(ShellKind::None, "echo", &["hi"]).is_none());

@@ -45,6 +45,9 @@ Build: `cargo build` / test: `cargo test` / lint: `cargo clippy`.
    since 0.2.1, but canonical form is ContentRef object).
 
 ## Session notes (FIFO, prune when stale)
+- 2026-09-14: bug5 `run_command` — reject leftover `$NAME` in command/args; failFast default true;
+  `pwsh` vs `powershell.exe`; `install` snapshots process PATH into every client env (no registry).
+  Workaround remains: script file + `-File` if the host already stripped `$`. 492 tests green.
 - 2026-08-30: env config overhaul. computer-tools now default; `src/env_spec.rs` registry feeds
   install-env + hints + new `--list-env`; `FS_MCP_MEMORY_ACCESS_MODE`/`_DB` and `FS_MCP_CTL_BACKEND`
   now read via `env_spec::get` (empty string used to crash the server / kill the memory store).

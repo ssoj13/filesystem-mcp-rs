@@ -121,8 +121,10 @@ pub enum ShellKind {
     /// `bash -c` (git bash on Windows). The cross-platform unix dialect:
     /// enables `;`, pipes, and tools like tail/grep/sed on every OS.
     Bash,
-    /// PowerShell `pwsh -NoProfile -Command`.
+    /// PowerShell 7+ `pwsh -NoProfile -Command`.
     Pwsh,
+    /// Windows PowerShell 5.x `powershell -NoProfile -Command`.
+    PowerShell,
 }
 
 /// `shell` argument wrapper with tolerant deserialization, mirroring
@@ -163,7 +165,8 @@ impl<'de> Deserialize<'de> for ShellArg {
                 "cmd" => ShellKind::Cmd,
                 "sh" => ShellKind::Sh,
                 "bash" => ShellKind::Bash,
-                "pwsh" | "powershell" | "ps" => ShellKind::Pwsh,
+                "pwsh" => ShellKind::Pwsh,
+                "powershell" | "ps" => ShellKind::PowerShell,
                 other => {
                     return Err(serde::de::Error::custom(format!(
                         "invalid shell: \"{other}\", expected a bool or one of \
@@ -188,6 +191,7 @@ impl serde::Serialize for ShellArg {
             ShellKind::Sh => "sh",
             ShellKind::Bash => "bash",
             ShellKind::Pwsh => "pwsh",
+            ShellKind::PowerShell => "powershell",
         };
         serializer.serialize_str(name)
     }

@@ -37,6 +37,7 @@ use tracing::{info, warn};
 
 use crate::core::agent_policy;
 use crate::core::allowed::AllowedDirs;
+use crate::core::dollar_guard;
 use crate::core::content_plane::{
     ContentError, ContentMode, ContentPlane, ContentRef, TextOrRef, sha256_hex,
 };
@@ -2218,19 +2219,23 @@ struct RunCommandArgs {
     ///   pipelines on any OS — `;` separators, pipes, and tools like
     ///   `tail`/`grep`/`sed`. Windows `cmd` does NOT understand `;` and lacks
     ///   those tools, so prefer `"bash"` for such command lines.
-    /// - `"pwsh"`: PowerShell (`pwsh -NoProfile -Command`).
+    /// - `"pwsh"`: PowerShell 7 (`pwsh -NoProfile -Command`). Errors if pwsh.exe is missing.
+    /// - `"powershell"` / `"ps"`: Windows PowerShell 5 (`powershell.exe`).
     /// - `"cmd"` / `"sh"`: force that specific shell.
     ///
-    /// Named shells must be on `PATH`. With `cmd` the line reaches cmd.exe
+    /// Named shells must be on `PATH` (or a well-known install path). With `cmd` the line reaches cmd.exe
     /// verbatim (via `raw_arg`), so backslash Windows paths survive intact —
     /// write them as at the prompt, e.g. `type "C:\dir\file"`.
     /// A MULTI-LINE command under `cmd` (newline-separated lines) runs EVERY
-    /// line via a temp `.bat`, so it follows BATCH semantics rather than
-    /// `cmd /C`: use `%%i` (not `%i`) in `for`, the exit code is that of the
-    /// LAST line, and a failing middle line does NOT stop later lines (there is
-    /// no implicit `&&`) — chain with `&&` if you need fail-fast.
+    /// line via a temp `.bat`. Default `failFast` (true) stops after a failing
+    /// simple line (`|| exit /b 1`); `if`/`for` blocks are left alone — use `&&`
+    /// there. PowerShell gets ErrorAction Stop. Pass `failFast: false` for old
+    /// batch “run every line” semantics.
     #[serde(default)]
     shell: ShellArg,
+    /// Stop after a failing line (default true). See `shell` docs.
+    #[serde(default = "default_flex_true", alias = "fail_fast")]
+    fail_fast: FlexBool,
     /// Stream output to log files (auto-creates them if not provided). Default
     /// true. Streaming and the inline result are INDEPENDENT: stdout/stderr are
     /// always captured and returned inline too. Inline is the full output unless
@@ -6100,7 +6105,7 @@ USE CASES: Patch executables, fix binary data, search-replace in non-text files.
             - WINDOWS PATHS in `command`: JSON eats single backslashes (`\\r`/`\\t` become control chars). Double them (`\"C:\\\\dir\\\\file\"`) or use forward slashes; in shell mode the decoded line reaches cmd.exe verbatim.\n\
             - env/envPrepend/envAppend: Set, prepend, or append env vars.\n\
             - stdin: ContentRef for command stdin (inline/base64/path/blob).\n\
-            - $VAR GOTCHA: the MCP client may DELETE `$NAME` tokens from `command`/`args` before the shell runs (every `$var` -> empty, even defined ones like $HOME); silent, no error. For scripts that need shell variables, pass them via `stdin` ContentRef (NOT stripped) or write a script file and run it (`bash x.sh` / `pwsh -NoProfile -File x.ps1`) — stdin ContentRef and file contents reach the program verbatim.\n\
+            - $VAR GOTCHA: if `command`/`args` still contain `$NAME` tokens, the call is REJECTED (the MCP host may otherwise DELETE them before spawn). Pass scripts via stdin ContentRef or a file. If the host already stripped the tokens, we cannot see them — use a file.\n\
             - cwd: optional working directory. Pass an absolute path with forward slashes as a plain JSON string value (e.g. `\"cwd\": \"C:/projects/repo\"`). Do NOT embed extra quote characters inside the path value itself.\n\
             - timeoutMs: Kill command (and all children) after N ms.\n\
             - Process tree kill: On timeout/cancel, kills all child processes too.\n\
@@ -6148,6 +6153,17 @@ USE CASES: Patch executables, fix binary data, search-replace in non-text files.
                 (args.command.clone(), args.args.clone())
             };
         let args_refs: Vec<&str> = run_args.iter().map(|s| s.as_str()).collect();
+
+        if let Some(tok) = dollar_guard::first_in_command_and_args(&command, &run_args) {
+            return Err(McpError::invalid_params(
+                format!(
+                    "command/args contain `{tok}` — the MCP host may delete NAME tokens before spawn \
+                     (empty expansion, no error). Pass the script via stdin ContentRef or a file \
+                     (powershell -NoProfile -File x.ps1)."
+                ),
+                None,
+            ));
+        }
 
         // Non-fatal hint for the silent-pipe footgun.
         //
@@ -6252,6 +6268,7 @@ USE CASES: Patch executables, fix binary data, search-replace in non-text files.
             output_filter,
             mode,
             shell: *args.shell,
+            fail_fast: process::FailFast(*args.fail_fast),
             // Capture and file-streaming are independent (see stream_output
             // docs): always capture for the inline result; the log file is
             // teed in parallel when use_file_streaming set the paths above.

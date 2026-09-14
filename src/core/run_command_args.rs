@@ -66,6 +66,8 @@ mod tests {
         stream_dir: Option<String>,
         #[serde(default)]
         shell: ShellArg,
+        #[serde(default = "default_flex_true", alias = "fail_fast")]
+        fail_fast: FlexBool,
         #[serde(default)]
         background: FlexBool,
         // These two were previously missing from the fixture, so the tests never
@@ -167,6 +169,28 @@ mod tests {
             serde_json::from_value(json!({ "command": "echo", "args": [], "shell": "bash" }))
                 .unwrap();
         assert_eq!(*args.shell, ShellKind::Bash);
+    }
+
+    #[test]
+    fn shell_powershell_is_not_pwsh() {
+        let ps: RunCommandArgsFixture = serde_json::from_value(json!({
+            "command": "echo", "args": [], "shell": "powershell"
+        }))
+        .unwrap();
+        assert_eq!(*ps.shell, ShellKind::PowerShell);
+
+        let pwsh: RunCommandArgsFixture = serde_json::from_value(json!({
+            "command": "echo", "args": [], "shell": "pwsh"
+        }))
+        .unwrap();
+        assert_eq!(*pwsh.shell, ShellKind::Pwsh);
+    }
+
+    #[test]
+    fn fail_fast_defaults_true() {
+        let args: RunCommandArgsFixture =
+            serde_json::from_value(json!({ "command": "echo", "args": ["hi"] })).unwrap();
+        assert!(*args.fail_fast);
     }
 
     #[test]

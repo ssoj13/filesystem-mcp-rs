@@ -41,9 +41,21 @@ fn hint_sections() -> Vec<String> {
         KARPATHY_RULES.to_string(),
         policy,
         crate::env_spec::render_table(),
+        PATH_SNAPSHOT_HINT.to_string(),
         MCP_WORKFLOWS.to_string(),
     ]
 }
+
+/// PATH is a normal process env var, not `FS_MCP_*`. `install` copies the installing
+/// process PATH into the client `env` block so GUI-launched Cursor still sees git/cargo.
+/// Edit that key by hand, or re-run install from a terminal that already has the PATH you want.
+const PATH_SNAPSHOT_HINT: &str = concat!(
+    "== PATH (install snapshot, not the registry) ==\n",
+    "`install` writes the current process PATH into mcpServers.env.PATH. Cursor-as-GUI often \n",
+    "starts with a short PATH (git missing). Run install from a terminal that can run `git`, \n",
+    "or edit env.PATH / use run_command envPrepend. The server does not read HKCU/HKLM.\n",
+);
+
 /// Concrete tool workflows (search_files / grep_files / run_command …).
 const MCP_WORKFLOWS: &str = include_str!("docs/mcp_workflows.md");
 
@@ -54,10 +66,16 @@ const MCP_WORKFLOWS: &str = include_str!("docs/mcp_workflows.md");
 /// value that is already in front of the user. Optional knobs (no meaningful default) are
 /// written blank; `env_spec::get` reads blank as unset, so they stay no-ops until filled in.
 fn default_env() -> BTreeMap<String, String> {
-    crate::env_spec::vars()
+    let mut env: BTreeMap<String, String> = crate::env_spec::vars()
         .into_iter()
         .map(|v| (v.key.to_string(), v.default.to_string()))
-        .collect()
+        .collect();
+    // Snapshot the installing process PATH (option 1+2 / BUG5): no registry read.
+    // Re-install from a “good” terminal refreshes it; a hand edit in mcp.json lasts until then.
+    if let Ok(path) = std::env::var("PATH") {
+        env.insert("PATH".to_string(), path);
+    }
+    env
 }
 
 /// Build the install spec: this executable, its allowlists, and its docs.
@@ -147,5 +165,13 @@ mod tests {
 
         let cmd = SetupCommand::Uninstall(TargetArgs::default());
         assert!(matches!(with_default_dirs(cmd), SetupCommand::Uninstall(_)));
+    }
+
+    #[test]
+    fn default_env_snapshots_process_path() {
+        let env = default_env();
+        let process = std::env::var("PATH").unwrap();
+        assert_eq!(env.get("PATH").map(String::as_str), Some(process.as_str()));
+        assert!(env.contains_key("FS_MCP_MEMORY_ACCESS_MODE"));
     }
 }

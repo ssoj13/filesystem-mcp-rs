@@ -2,6 +2,13 @@
 
 **Paths by glob + metadata** → `search_files`. **Text inside files** → `grep_files` (not shell `rg`/`grep` via `run_command`).
 
+#### `run_command` — shells, fail-fast, PATH, variables
+
+- `shell`: `false` (default), `true` (cmd/sh), `bash`, `pwsh` (PowerShell 7), `powershell` (Windows PowerShell 5). `pwsh` is not an alias for `powershell`.
+- `failFast` defaults true (stop after a failing simple line). `failFast: false` = old batch “run all lines”.
+- Do not put shell `$NAME` tokens in `command`/`args` — the host may delete them; leftovers are rejected. Use stdin ContentRef or a script file.
+- GUI Cursor PATH is often short. `install` snapshots the installing process PATH into every client `env.PATH`. Run install from a terminal that can run `git`, or edit `env.PATH`.
+
 #### `search_files` — files changed in a time window
 
 `modifiedAfter` / `modifiedBefore`: **RFC3339** (`2024-01-01T12:00:00Z`) or **relative duration** (`17m 20s`, `17m20s`, `2h`, `7d`). Duration = cutoff at `now - span`.
