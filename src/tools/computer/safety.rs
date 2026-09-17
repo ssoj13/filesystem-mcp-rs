@@ -146,7 +146,10 @@ struct GateState {
 pub struct SafetyGate {
     state: Mutex<GateState>,
     max_ops_per_min: u32,
-    audit_path: PathBuf,
+    /// Where the audit trail is appended, or `None` when the state directory could not be
+    /// resolved. Resolved once at construction so the "auditing is off" warning is emitted
+    /// once at startup instead of on every recorded op.
+    audit_path: Option<PathBuf>,
 }
 
 impl SafetyGate {
@@ -204,7 +207,9 @@ impl SafetyGate {
             }
             st.ops.push_back(now);
         }
-        audit_append(&self.audit_path, action, detail);
+        if let Some(path) = &self.audit_path {
+            audit_append(path, action, detail);
+        }
         Ok(())
     }
 }
@@ -216,11 +221,36 @@ fn epoch_ms() -> u64 {
         .unwrap_or(0)
 }
 
-fn default_audit_path() -> PathBuf {
-    dirs::data_dir()
-        .unwrap_or_else(std::env::temp_dir)
-        .join("computer-mcp-rs")
-        .join("audit.jsonl")
+/// `<state>/safety/audit.jsonl`, migrating the pre-2026-09 log from the old computer-control
+/// directory - the one non-regenerable file there (the sibling ocrs models and layouts are
+/// re-created on demand and are only repointed, never moved).
+///
+/// `None` when the state directory cannot be resolved. This is a security audit trail, so the
+/// unresolvable case fails loudly in the log instead of relocating the record into the
+/// world-writable, periodically-swept OS temp directory, which is what the previous
+/// `data_dir().unwrap_or_else(temp_dir)` fallback did.
+fn default_audit_path() -> Option<PathBuf> {
+    let dir = match crate::core::paths::sub_dir(crate::core::paths::SubDir::Safety) {
+        Ok(dir) => dir,
+        Err(e) => {
+            tracing::warn!(
+                "computer-control auditing disabled: cannot resolve the state directory: {e}"
+            );
+            return None;
+        }
+    };
+    let new = dir.join("audit.jsonl");
+    if let Some(legacy) = crate::core::paths::legacy_ctl_audit()
+        && let crate::core::paths::Migrated::Ambiguous { old, .. } =
+            crate::core::paths::migrate(&legacy, &new)
+    {
+        tracing::warn!(
+            "Old audit log left at {}: a log already exists at {}. Merge or remove one by hand.",
+            old.display(),
+            new.display()
+        );
+    }
+    Some(new)
 }
 
 /// Append one JSONL audit line. Audit failure is logged, never propagated:

@@ -7470,15 +7470,12 @@ async fn run_stream_mode(
 /// Install panic hook that writes to file (stderr breaks stdio MCP transport)
 fn install_panic_hook() {
     std::panic::set_hook(Box::new(|panic_info| {
-        let panic_log = dirs::data_local_dir()
-            .unwrap_or_else(|| PathBuf::from("."))
-            .join("filesystem-mcp-rs")
-            .join("panic.log");
-
-        // Ensure directory exists
-        if let Some(parent) = panic_log.parent() {
-            let _ = std::fs::create_dir_all(parent);
-        }
+        // A panic hook that panics aborts the process with no diagnostic at all, so an
+        // unresolvable state root means the hook gives up quietly rather than reporting.
+        // `db_path` has already created the root, so nothing else needs creating here.
+        let Ok(panic_log) = core::paths::db_path("panic.log") else {
+            return;
+        };
 
         let timestamp = humantime::format_rfc3339(std::time::SystemTime::now());
         let location = panic_info
@@ -7607,19 +7604,38 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             })
             .transpose()?
             .unwrap_or_default();
-        let db_path = args
+        // Explicit path wins; otherwise the state root, migrating any pre-2026-09 database.
+        let db_path = match args
             .memory_db
             .or_else(|| env_spec::get("FS_MCP_MEMORY_DB").map(PathBuf::from))
-            .unwrap_or_else(|| {
-                let mut path = dirs::data_local_dir().unwrap_or_else(|| PathBuf::from("."));
-                path.push("filesystem-mcp-rs");
-                path.push("memory2.db");
-                path
-            });
-        info!("Memory v2 access mode: {}", access_mode);
-        match SqliteMemoryStore::new(db_path, access_mode) {
-            Ok(store) => server.memory_store = Some(Arc::new(store)),
-            Err(e) => warn!("Failed to initialize memory v2 store: {}", e),
+        {
+            Some(explicit) => Some(explicit),
+            None => match core::paths::db_path("memory2.db") {
+                Ok(new) => {
+                    let migrated = match core::paths::legacy_local_dir() {
+                        Some(legacy) => core::paths::migrate(&legacy.join("memory2.db"), &new),
+                        None => core::paths::Migrated::FreshStart,
+                    };
+                    match core::paths::memory_db_decision(migrated) {
+                        core::paths::MemoryDbDecision::Use => Some(new),
+                        core::paths::MemoryDbDecision::Disabled(msg) => {
+                            warn!("{msg}");
+                            None
+                        }
+                    }
+                }
+                Err(e) => {
+                    warn!("Memory tools disabled: cannot resolve the state directory: {e}");
+                    None
+                }
+            },
+        };
+        if let Some(db_path) = db_path {
+            info!("Memory v2 access mode: {}", access_mode);
+            match SqliteMemoryStore::new(db_path, access_mode) {
+                Ok(store) => server.memory_store = Some(Arc::new(store)),
+                Err(e) => warn!("Failed to initialize memory v2 store: {}", e),
+            }
         }
     }
 

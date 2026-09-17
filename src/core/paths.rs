@@ -22,13 +22,10 @@ pub enum SubDir {
     #[allow(dead_code)] // wired when logging lands in wave 2; delete this attribute there
     Logs,
     /// Downloaded OCR models.
-    #[allow(dead_code)] // wired by Task 4; delete this attribute there
     Ocrs,
     /// Saved window layouts.
-    #[allow(dead_code)] // wired by Task 4; delete this attribute there
     Layouts,
     /// Computer-control safety state.
-    #[allow(dead_code)] // wired by Task 4; delete this attribute there
     Safety,
     /// Scratch: captures, `run_command` output, temporary scripts. Swept by age.
     #[allow(dead_code)] // wired by Task 4; delete this attribute there
@@ -49,20 +46,17 @@ impl SubDir {
 }
 
 /// The state root, created if missing.
-#[allow(dead_code)] // wired by Task 3; delete this attribute there
 pub fn state_dir() -> io::Result<PathBuf> {
     resolve_root(env_spec::get("FS_MCP_STATE_DIR").map(PathBuf::from))
 }
 
 /// Path of a file directly in the state root (`stats.db`, `memory2.db`, `panic.log`).
 /// The root is created; the file is not.
-#[allow(dead_code)] // wired by Task 3; delete this attribute there
 pub fn db_path(name: &str) -> io::Result<PathBuf> {
     Ok(state_dir()?.join(name))
 }
 
 /// A subdirectory of the state root, created if missing.
-#[allow(dead_code)] // wired by Task 4; delete this attribute there
 pub fn sub_dir(kind: SubDir) -> io::Result<PathBuf> {
     resolve_sub(env_spec::get("FS_MCP_STATE_DIR").map(PathBuf::from), kind)
 }
@@ -114,7 +108,6 @@ fn resolve_root_from(override_dir: Option<PathBuf>, home: Option<PathBuf>) -> io
 }
 
 /// Outcome of migrating one location from its pre-2026-09 home to the state root.
-#[allow(dead_code)] // wired by Task 5; delete this attribute there
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Migrated {
     /// The old location existed and was moved to the new one.
@@ -145,7 +138,6 @@ pub enum Migrated {
 /// a leftover `new` is reached on Windows by `migrate_removes_the_leftover_when_the_original_cannot_be_unlinked`;
 /// on Unix that arm is verified by reading. The parent-creation failure returns before any of
 /// this and is covered separately.
-#[allow(dead_code)] // wired by Task 5; delete this attribute there
 pub fn migrate(old: &Path, new: &Path) -> Migrated {
     let ambiguous = || Migrated::Ambiguous {
         old: old.to_path_buf(),
@@ -206,7 +198,6 @@ pub fn migrate(old: &Path, new: &Path) -> Migrated {
 
 /// The pre-2026-09 root for files that lived in `data_local_dir`, used only to find data left
 /// by older builds. Never used for new writes.
-#[allow(dead_code)] // wired by Task 5; delete this attribute there
 pub fn legacy_local_dir() -> Option<PathBuf> {
     dirs::data_local_dir().map(|d| d.join("filesystem-mcp-rs"))
 }
@@ -218,9 +209,35 @@ pub fn legacy_local_dir() -> Option<PathBuf> {
 ///
 /// Returns the file, not the directory it sits in, so no caller can hand a directory to
 /// [`migrate`], which refuses those.
-#[allow(dead_code)] // wired by Task 3; delete this attribute there
 pub fn legacy_ctl_audit() -> Option<PathBuf> {
     dirs::data_dir().map(|d| d.join("computer-mcp-rs").join("audit.jsonl"))
+}
+
+/// What the caller should do with the memory database after migration.
+///
+/// Produced by [`memory_db_decision`] and consumed at startup in `main.rs`, which either opens
+/// the database at the new path or leaves the memory tools out of the server entirely.
+#[derive(Debug)]
+pub enum MemoryDbDecision {
+    /// Open the database at the new path.
+    Use,
+    /// Do not open anything; report this message to the operator.
+    Disabled(String),
+}
+
+/// Two memory databases mean two different sets of the user's notes. Choosing one silently is
+/// how "where did my memories go" bugs are born, so the store stays off until a human decides
+/// which file to keep.
+pub fn memory_db_decision(m: Migrated) -> MemoryDbDecision {
+    match m {
+        Migrated::Moved | Migrated::FreshStart => MemoryDbDecision::Use,
+        Migrated::Ambiguous { old, new } => MemoryDbDecision::Disabled(format!(
+            "Memory tools disabled: a memory database exists both at {} and at {}. \
+             Keep the one you want, delete or rename the other, then restart.",
+            old.display(),
+            new.display()
+        )),
+    }
 }
 
 #[cfg(test)]
@@ -268,6 +285,26 @@ mod tests {
         let msg = err.to_string();
         assert!(msg.contains("FS_MCP_STATE_DIR"), "{msg}");
         assert!(msg.contains("state"), "{msg}");
+    }
+
+    /// An ambiguous memory database must disable the memory store rather than pick a file.
+    #[test]
+    fn ambiguous_memory_db_disables_the_store() {
+        let decision = memory_db_decision(Migrated::Ambiguous {
+            old: PathBuf::from("/old/memory2.db"),
+            new: PathBuf::from("/new/memory2.db"),
+        });
+        match decision {
+            MemoryDbDecision::Disabled(msg) => {
+                assert!(msg.contains("/old/memory2.db") && msg.contains("/new/memory2.db"));
+            }
+            other => panic!("expected Disabled, got {other:?}"),
+        }
+        assert!(matches!(memory_db_decision(Migrated::Moved), MemoryDbDecision::Use));
+        assert!(matches!(
+            memory_db_decision(Migrated::FreshStart),
+            MemoryDbDecision::Use
+        ));
     }
 
     /// Old file present, new absent: the data moves and the old path is gone.

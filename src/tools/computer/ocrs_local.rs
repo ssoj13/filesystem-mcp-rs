@@ -5,8 +5,9 @@
 //! text; `ocrs` is better there. Both run 100% locally — zero LLM tokens.
 //!
 //! MODELS: downloaded automatically on first use into
-//! `dirs::data_dir()/computer-mcp-rs/ocrs` (override:
-//! `FS_MCP_CTL_OCRS_MODELS_DIR`). URLs are the upstream defaults from
+//! `~/.filesystem-mcp-rs/ocrs` (override: `FS_MCP_CTL_OCRS_MODELS_DIR`).
+//! Models are re-downloadable, so anything left in the pre-2026-09
+//! `<data>/computer-mcp-rs/ocrs` is not migrated; delete it by hand. URLs are the upstream defaults from
 //! ocrs-cli (verbatim): ocrs-models.s3-accelerate.amazonaws.com/*.rten.
 //! Downloads go to `<name>.part` and are renamed only when complete, so a
 //! killed download can never leave a truncated model behind.
@@ -27,21 +28,21 @@ const RECOG_URL: &str = "https://ocrs-models.s3-accelerate.amazonaws.com/text-re
 /// Env override for the models directory (empty = unset).
 pub const ENV_OCRS_MODELS_DIR: &str = "FS_MCP_CTL_OCRS_MODELS_DIR";
 
-fn models_dir() -> PathBuf {
+/// The override wins; otherwise `<state>/ocrs`. Fallible because resolving the state root is:
+/// an unresolvable root is reported to the caller (OCR simply does not run) rather than
+/// silently redirected somewhere else.
+fn models_dir() -> anyhow::Result<PathBuf> {
     if let Ok(dir) = std::env::var(ENV_OCRS_MODELS_DIR) {
         let d = PathBuf::from(dir.trim());
         if !d.as_os_str().is_empty() {
-            return d;
+            return Ok(d);
         }
     }
-    dirs::data_dir()
-        .unwrap_or_else(std::env::temp_dir)
-        .join("computer-mcp-rs")
-        .join("ocrs")
+    Ok(crate::core::paths::sub_dir(crate::core::paths::SubDir::Ocrs)?)
 }
 
-fn model_path(name: &str) -> PathBuf {
-    models_dir().join(name)
+fn model_path(name: &str) -> anyhow::Result<PathBuf> {
+    Ok(models_dir()?.join(name))
 }
 
 /// Download one model file (atomic: `<name>.part` -> rename). reqwest::blocking:
@@ -73,7 +74,7 @@ fn ensure_models() -> anyhow::Result<()> {
         ("text-detection.rten", DETECT_URL),
         ("text-recognition.rten", RECOG_URL),
     ] {
-        let p = model_path(name);
+        let p = model_path(name)?;
         if !p.is_file() {
             download_model(url, &p)?;
         }
@@ -89,9 +90,9 @@ fn engine() -> anyhow::Result<&'static OcrEngine> {
         return Ok(e);
     }
     ensure_models()?;
-    let detection = Model::load_file(model_path("text-detection.rten"))
+    let detection = Model::load_file(model_path("text-detection.rten")?)
         .map_err(|e| anyhow::anyhow!("load text-detection.rten: {e}"))?;
-    let recognition = Model::load_file(model_path("text-recognition.rten"))
+    let recognition = Model::load_file(model_path("text-recognition.rten")?)
         .map_err(|e| anyhow::anyhow!("load text-recognition.rten: {e}"))?;
     let engine = OcrEngine::new(OcrEngineParams {
         detection_model: Some(detection),

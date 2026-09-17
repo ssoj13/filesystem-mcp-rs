@@ -66,8 +66,7 @@ pub fn to_monitor(id: u32, monitor: u32) -> anyhow::Result<WinInfo> {
     super::geom(id, Some(m.x), Some(m.y), Some(m.w as i32), Some(m.h as i32), None)
 }
 
-/// Snapshot every visible top-level window into
-/// `<data>/computer-mcp-rs/layouts/<name>.json`.
+/// Snapshot every visible top-level window into `<state>/layouts/<name>.json`.
 pub fn layout_save(name: &str) -> anyhow::Result<Vec<LayoutEntry>> {
     let entries: Vec<LayoutEntry> = super::list_windows(None)?
         .into_iter()
@@ -102,8 +101,9 @@ pub fn layout_load(name: &str, dry_run: bool) -> anyhow::Result<Vec<(LayoutEntry
     Ok(out)
 }
 
-/// `<data>/computer-mcp-rs/layouts/<name>.json`, with the name sanitized to a
-/// single path segment (it arrives from an agent).
+/// `<state>/layouts/<name>.json`, with the name sanitized to a single path
+/// segment (it arrives from an agent). Layouts are cheap to re-save, so anything
+/// left in the pre-2026-09 `<data>/computer-mcp-rs/layouts` is not migrated.
 fn layout_path(name: &str) -> anyhow::Result<std::path::PathBuf> {
     let safe: String = name
         .chars()
@@ -112,11 +112,7 @@ fn layout_path(name: &str) -> anyhow::Result<std::path::PathBuf> {
     if safe.is_empty() {
         return Err(anyhow::anyhow!("layout name must be alphanumeric"));
     }
-    let dir = dirs::data_dir()
-        .unwrap_or_else(std::env::temp_dir)
-        .join("computer-mcp-rs")
-        .join("layouts");
-    std::fs::create_dir_all(&dir)?;
+    let dir = crate::core::paths::sub_dir(crate::core::paths::SubDir::Layouts)?;
     Ok(dir.join(format!("{safe}.json")))
 }
 
