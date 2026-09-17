@@ -1,7 +1,7 @@
 # CLAUDE.md — filesystem-mcp-rs (working notes)
 
 ## What this is
-Rust MCP server (rmcp 3.1.4 + axum, tokio, edition 2024), 130 tools: filesystem, grep, run_command,
+Rust MCP server (rmcp 3.1.3 + axum, tokio, edition 2024), 130 tools: filesystem, grep, run_command,
 process mgmt, S3, HTTP, screenshots (xcap), clipboard (arboard), memory (SQLite), and computer
 control (26 ctl-tools behind ctl-* features). Published crate, consumed from GitHub (ssh ref).
 Build: `cargo build` / test: `cargo test` / lint: `cargo clippy`.
@@ -19,9 +19,19 @@ Build: `cargo build` / test: `cargo test` / lint: `cargo clippy`.
   driver/mod.rs = OS seam (imp backend selection, portable types, Caps), safety/input/win/capture/
   steps/wait/uia/ocr/ocrs_local/find/clip/notify + server_*.rs (per-domain #[tool_router] impls).
 - v0.2.1: BUG.md resolved (tolerant ContentRef, line/column errors, 64 KiB inline/chunk limits).
+- State lives under ONE root, `~/.filesystem-mcp-rs/`, same on every OS: `memory2.db`, `panic.log`,
+  `stats.db` (wave 3), plus `tmp/` (captures, run_command stream logs, temp scripts - swept by age,
+  `FS_MCP_TMP_KEEP_HOURS`, default 24), `ocrs/`, `layouts/`, `safety/`, `logs/` (wave 2).
+  `FS_MCP_STATE_DIR` moves the root and must be absolute. The OS temp dir is no longer used.
+- `src/core/paths.rs` is the ONLY resolver. `paths_are_centralized` (src/core/paths_guard.rs) fails
+  the build on `dirs::*` / `temp_dir(` / `env::home_dir` outside its ALLOWED list, and on any `///`
+  line naming an abandoned location (`<local data>`, `computer-mcp-rs`, `%LOCALAPPDATA%`, ...).
+  It scans only `src/` and `tests/` - a `build.rs` or a dependency would be invisible to it.
+- `memory2.db` migrates from the old data dir on first start; if it exists in BOTH places nothing
+  moves and the memory tools stay OFF until a human deletes one. Not a bug - do not "fix" it.
 
 ## Verified facts (do not re-derive)
-- rmcp 3.1.4: with_structured is fs's own WithStructured trait (main.rs); ToolRouter::merge exists;
+- rmcp 3.1.3 (Cargo.toml:26 - these notes said 3.1.4 until 2026-09-17): with_structured is fs's own WithStructured trait (main.rs); ToolRouter::merge exists;
   tool_router attr takes router=/vis=/server_handler=; rmcp CANNOT cfg-gate #[tool] methods in one
   impl (S1 spike) — per-domain routers + ToolRouter::merge.
 - windows 0.62: SendInput(&[INPUT], i32); IsWindow(Option<HWND>); GetProcessDpiAwarenessContext

@@ -2,6 +2,33 @@
 
 ## [Unreleased]
 
+### One state directory: `~/.filesystem-mcp-rs/`
+
+- **Every durable and scratch file now lives under a single per-user root**, identical on Windows,
+  macOS and Linux: `memory2.db`, `panic.log`, the ocrs model cache, window layouts, computer-control
+  safety state, and `tmp/` for captures, `run_command` stream logs and temporary scripts. State used
+  to be spread over four roots, two of which differ per OS and per Windows account.
+- **Supersedes the 0.1.20 entry below**, which said auto-created `run_command` stream logs "now
+  always go to the OS temp dir (`<temp>/filesystem-mcp`)". They go to `~/.filesystem-mcp-rs/tmp/`
+  unless `stream_dir` is set. The OS temp directory is no longer used by this server at all.
+- **`memory2.db` is migrated** from the old per-OS data directory on first start. If a database
+  exists in *both* places nothing is moved and the memory tools stay off until a human picks one —
+  silently choosing between two sets of the user's notes is how they get lost. The ocrs, layouts
+  and safety directories are regenerable and are deliberately not migrated.
+- **`~/.filesystem-mcp-rs/tmp/` is swept by age** on start, under a lease so that concurrent
+  servers do not sweep in parallel. `FS_MCP_TMP_KEEP_HOURS` sets the retention (default 24, `0`
+  turns the sweep off, values above a year are clamped).
+- **New `FS_MCP_STATE_DIR`** moves the root. It must be absolute: a relative value would resolve
+  against whatever directory launched the server. An unresolvable home is a startup error rather
+  than a silent fallback to the current directory.
+- **`core::paths` is the only resolver**, enforced mechanically: the test `paths_are_centralized`
+  fails the build on any `dirs::*`, `std::env::temp_dir` or `std::env::home_dir` outside its
+  allowlist, and on any `///` doc line still naming an abandoned location.
+- **Startup errors read as sentences.** `main` rendered them with `Debug`; it now prints the
+  `Display` form and exits 1. A state root that cannot be prepared is reported once, early, as
+  "Cannot prepare the server state directory" instead of being framed by whichever consumer
+  happened to be built first.
+
 ### `run_command` on Windows (bug5.md): loud `$` reject, fail-fast, `pwsh` vs `powershell`, PATH snapshot
 
 - **`$NAME` tokens in `command`/`args` are rejected** when they still reach the server. MCP hosts
