@@ -1,0 +1,10 @@
+# Revisions that changed formatting only, and that `git blame` should look through.
+#
+# Enable locally with:
+#     git config blame.ignoreRevsFile .git-blame-ignore-revs
+# GitHub reads this file automatically.
+#
+# Only add a commit here that touches NOTHING but whitespace and line breaks.
+
+# style: cargo fmt across the crate, with no other change
+90a3e7ab25d78982e486dd38eef1533b74966696

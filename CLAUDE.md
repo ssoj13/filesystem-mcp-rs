@@ -4,7 +4,9 @@
 Rust MCP server (rmcp 3.1.3 + axum, tokio, edition 2024), 130 tools: filesystem, grep, run_command,
 process mgmt, S3, HTTP, screenshots (xcap), clipboard (arboard), memory (SQLite), and computer
 control (26 ctl-tools behind ctl-* features). Published crate, consumed from GitHub (ssh ref).
-Build: `cargo build` / test: `cargo test` / lint: `cargo clippy`.
+Build: `cargo build` / test: `cargo test` / lint: `cargo clippy --all-targets -- -D warnings`.
+Format: `cargo fmt --check` is a gate (CI runs it on Linux only). The crate was reflowed once in
+`90a3e7a`, listed in `.git-blame-ignore-revs` — never hand-wrap against rustfmt, run it.
 
 ## Key layout facts
 - Tools live in `src/tools/*.rs`, registered via `#[cfg(feature = "...")]` in `src/tools/mod.rs`.

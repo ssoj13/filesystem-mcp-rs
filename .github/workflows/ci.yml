@@ -29,6 +29,14 @@ jobs:
       - uses: actions/checkout@v5
 
       - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+
+      # Once per matrix, not three times: rustfmt's answer does not depend on the OS, and a
+      # failure here is the same failure on every runner.
+      - name: Format
+        if: runner.os == 'Linux'
+        run: cargo fmt --check
 
       - name: Install Linux dependencies
         if: runner.os == 'Linux'
