@@ -175,9 +175,13 @@ fn cursor_rect(size: u32) -> anyhow::Result<Rect> {
     Ok(Rect::new(cx - half, cy - half, size, size))
 }
 
+/// Write the capture to the server's own scratch directory under the state root.
+///
+/// The state root is resolved (and created) by `core::paths`; a failure there is propagated
+/// rather than falling back to the OS temp directory, so a capture never lands somewhere the
+/// operator cannot find and the retention sweep does not reach.
 fn save(img: RgbaImage, rect: Rect) -> anyhow::Result<CapResult> {
-    let dir = std::env::temp_dir().join("computer-mcp-rs");
-    std::fs::create_dir_all(&dir)?;
+    let dir = crate::core::paths::sub_dir(crate::core::paths::SubDir::Tmp)?;
     let path = dir.join(format!("capture-{}-{}.png", now_ms(), std::process::id()));
     img.save_with_format(&path, image::ImageFormat::Png)?;
     Ok(CapResult { path: path.display().to_string(), hash: dhash64(&img), rect })

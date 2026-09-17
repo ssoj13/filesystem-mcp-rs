@@ -271,9 +271,19 @@ pub struct ContentPlane {
 }
 
 impl ContentPlane {
+    /// The live spool: a per-process directory under the state root's `tmp/`.
+    ///
+    /// The pid suffix keeps two servers on one machine from sharing sessions. A state root
+    /// that cannot be resolved is propagated, never worked around with the OS temp directory:
+    /// staged bytes must land where the operator and the retention sweep can find them.
     pub fn new() -> std::io::Result<Self> {
-        let root =
-            std::env::temp_dir().join(format!("filesystem-mcp-rs-blobs-{}", std::process::id()));
+        let tmp = crate::core::paths::sub_dir(crate::core::paths::SubDir::Tmp)?;
+        Self::in_dir(tmp.join(format!("filesystem-mcp-rs-blobs-{}", std::process::id())))
+    }
+
+    /// The spool rooted at an explicit directory. Split out of [`ContentPlane::new`] so tests
+    /// can spool into a `TempDir` instead of the real state root.
+    pub fn in_dir(root: PathBuf) -> std::io::Result<Self> {
         std::fs::create_dir_all(&root)?;
         std::fs::create_dir_all(root.join("sessions"))?;
         std::fs::create_dir_all(root.join("blobs"))?;
@@ -556,6 +566,14 @@ mod tests {
         assert!(err.contains("text"), "error must name the missing field: {err}");
     }
 
+    /// A spool in a throwaway directory. Tests must never write into the real state root, and
+    /// the returned `TempDir` must stay alive for the test: dropping it deletes the spool.
+    fn spool() -> (tempfile::TempDir, ContentPlane) {
+        let dir = tempfile::TempDir::new().expect("scratch dir");
+        let plane = ContentPlane::in_dir(dir.path().join("blobs")).expect("spool");
+        (dir, plane)
+    }
+
     fn rt() -> tokio::runtime::Runtime {
         tokio::runtime::Builder::new_current_thread()
             .enable_all()
@@ -565,7 +583,7 @@ mod tests {
 
     #[test]
     fn inline_limit_rejects() {
-        let plane = ContentPlane::new().unwrap();
+        let (_dir, plane) = spool();
         let big = "x".repeat(INLINE_MAX_BYTES + 1);
         let r = ContentRef::Inline { text: big };
         let err = rt()
@@ -576,7 +594,7 @@ mod tests {
 
     #[test]
     fn nul_rejected_in_text_mode() {
-        let plane = ContentPlane::new().unwrap();
+        let (_dir, plane) = spool();
         let r = ContentRef::Inline {
             text: "a\0b".into(),
         };
@@ -588,7 +606,7 @@ mod tests {
 
     #[test]
     fn blob_round_trip_cyrillic() {
-        let plane = ContentPlane::new().unwrap();
+        let (_dir, plane) = spool();
         let sid = plane.begin().unwrap();
         let chunk = "\u{0440}\u{0430}\u{0432}\u{043d}\u{0438}\u{043d}\u{0430}\nline2\n".as_bytes();
         assert_eq!(&chunk[..2], &[0xd1, 0x80]);
@@ -603,7 +621,7 @@ mod tests {
 
     #[test]
     fn hash_mismatch_on_finalize() {
-        let plane = ContentPlane::new().unwrap();
+        let (_dir, plane) = spool();
         let sid = plane.begin().unwrap();
         plane.append(&sid, b"hello").unwrap();
         let err = plane.finalize(&sid, Some("deadbeef")).unwrap_err();
@@ -612,7 +630,7 @@ mod tests {
 
     #[test]
     fn chunk_too_large() {
-        let plane = ContentPlane::new().unwrap();
+        let (_dir, plane) = spool();
         let sid = plane.begin().unwrap();
         let big = vec![0u8; CHUNK_MAX_BYTES + 1];
         let err = plane.append(&sid, &big).unwrap_err();

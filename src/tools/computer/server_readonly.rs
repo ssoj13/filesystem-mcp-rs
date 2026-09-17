@@ -147,7 +147,10 @@ impl FileSystemServer {
                 .map_err(|e| anyhow::anyhow!("open {path}: {e}"))?
                 .to_rgba8();
             let outside = annotate::draw(&mut img, org, &shapes, scale.unwrap_or(2))?;
-            let out = out.map_or_else(annotate::out_path, std::path::PathBuf::from);
+            let out = match out {
+                Some(p) => std::path::PathBuf::from(p),
+                None => annotate::out_path()?,
+            };
             if let Some(dir) = out.parent() {
                 std::fs::create_dir_all(dir)?;
             }

@@ -7827,13 +7827,13 @@ fn parse_time_filter(raw: &str) -> anyhow::Result<SystemTime> {
 }
 
 async fn prepare_stream_paths(args: &RunCommandArgs) -> Result<(String, String), McpError> {
-    // Auto-generated stream logs always go to the OS temp dir (cross-platform:
-    // %TEMP% on Windows, $TMPDIR or /tmp on Unix) so they never litter the
-    // working directory. Callers wanting them elsewhere set `stream_dir` explicitly.
-    let dir = if let Some(ref dir) = args.stream_dir {
-        PathBuf::from(dir)
-    } else {
-        env::temp_dir().join("filesystem-mcp")
+    // Auto-generated stream logs go to the server's own tmp/ under the state root, so they
+    // never litter the working directory and are swept by the same retention as every other
+    // scratch file. Callers wanting them elsewhere set `stream_dir` explicitly.
+    let dir = match args.stream_dir {
+        Some(ref dir) => PathBuf::from(dir),
+        None => core::paths::sub_dir(core::paths::SubDir::Tmp)
+            .map_err(internal_err("Failed to resolve the state directory"))?,
     };
 
     fs::create_dir_all(&dir)

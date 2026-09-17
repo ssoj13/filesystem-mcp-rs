@@ -29,7 +29,6 @@ pub enum SubDir {
     /// Computer-control safety state.
     Safety,
     /// Scratch: captures, `run_command` output, temporary scripts. Swept by age.
-    #[allow(dead_code)] // wired by Task 4; delete this attribute there
     Tmp,
 }
 
@@ -265,6 +264,20 @@ mod tests {
         assert!(logs.is_dir());
         assert_eq!(SubDir::Tmp.as_str(), "tmp");
         std::fs::remove_dir_all(&tmp).ok();
+    }
+
+    /// Scratch files land under the state root's `tmp/`, never in the OS temp directory.
+    /// This pins the location the scratch call sites (captures, annotations, `run_command`
+    /// stream logs, the temporary `.bat`, the blob spool) resolve through, and fails loudly
+    /// if `SubDir::Tmp` is ever renamed out from under them.
+    #[test]
+    fn tmp_is_inside_the_state_root() {
+        let base = tempfile::TempDir::new().expect("scratch dir");
+        let root = base.path().join("state");
+        let tmp = resolve_sub(Some(root.clone()), SubDir::Tmp).expect("tmp dir");
+        assert_eq!(tmp, root.join("tmp"));
+        assert!(tmp.starts_with(&root));
+        assert!(tmp.is_dir(), "tmp must be created on demand");
     }
 
     /// An unresolvable home is an error, never a silent fallback to the current directory:

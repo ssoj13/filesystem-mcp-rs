@@ -745,7 +745,9 @@ struct TempScript {
 #[cfg(windows)]
 impl TempScript {
     /// Write `line` (the joined command, possibly multi-line) to a fresh
-    /// `fsmcp-cmd-<uuid>.bat` in the system temp dir.
+    /// `fsmcp-cmd-<uuid>.bat` in the server's own scratch directory under the
+    /// state root (`~/.filesystem-mcp-rs/tmp/`), never the OS temp dir. A state
+    /// root that cannot be resolved is propagated like any other failure here.
     ///
     /// Lines are normalized to CRLF (any existing `\r` is stripped first so a
     /// CRLF input does not become `\r\r\n`) with a trailing newline, and
@@ -759,7 +761,15 @@ impl TempScript {
     /// the console's default code page — otherwise a non-ASCII command (e.g. a
     /// Cyrillic path) would be read in the active code page and mojibake'd.
     async fn create(line: &str) -> Result<Self> {
-        let path = std::env::temp_dir().join(format!("fsmcp-cmd-{}.bat", uuid::Uuid::new_v4()));
+        let dir = crate::core::paths::sub_dir(crate::core::paths::SubDir::Tmp)
+            .context("Failed to resolve the state directory for the temp cmd script")?;
+        Self::create_in(&dir, line).await
+    }
+
+    /// Same, into an explicit directory. Split out of [`TempScript::create`] so the unit test
+    /// can write into a `TempDir` instead of the real state root.
+    async fn create_in(dir: &std::path::Path, line: &str) -> Result<Self> {
+        let path = dir.join(format!("fsmcp-cmd-{}.bat", uuid::Uuid::new_v4()));
         let mut body = String::with_capacity(line.len() + "@echo off\r\nchcp 65001 >nul\r\n".len());
         body.push_str("@echo off\r\n");
         body.push_str("chcp 65001 >nul\r\n");
@@ -778,8 +788,9 @@ impl TempScript {
 impl Drop for TempScript {
     /// Best-effort removal of the temp script. The owner is dropped only after
     /// the child has exited, so cmd is no longer reading the file. An error is
-    /// logged (not silently swallowed); a leftover `fsmcp-cmd-*.bat` in TEMP is
-    /// harmless and only possible if the whole server is hard-killed.
+    /// logged (not silently swallowed); a leftover `fsmcp-cmd-*.bat` in the
+    /// state root's `tmp/` is harmless and only possible if the whole server is
+    /// hard-killed.
     fn drop(&mut self) {
         if let Err(e) = std::fs::remove_file(&self.path) {
             tracing::warn!(
@@ -1830,7 +1841,8 @@ mod tests {
     #[cfg(windows)]
     #[tokio::test]
     async fn test_tempscript_create_and_drop() {
-        let script = TempScript::create("a\nb\r\nc").await.unwrap();
+        let dir = tempfile::TempDir::new().unwrap();
+        let script = TempScript::create_in(dir.path(), "a\nb\r\nc").await.unwrap();
         let path = script.path.clone();
         let body = tokio::fs::read_to_string(&path).await.unwrap();
         assert_eq!(body, "@echo off\r\nchcp 65001 >nul\r\na\r\nb\r\nc\r\n");

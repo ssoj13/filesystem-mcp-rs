@@ -95,10 +95,13 @@ pub fn draw(
     Ok(outside)
 }
 
-/// Default output path next to the other capture artifacts.
-pub fn out_path() -> std::path::PathBuf {
-    let dir = std::env::temp_dir().join("computer-mcp-rs");
-    dir.join(format!("annot-{}-{}.png", super::capture::now_ms(), std::process::id()))
+/// Default output path next to the other capture artifacts, i.e. the state root's `tmp/`.
+///
+/// Fallible because resolving (and creating) the state root is: an unresolvable home is an
+/// error the caller reports, never a silent fall back to the OS temp directory.
+pub fn out_path() -> anyhow::Result<std::path::PathBuf> {
+    let dir = crate::core::paths::sub_dir(crate::core::paths::SubDir::Tmp)?;
+    Ok(dir.join(format!("annot-{}-{}.png", super::capture::now_ms(), std::process::id())))
 }
 
 /// Color name or `#rrggbb` -> RGB. Unknown input is an error: a silently
