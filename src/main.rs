@@ -153,7 +153,9 @@ struct ServerArgs {
     #[arg(short = 'b', long, default_value = "127.0.0.1")]
     bind: String,
 
-    /// Enable file logging. Optionally specify log file name (default: filesystem-mcp-rs.log)
+    /// Log to this file instead of the per-process default. Logging is always on: without this
+    /// flag each run writes to ~/.filesystem-mcp-rs/logs/<date>/, one file per process. Set
+    /// FS_MCP_LOG=off to turn logging off entirely.
     #[arg(short = 'l', long, value_name = "FILE", num_args = 0..=1, default_missing_value = "filesystem-mcp-rs.log")]
     log: Option<String>,
 
@@ -7604,17 +7606,17 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
         TransportMode::Stdio
     };
 
-    // Initialize logging based on mode
-    // CRITICAL: stdio mode MUST NOT log to stderr by default!
-    // Any stderr output during handshake causes "connection closed" in MCP clients
-    init_logging(mode, args.log)?;
+    // Initialize logging based on mode. Always on: one file per process under the state root.
+    // CRITICAL: stdio mode MUST NOT log to stderr, ever - any stderr output during the handshake
+    // causes "connection closed" in MCP clients. Never fails: a plan that could not be carried
+    // out comes back describing what it degraded to, because logging must not stop the server.
+    let log_plan = init_logging(mode, args.log);
+    info!("logging to {log_plan}");
 
     // The process-global arm gate, built only now: resolving its audit path can fail, and that
     // warning has to reach a subscriber. Built before `init_logging` it could not reach one at
-    // all. It now does under --stream and under stdio --log; plain stdio installs no subscriber
-    // (see core/logging.rs), so there the warning is still lost - and plain stdio is how an MCP
-    // client normally starts this server. Wave 2's per-process file logging closes that gap;
-    // a bespoke second channel here would defeat the unification this wave is for.
+    // all; it now does in every mode, plain stdio included, which is how an MCP client normally
+    // starts this server.
     #[cfg(any(feature = "ctl-input", feature = "ctl-uia"))]
     crate::tools::computer::safety::init_gate(
         crate::tools::computer::safety::resolve_ops_per_min(args.ctl_ops_per_min),

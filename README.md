@@ -82,6 +82,7 @@ keys below are listed first because the locations named further down resolve rel
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `FS_MCP_STATE_DIR` | *(unset)* | State directory for every file this server owns; must be absolute. Unset = `~/.filesystem-mcp-rs` |
+| `FS_MCP_LOG` | `info` | Log level: `trace`/`debug`/`info`/`warn`/`error`, or `off` to log nothing. Each run writes one file under `~/.filesystem-mcp-rs/logs/<date>/` |
 | `FS_MCP_TMP_KEEP_HOURS` | `24` | Delete scratch under `<state>/tmp` older than this many hours. `0` = never sweep |
 
 ### Core

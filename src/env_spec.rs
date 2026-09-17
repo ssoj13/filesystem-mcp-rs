@@ -45,6 +45,11 @@ fn paths_vars() -> Vec<EnvVar> {
             help: "State directory for every file this server owns; must be absolute. Blank = ~/.filesystem-mcp-rs.",
         },
         EnvVar {
+            key: "FS_MCP_LOG",
+            default: "info",
+            help: "Log level: trace | debug | info | warn | error, or `off` to log nothing at all.",
+        },
+        EnvVar {
             key: "FS_MCP_TMP_KEEP_HOURS",
             default: "24",
             help: "Delete scratch under <state>/tmp older than this many hours. 0 = never sweep.",
