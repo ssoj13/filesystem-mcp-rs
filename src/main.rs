@@ -7675,6 +7675,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     }
 
+    // Scratch retention, last before the transport: housekeeping is never a precondition for
+    // serving, so a failure here is reported and the server starts anyway. Placed after the
+    // server is built so that nothing about it can delay the handshake on the error path.
+    match core::housekeeping::sweep_tmp(std::time::SystemTime::now()) {
+        Ok(n) if n > 0 => info!("Housekeeping: removed {n} stale scratch entries"),
+        Ok(_) => {}
+        Err(e) => warn!("Housekeeping skipped: {e}"),
+    }
+
     // Run in selected mode
     match mode {
         TransportMode::Stdio => run_stdio_mode(server).await,

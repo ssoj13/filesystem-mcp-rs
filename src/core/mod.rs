@@ -4,6 +4,7 @@ pub mod content_plane;
 pub mod dollar_guard;
 pub mod format;
 pub mod glob;
+pub mod housekeeping;
 pub mod logging;
 pub mod path;
 pub mod paths;

@@ -69,7 +69,6 @@ pub fn sub_dir(kind: SubDir) -> io::Result<PathBuf> {
 /// retention policy; the sweep is only the thing that acts on it. An unparseable value is
 /// reported and the default applied: refusing to start over a malformed cleanup interval would
 /// be a worse outcome than keeping scratch files for the standard day.
-#[allow(dead_code)] // wired when the tmp sweep lands (task 7); delete this attribute there
 pub fn tmp_keep_hours() -> u64 {
     match env_spec::get("FS_MCP_TMP_KEEP_HOURS") {
         None => TMP_KEEP_HOURS_DEFAULT,
