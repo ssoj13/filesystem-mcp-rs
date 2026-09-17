@@ -2259,9 +2259,13 @@ struct RunCommandArgs {
     /// dir (`~/.filesystem-mcp-rs/tmp/`), swept by the usual retention.
     #[serde(alias = "stream_dir")]
     stream_dir: Option<String>,
-    /// DEPRECATED: use mode="detached" instead. Kept for backward compat.
-    #[serde(default)]
-    background: FlexBool,
+    // Removed parameter, kept out of the schema (`schemars(skip)`) and captured
+    // only so the old spelling can be refused by name. Dropping the field
+    // outright would make `background: true` deserialize away silently and run
+    // a job the caller wanted detached synchronously instead.
+    #[serde(default, skip_serializing)]
+    #[schemars(skip)]
+    background: Option<serde_json::Value>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
@@ -6078,15 +6082,20 @@ USE CASES: Patch executables, fix binary data, search-replace in non-text files.
             None
         };
 
-        // Determine effective mode (backward compat: background=true -> detached)
-        let mode = if *args.background {
-            process::RunMode::Detached
-        } else {
-            match args.mode {
-                RunModeArg::Sync => process::RunMode::Sync,
-                RunModeArg::Managed => process::RunMode::Managed,
-                RunModeArg::Detached => process::RunMode::Detached,
-            }
+        // `background` is gone from the schema; refuse it by name rather than
+        // ignore it, so a caller asking for a detached run never gets a silent
+        // synchronous one.
+        if args.background.is_some() {
+            return Err(McpError::invalid_params(
+                "run_command: the `background` parameter was removed; pass mode:\"detached\" instead",
+                None,
+            ));
+        }
+
+        let mode = match args.mode {
+            RunModeArg::Sync => process::RunMode::Sync,
+            RunModeArg::Managed => process::RunMode::Managed,
+            RunModeArg::Detached => process::RunMode::Detached,
         };
 
         // Prepare output log files

@@ -68,8 +68,10 @@ mod tests {
         shell: ShellArg,
         #[serde(default = "default_flex_true", alias = "fail_fast")]
         fail_fast: FlexBool,
+        // Removed from the tool schema; still deserialized so the handler can
+        // refuse the old spelling by name instead of ignoring it.
         #[serde(default)]
-        background: FlexBool,
+        background: Option<serde_json::Value>,
         // These two were previously missing from the fixture, so the tests never
         // exercised the two fields with the most fragile wire contract:
         // outputFilter (object OR stringified-JSON) and mode (closed enum).
@@ -151,16 +153,31 @@ mod tests {
     }
 
     #[test]
-    fn flex_bool_on_shell_and_background() {
+    fn flex_bool_on_shell() {
         let args: RunCommandArgsFixture = serde_json::from_value(json!({
             "command": "cmd",
             "args": [],
-            "shell": "1",
-            "background": "false"
+            "shell": "1"
         }))
         .unwrap();
         assert_eq!(*args.shell, ShellKind::Default);
-        assert!(!*args.background);
+        assert!(args.background.is_none());
+    }
+
+    /// The removed `background` parameter must still reach the handler as a
+    /// value, which is what lets it be refused by name (pointing at
+    /// `mode:"detached"`) rather than silently ignored.
+    #[test]
+    fn removed_background_is_captured_not_dropped() {
+        for wire in [json!(true), json!("true"), json!(false)] {
+            let args: RunCommandArgsFixture = serde_json::from_value(json!({
+                "command": "cmd",
+                "args": [],
+                "background": wire
+            }))
+            .unwrap();
+            assert!(args.background.is_some());
+        }
     }
 
     #[test]
