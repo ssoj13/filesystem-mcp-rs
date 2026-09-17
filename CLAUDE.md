@@ -27,8 +27,10 @@ Build: `cargo build` / test: `cargo test` / lint: `cargo clippy`.
   the build on `dirs::*` / `temp_dir(` / `env::home_dir` outside its ALLOWED list, and on any `///`
   line naming an abandoned location (`<local data>`, `computer-mcp-rs`, `%LOCALAPPDATA%`, ...).
   It scans only `src/` and `tests/` - a `build.rs` or a dependency would be invisible to it.
-- `memory2.db` migrates from the old data dir on first start; if it exists in BOTH places nothing
-  moves and the memory tools stay OFF until a human deletes one. Not a bug - do not "fix" it.
+- `memory2.db` migrates from the old data dir on first start; if it exists in BOTH places, or the
+  move fails, nothing moves and the memory tools stay OFF. Refusing to CHOOSE between two databases
+  is deliberate - do not "fix" that. `Migrated::Ambiguous` carries a `Cause` so the two cases get
+  different advice; a failed move is usually an older instance still holding the file open.
 
 ## Verified facts (do not re-derive)
 - rmcp 3.1.3 (Cargo.toml:26 - these notes said 3.1.4 until 2026-09-17): with_structured is fs's own WithStructured trait (main.rs); ToolRouter::merge exists;

@@ -106,14 +106,13 @@ mod tests {
         // reader cannot act on unless the directory is named.
         ("src/tools/computer/driver/portable.rs", &["computer-mcp-rs"]),
         // These name OTHER applications' config locations (Claude, Cursor, ...), not this
-        // server's state - the whole point of those two functions.
+        // server's state - the whole point of those two functions. Known, bounded cost: an
+        // exemption clears the whole line, so a doc about OUR state written in this file and
+        // spelling one of those two would also pass. Nothing in it describes our state today.
         (
             "src/mcp_setup/clients/mod.rs",
             &["%LOCALAPPDATA%", "Application Support"],
         ),
-        // The rationale for `env_spec`'s positive rule cites both spellings as examples of what a
-        // denylist would miss; it cannot make that argument without naming them.
-        ("src/env_spec.rs", &["%LOCALAPPDATA%", "Application Support"]),
     ];
 
     /// Every `.rs` file under `src/` and `tests/` must get its state locations from `core::paths`,

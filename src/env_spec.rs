@@ -187,8 +187,8 @@ mod tests {
     ///
     /// Deliberately a positive test for location-shaped text rather than a denylist of the
     /// spellings that happened to be wrong once: a denylist only catches what someone already
-    /// thought of, so a future `%LOCALAPPDATA%` or `~/Library/Application Support/...` would
-    /// sail straight through one. Over-matching is the safe direction here - a false positive
+    /// thought of, so the next per-OS directory nobody has written down yet would sail straight
+    /// through one. Over-matching is the safe direction here - a false positive
     /// costs an author one reworded sentence, a false negative ships an operator to the wrong
     /// directory.
     fn names_a_location(help: &str) -> bool {
