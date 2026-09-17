@@ -7725,6 +7725,9 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
     // failure is reported and the server starts anyway. Separate from the scratch sweep because
     // the two hold independent leases - one must not silence the other for an hour.
     match core::housekeeping::sweep_logs(std::time::SystemTime::now()) {
+        // `n > 0` is knowingly untested and `cargo mutants` reports it: reaching it means running
+        // `main` against a real state root, and all it decides is whether one info line is
+        // emitted. What the count means is pinned on `sweep_logs_in`.
         Ok(core::housekeeping::Sweep::Ran(n)) if n > 0 => {
             info!("Housekeeping: reclaimed {n} expired log entries")
         }

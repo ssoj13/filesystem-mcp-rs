@@ -138,6 +138,10 @@ pub fn sweep_logs(now: SystemTime) -> io::Result<Sweep> {
     // Deliberately the same condition [`sweep_logs_in`] checks: asked here so that a server with
     // retention switched off pays neither the state-root resolution nor the process enumeration
     // below, and asked there so the core is honest on its own. Do not "simplify" either away.
+    //
+    // This copy is knowingly untested, and `cargo mutants` reports it as such: reaching it means
+    // a real state root and a real process table, and the behaviour it guards is pinned on the
+    // core by `both_knobs_at_zero_disable_the_log_sweep`. An honest note beats a contrived seam.
     if keep_days == 0 && max_bytes == 0 {
         return Ok(Sweep::Disabled);
     }
@@ -146,6 +150,10 @@ pub fn sweep_logs(now: SystemTime) -> io::Result<Sweep> {
     // Taken once for the whole sweep rather than per file: one process snapshot is the cost, and
     // a set that changed halfway through could judge one directory dead by a rule the next
     // directory is spared by.
+    //
+    // Also knowingly untested for the same reason - this call IS the real process table. What it
+    // decides with the answer is pinned by `trust_listing`'s tests and by the `live: None` case
+    // of `a_refused_process_listing_still_stamps_the_lease`.
     sweep_logs_in(&root, &dir, keep_days, max_bytes, now, live_pids().as_ref())
 }
 
@@ -222,7 +230,8 @@ pub(crate) fn sweep_logs_in(
 /// short list makes a live server's log look abandoned, and [`sweep_log_dirs`] would hand the
 /// directory it is writing in to `remove_dir_all`. Own pid is the one entry this process can
 /// check for, so it is the test for the whole listing rather than something to paper over by
-/// inserting it.
+/// inserting it. That judgement is [`trust_listing`], which is pure and tested; this function is
+/// only the wiring that fetches the listing for it.
 fn live_pids() -> Option<HashSet<u32>> {
     let found = match crate::tools::process::search_processes(None, None) {
         Ok(found) => found,
@@ -231,8 +240,24 @@ fn live_pids() -> Option<HashSet<u32>> {
             return None;
         }
     };
-    let pids: HashSet<u32> = found.into_iter().map(|p| p.pid).collect();
-    if !pids.contains(&crate::core::instance::pid()) {
+    trust_listing(
+        found.into_iter().map(|p| p.pid).collect(),
+        crate::core::instance::pid(),
+    )
+}
+
+/// `pids` if it can be trusted to say which logs are abandoned, `None` if it cannot.
+///
+/// The rule, and the whole of it: **a listing that does not contain `own` - the process doing the
+/// listing - is not a listing.** Split out from [`live_pids`] because it is the judgement, while
+/// that function is only the fetch: as a pure function it can be tested in both directions, and
+/// `cargo mutants` reported the fused version as a place where the trust rule could be deleted
+/// outright with the suite still green.
+///
+/// The set is returned untouched on success. Nothing is inserted into it, deliberately: inserting
+/// `own` is precisely what would hide the signal this rule reads.
+fn trust_listing(pids: HashSet<u32>, own: u32) -> Option<HashSet<u32>> {
+    if !pids.contains(&own) {
         warn!(
             "Housekeeping: the process listing does not include this process; it cannot be \
              trusted to say which logs are abandoned, so the logs are left alone"
@@ -1195,6 +1220,124 @@ mod tests {
             sweep_logs_in(root, &logs, 0, 4096, now, Some(&HashSet::new())).expect("sweep"),
             Sweep::Ran(0)
         );
+    }
+
+    /// A listing holding this process is trusted, and handed back exactly as it came.
+    #[test]
+    fn a_listing_containing_us_is_trusted_intact() {
+        let pids = HashSet::from([1, 4242, 7777]);
+        assert_eq!(
+            trust_listing(pids.clone(), 4242),
+            Some(pids),
+            "the set must come back untouched - nothing is inserted into it"
+        );
+    }
+
+    /// A listing that cannot see the process doing the listing is refused outright.
+    ///
+    /// This is `hidepid=2`, a restricted container, a foreign pid namespace: the call succeeds
+    /// and returns a short list, and trusting it would make a live server's log look abandoned.
+    #[test]
+    fn a_listing_without_us_is_refused() {
+        assert_eq!(trust_listing(HashSet::from([1, 7777]), 4242), None);
+        assert_eq!(
+            trust_listing(HashSet::new(), 1),
+            None,
+            "an empty listing is not a listing either"
+        );
+    }
+
+    /// With the budget off, the date rule runs alone - and the count it returns is the count of
+    /// directories it actually removed.
+    ///
+    /// The fixture deliberately leaves a stale, dead-pid file in TODAY's directory: with the
+    /// budget off nothing may weigh it, so a guard that let the budget run with a zero limit
+    /// would take it and the count would be wrong.
+    #[test]
+    fn the_date_rule_runs_alone_when_the_budget_is_off() {
+        let scratch = tempfile::TempDir::new().expect("scratch dir");
+        let root = scratch.path();
+        let logs = root.join("logs");
+        let now = SystemTime::now();
+        // Named from `now`, never from the real calendar, so this test cannot rot.
+        let today = crate::core::logging::utc_day(now);
+        let long_ago = crate::core::logging::utc_day(now - 30 * DAY);
+
+        let expired = write_log(
+            &logs,
+            &long_ago,
+            "fsmcp-1-aaaaaaaa.log",
+            4096,
+            now - 2 * DAY,
+        );
+        let current = write_log(&logs, &today, "fsmcp-2-bbbbbbbb.log", 4096, now - 2 * DAY);
+
+        assert_eq!(
+            sweep_logs_in(root, &logs, 14, 0, now, Some(&HashSet::new())).expect("sweep"),
+            Sweep::Ran(1),
+            "one directory removed, and the count must say one"
+        );
+        assert!(!expired.exists(), "the expired directory goes");
+        assert!(
+            current.is_file(),
+            "with the budget off nothing is weighed, however stale and however dead its pid"
+        );
+    }
+
+    /// With the date rule off, the budget runs alone - oldest first, stopping the moment the
+    /// tree fits, and reporting exactly what it removed.
+    ///
+    /// The fixture deliberately leaves an expired directory: with `keep_days = 0` the date rule
+    /// may not touch it, so a guard that let it run with a zero limit would take it too.
+    #[test]
+    fn the_budget_runs_alone_when_the_date_rule_is_off() {
+        let scratch = tempfile::TempDir::new().expect("scratch dir");
+        let root = scratch.path();
+        let logs = root.join("logs");
+        let now = SystemTime::now();
+        let today = crate::core::logging::utc_day(now);
+        let long_ago = crate::core::logging::utc_day(now - 30 * DAY);
+
+        let expired = write_log(
+            &logs,
+            &long_ago,
+            "fsmcp-1-aaaaaaaa.log",
+            4096,
+            now - 2 * DAY,
+        );
+        let older = write_log(&logs, &today, "fsmcp-2-bbbbbbbb.log", 4096, now - 3 * DAY);
+        let newer = write_log(&logs, &today, "fsmcp-3-cccccccc.log", 4096, now - 2 * DAY);
+
+        // Three files, 12 KiB, against an 8 KiB budget: the oldest goes and the tree then fits.
+        assert_eq!(
+            sweep_logs_in(root, &logs, 0, 8192, now, Some(&HashSet::new())).expect("sweep"),
+            Sweep::Ran(1),
+            "one file removed, and the count must say one"
+        );
+        assert!(!older.exists(), "the oldest file goes first");
+        assert!(newer.is_file(), "the budget stops as soon as the tree fits");
+        assert!(
+            expired.is_file(),
+            "with the date rule off an expired directory is untouchable, whatever its age"
+        );
+    }
+
+    /// Write `<logs>/<day>/<name>` of `size` bytes, stamped at `when`, creating the directory.
+    /// Returns the file's path - the directory is its parent, which is what the date-rule
+    /// assertions look at.
+    fn write_log(
+        logs: &Path,
+        day: &str,
+        name: &str,
+        size: usize,
+        when: SystemTime,
+    ) -> std::path::PathBuf {
+        let dir = logs.join(day);
+        std::fs::create_dir_all(&dir).expect("mkdir");
+        let path = dir.join(name);
+        std::fs::write(&path, vec![b'x'; size]).expect("write");
+        set_mtime(&path, when);
+        path
     }
 
     /// The recorded mtime of a file just written, which is what the sweep will compare against.
