@@ -7721,6 +7721,17 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
         Err(e) => warn!("Housekeeping skipped: {e}"),
     }
 
+    // Log retention, under the same lease with a different kind, and under the same rule: a
+    // failure is reported and the server starts anyway. Separate from the scratch sweep because
+    // the two hold independent leases - one must not silence the other for an hour.
+    match core::housekeeping::sweep_logs(std::time::SystemTime::now()) {
+        Ok(core::housekeeping::Sweep::Ran(n)) if n > 0 => {
+            info!("Housekeeping: reclaimed {n} expired log entries")
+        }
+        Ok(_) => {}
+        Err(e) => warn!("Log retention skipped: {e}"),
+    }
+
     // Run in selected mode
     match mode {
         TransportMode::Stdio => run_stdio_mode(server).await,

@@ -240,8 +240,7 @@ pub const KEEP_DAYS_DEFAULT: u64 = 14;
 /// Clamped for the same reason as [`crate::core::paths::TMP_KEEP_HOURS_MAX`]: the sweep turns
 /// this into a `Duration`, and an absurd value from the environment must not overflow that —
 /// in debug an overflow panics, and a panic in housekeeping would keep the transport from ever
-/// starting. [`MAX_MB_DEFAULT`] needs no such bound: it is only ever compared against a sum of
-/// file sizes, where an absurd budget simply means "never sweep".
+/// starting. See [`MAX_MB_MAX`] for the same hazard on the size budget.
 pub const KEEP_DAYS_MAX: u64 = 365 * 10;
 
 /// Total size budget for `<state>/logs`, in MiB, beyond which the sweep deletes oldest first.
@@ -249,6 +248,20 @@ pub const KEEP_DAYS_MAX: u64 = 365 * 10;
 /// A second bound because age alone does not cap a directory: one chatty process at `trace` can
 /// fill a disk well inside [`KEEP_DAYS_DEFAULT`]. **Zero switches the budget off**, as above.
 pub const MAX_MB_DEFAULT: u64 = 512;
+
+/// The largest size budget accepted, one TiB.
+///
+/// The budget is in MiB and the directory it is compared against is measured in bytes, so the
+/// sweep must multiply by 1 MiB before comparing — and `FS_MCP_LOG_MAX_MB=18446744073709551615`
+/// parses perfectly well, so without this bound that multiplication overflows: a debug panic
+/// inside housekeeping, before the transport starts, which is exactly what [`KEEP_DAYS_MAX`]
+/// exists to prevent for ages.
+///
+/// **The call site must still use `saturating_mul`.** The clamp and the arithmetic live in
+/// different modules, so the safety of the multiplication must not depend on a constant over
+/// here staying small; wave 1 clamps in [`crate::core::paths::tmp_keep_hours`] *and* saturates
+/// in [`crate::core::housekeeping`] for that reason, and the log sweep follows it.
+pub const MAX_MB_MAX: u64 = 1024 * 1024;
 
 /// The configured `FS_MCP_LOG` value, or `None` when it is unset or blank.
 ///
@@ -263,42 +276,43 @@ pub fn level() -> Option<String> {
 /// How many days of dated log directories to keep; `0` means never sweep by age.
 ///
 /// Lives beside the module that owns the logs, the way [`crate::core::paths::tmp_keep_hours`]
-/// lives beside the directory it governs, and is read by the housekeeping sweep.
-///
-/// The sweep that consumes it is wave 2's next task; until it lands, the key is registered and
-/// documented but nothing in the binary calls this, hence the marker. Remove it with the sweep.
-#[allow(dead_code)]
+/// lives beside the directory it governs, and is read by
+/// [`crate::core::housekeeping::sweep_logs`].
 pub fn keep_days() -> u64 {
-    let days = whole_number("FS_MCP_LOG_KEEP_DAYS", KEEP_DAYS_DEFAULT);
-    if days > KEEP_DAYS_MAX {
-        tracing::warn!(
-            "FS_MCP_LOG_KEEP_DAYS={days} exceeds the {KEEP_DAYS_MAX}-day maximum; using that instead"
-        );
-        return KEEP_DAYS_MAX;
-    }
-    days
+    retention("FS_MCP_LOG_KEEP_DAYS", KEEP_DAYS_DEFAULT, KEEP_DAYS_MAX)
 }
 
-/// The total MiB budget for `<state>/logs`; `0` means no budget. See [`MAX_MB_DEFAULT`].
+/// The total MiB budget for `<state>/logs`; `0` means no budget. See [`MAX_MB_DEFAULT`], and
+/// [`MAX_MB_MAX`] for why the sweep must still saturate when it converts this to bytes.
 ///
-/// Unused until the sweep lands, like [`keep_days`].
-#[allow(dead_code)]
+/// Read by [`crate::core::housekeeping::sweep_logs`], like [`keep_days`].
 pub fn max_mb() -> u64 {
-    whole_number("FS_MCP_LOG_MAX_MB", MAX_MB_DEFAULT)
+    retention("FS_MCP_LOG_MAX_MB", MAX_MB_DEFAULT, MAX_MB_MAX)
 }
 
-/// Read a numeric `FS_MCP_*` key, complaining about a malformed value and carrying on.
+/// Read a retention knob: a whole number, `0` meaning "switch this half of the sweep off",
+/// bounded by `max`.
 ///
-/// Refusing to start over a mistyped retention interval would be a worse outcome than applying
-/// the standard one — and the complaint reaches the log file, which by this point exists.
-fn whole_number(key: &str, default: u64) -> u64 {
-    match env_spec::get(key) {
-        None => default,
+/// One function for both knobs so the two cannot drift in how they treat a typo or an absurd
+/// value, and so the whole path is testable against an injected key rather than by mutating a
+/// production variable the rest of the suite reads.
+///
+/// Neither failure stops the server: refusing to start over a mistyped retention interval would
+/// be a worse outcome than applying the standard one, and the complaint reaches the log file,
+/// which by this point exists.
+fn retention(key: &str, default: u64, max: u64) -> u64 {
+    let value = match env_spec::get(key) {
+        None => return default,
         Some(raw) => raw.parse().unwrap_or_else(|_| {
             tracing::warn!("{key} is not a whole number ({raw}); using {default}");
             default
         }),
+    };
+    if value > max {
+        tracing::warn!("{key}={value} exceeds the maximum of {max}; using that instead");
+        return max;
     }
+    value
 }
 
 /// What is wrong with an `FS_MCP_LOG` value, if anything, phrased for the operator who set it.
@@ -378,14 +392,25 @@ fn log_path_in(root: &Path, day: &str) -> std::io::Result<PathBuf> {
     )))
 }
 
-/// Today in UTC as `YYYY-MM-DD`.
+/// Today in UTC as `YYYY-MM-DD`: the directory this process's log file belongs in.
+fn today() -> String {
+    utc_day(std::time::SystemTime::now())
+}
+
+/// `when` in UTC as `YYYY-MM-DD`, the name of the directory a log written then belongs in.
 ///
 /// UTC, matching wave 1's rule that stored time is UTC: a directory named in local time would
 /// jump around under a machine that travels or changes offset twice a year. Formatted by hand
 /// rather than through `time`'s format descriptions, which would need a feature this crate does
 /// not enable for three integers.
-fn today() -> String {
-    let d = time::OffsetDateTime::now_utc().date();
+///
+/// One formatter for both the writer here and [`crate::core::housekeeping`]'s retention, which
+/// parses these names back to age them: a second spelling of the format would be a silent way
+/// for the sweep to stop recognising the directories this module creates. It takes the instant
+/// rather than reading the clock so that the sweep, which is driven by an injected `now`, is
+/// answered entirely in terms of that time.
+pub(crate) fn utc_day(when: std::time::SystemTime) -> String {
+    let d = time::OffsetDateTime::from(when).date();
     format!("{:04}-{:02}-{:02}", d.year(), u8::from(d.month()), d.day())
 }
 
@@ -570,40 +595,70 @@ mod tests {
         assert!(filter(Some("warn")).to_string().contains("warn"));
     }
 
-    /// A retention knob reads as a whole number, keeps `0` — which means "never sweep", not
-    /// "delete everything now" — and survives a typo by applying the default instead of
-    /// refusing to start.
+    /// A retention knob parses, keeps `0` — which means "switch this half of the sweep off",
+    /// not "delete everything now" — clamps an absurd value, and survives a typo by applying
+    /// the default instead of refusing to start.
     ///
-    /// Exercised through a probe key rather than the real ones so it cannot collide with a
-    /// value the developer running the suite happens to have exported.
+    /// Driven through a probe key, never a real `FS_MCP_LOG_*` one. `set_var` is unsafe in
+    /// edition 2024 because a concurrent `std::env::var` is undefined behaviour, and cargo runs
+    /// these tests on parallel threads while other tests call [`env_spec::get`] — so mutating a
+    /// production key here would be UB by the language's own definition, and would clobber a
+    /// value the developer running the suite had exported. Both public readers are one-line
+    /// applications of this function, so what is proven here is what they do.
     #[test]
-    fn a_retention_knob_parses_or_falls_back() {
-        let key = "FS_MCP_LOGGING_NUMBER_PROBE";
-        assert_eq!(whole_number(key, 7), 7, "unset means the default");
-        // SAFETY: single-threaded test over a variable private to it.
-        for (raw, want) in [("3", 3), ("0", 0), ("  5  ", 5), ("", 7), ("soon", 7), ("-1", 7)] {
+    fn a_retention_knob_parses_clamps_or_falls_back() {
+        let key = "FS_MCP_LOGGING_RETENTION_PROBE";
+        assert_eq!(retention(key, 7, 100), 7, "unset means the default");
+        for (raw, want) in [
+            ("3", 3),
+            ("0", 0),
+            ("  5  ", 5),
+            ("100", 100),
+            ("101", 100),
+            (&u64::MAX.to_string(), 100),
+            ("", 7),
+            ("soon", 7),
+            ("-1", 7),
+        ] {
+            // SAFETY: a variable private to this test, which nothing else reads.
             unsafe { std::env::set_var(key, raw) };
-            assert_eq!(whole_number(key, 7), want, "{raw:?}");
+            assert_eq!(retention(key, 7, 100), want, "{raw:?}");
         }
         unsafe { std::env::remove_var(key) };
     }
 
-    /// An absurd age is clamped rather than handed to a `Duration` conversion that would
-    /// overflow, and `0` switches the sweep off rather than arming it on every start.
+    /// Each public reader applies its own default and its own bound — the pairing a copy-paste
+    /// between the two would break, and which the probe test above cannot see.
     #[test]
-    fn keep_days_is_bounded_and_max_mb_defaults() {
-        let key = "FS_MCP_LOG_KEEP_DAYS";
-        // SAFETY: single-threaded test; no other test reads these keys.
-        unsafe { std::env::remove_var(key) };
+    fn each_reader_carries_its_own_default_and_bound() {
+        // Reads, never writes: a set_var on a production key would be UB here (see above).
+        // These two therefore assume the key is unset in this process - exporting
+        // FS_MCP_LOG_KEEP_DAYS or FS_MCP_LOG_MAX_MB before `cargo test` is expected to fail them.
         assert_eq!(keep_days(), KEEP_DAYS_DEFAULT);
-        unsafe { std::env::set_var(key, (KEEP_DAYS_MAX + 1).to_string()) };
-        assert_eq!(keep_days(), KEEP_DAYS_MAX);
-        unsafe { std::env::set_var(key, "0") };
-        assert_eq!(keep_days(), 0, "0 must switch the sweep off, not empty the directory");
-        unsafe { std::env::remove_var(key) };
-
-        unsafe { std::env::remove_var("FS_MCP_LOG_MAX_MB") };
         assert_eq!(max_mb(), MAX_MB_DEFAULT);
+        assert_ne!(
+            KEEP_DAYS_MAX, MAX_MB_MAX,
+            "the two bounds must stay distinguishable for the assertion above to mean anything"
+        );
+        // A budget in MiB is compared against a byte count, so the sweep multiplies: the bound
+        // must leave that conversion far from overflowing even before it saturates.
+        assert!(MAX_MB_MAX.checked_mul(1024 * 1024).is_some());
+        assert!(KEEP_DAYS_MAX.checked_mul(24 * 3600).is_some());
+    }
+
+    /// The level [`crate::env_spec`] advertises must be one this module would actually apply.
+    ///
+    /// The registry holds `LEVEL_DEFAULT` itself, so the equality assertion over there compares
+    /// an expression with itself and can only catch a *later* divergence. This is the property
+    /// that assertion cannot reach: an advertised default that [`level_complaint`] rejects, or
+    /// that [`filter`] quietly drops, would be printed in `--list-env` and then ignored.
+    #[test]
+    fn the_advertised_default_level_is_one_the_filter_applies() {
+        assert_eq!(level_complaint(LEVEL_DEFAULT), None);
+        assert!(
+            filter(Some(LEVEL_DEFAULT)).to_string().contains(LEVEL_DEFAULT),
+            "the advertised default must survive into the filter"
+        );
     }
 
     /// The dated directory is the one the rest of the design keys on, so its shape is pinned:

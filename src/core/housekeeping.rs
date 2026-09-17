@@ -18,11 +18,12 @@
 //! directory by the newest mtime anywhere in its tree instead, and that rule lives here rather
 //! than in any one writer because every future scratch subdirectory has the same shape.
 
+use std::collections::HashSet;
 use std::io;
 use std::path::Path;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use tracing::warn;
+use tracing::{info, warn};
 
 use crate::core::paths::{self, SubDir};
 
@@ -40,6 +41,15 @@ const SWEEP_INTERVAL: Duration = Duration::from_secs(3600);
 /// started - the one outcome housekeeping must never cause. Hitting it is an error, so the entry
 /// is kept rather than deleted on an incomplete reading of its age.
 const MAX_DEPTH: u32 = 64;
+
+/// How recently a log file must have been written to count as possibly still in use.
+///
+/// The pid set answers "is that process running", but a file whose pid has already exited and
+/// whose pid has since been *reused* by something unrelated is not in it, and neither is a file
+/// written by a process that died a minute ago and is about to be replaced. An hour of quiet is
+/// a cheap second opinion, and it is what makes [`sweep_by_budget`] a soft limit rather than a
+/// rule that can reach into a log being appended to right now.
+const LIVE_WINDOW: Duration = Duration::from_secs(3600);
 
 /// What one sweep did. The three cases are distinct because a caller may need to act on them
 /// differently: wave 3's statistics compaction has to know whether to reschedule itself, and
@@ -96,6 +106,344 @@ pub fn sweep_tmp(now: SystemTime) -> io::Result<Sweep> {
         );
     }
     Ok(Sweep::Ran(deleted))
+}
+
+/// Reclaim `<state>/logs`: dated directories past `FS_MCP_LOG_KEEP_DAYS`, then, if the tree is
+/// still over `FS_MCP_LOG_MAX_MB`, the oldest log files until it is not.
+///
+/// Called once at startup from `main.rs`, beside [`sweep_tmp`] and through the same lease with
+/// `kind = "logs"`, so the two kinds of housekeeping neither silence nor wait for each other.
+/// Resolves the real retention and the real directory, then delegates to the two injectable
+/// cores below.
+///
+/// **Both knobs switch off at zero**, following `FS_MCP_TMP_KEEP_HOURS`: a retention setting
+/// whose zero empties the directory is a foot-gun, and with dozens of processes it would fire on
+/// every start. They switch off independently - only with both at zero is there nothing at all
+/// to do, which is the one case that reports [`Sweep::Disabled`].
+///
+/// **The size budget is a soft limit.** It stops at the first file it may not delete, because a
+/// log a running server is appending to is worth more than the megabytes it occupies: on Windows
+/// the unlink fails anyway, but on Unix it succeeds and the server goes on writing into an
+/// unlinked inode, so the operator loses the evidence with nothing anywhere to say so. A tree
+/// can therefore sit over its budget for as long as the processes filling it keep running.
+pub fn sweep_logs(now: SystemTime) -> io::Result<Sweep> {
+    let keep_days = crate::core::logging::keep_days();
+    // `max_mb` is only ever compared against a sum of file sizes, so an absurd value from the
+    // environment means "never sweep" rather than an overflow; saturating keeps it that way.
+    let max_bytes = crate::core::logging::max_mb().saturating_mul(1024 * 1024);
+    if keep_days == 0 && max_bytes == 0 {
+        return Ok(Sweep::Disabled);
+    }
+    let root = paths::state_dir()?;
+    match lease_due(&root, "logs", SWEEP_INTERVAL, now) {
+        Lease::Due => {}
+        Lease::Held => return Ok(Sweep::LeaseHeld),
+        // Unreachable with the literal above, and loud on purpose for the same reason as in
+        // `sweep_tmp`: silently never sweeping is how a disk fills up.
+        Lease::InvalidKind => {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "housekeeping: \"logs\" was refused as a lease name",
+            ));
+        }
+    }
+    // Taken once for the whole sweep rather than per file: one process snapshot is the cost, and
+    // a set that changed halfway through could judge one directory dead by a rule the next
+    // directory is spared by. Without it nothing may be deleted at all - see `live_pids`.
+    let Some(live) = live_pids() else {
+        return Ok(Sweep::Ran(0));
+    };
+    let dir = paths::sub_dir(SubDir::Logs)?;
+    let mut deleted = 0;
+    if keep_days > 0 {
+        deleted += sweep_log_dirs(&dir, keep_days, &crate::core::logging::utc_day(now), &live)?;
+    }
+    if max_bytes > 0 {
+        deleted += sweep_by_budget(&dir, max_bytes, now, &live)?;
+    }
+    // Stamped only after the work, and a failure to stamp is reported rather than returned, for
+    // exactly the reasons spelled out in `sweep_tmp`.
+    if let Err(e) = lease_done(&root, "logs", now) {
+        warn!(
+            "Housekeeping: reclaimed {deleted} log entries but could not record the lease: {e}; \
+             another process may sweep again within the hour"
+        );
+    }
+    Ok(Sweep::Ran(deleted))
+}
+
+/// The pids running on this machine, this process's own included, or `None` when they cannot be
+/// listed.
+///
+/// Reuses the crate's existing process listing rather than adding a second way to ask the same
+/// question. The cost is one process snapshot, paid at most once an hour across every server on
+/// the machine, because the lease is taken before this is called.
+///
+/// `None` rather than an empty set on failure, and the caller then deletes nothing: an empty set
+/// reads as "no process is alive", which would hand every log file on the machine to the sweep.
+/// Own pid is inserted explicitly rather than trusted to appear in the listing, because the one
+/// file this process must never lose is the one it is writing.
+fn live_pids() -> Option<HashSet<u32>> {
+    match crate::tools::process::search_processes(None, None) {
+        Ok(found) => {
+            let mut pids: HashSet<u32> = found.into_iter().map(|p| p.pid).collect();
+            pids.insert(crate::core::instance::pid());
+            Some(pids)
+        }
+        Err(e) => {
+            warn!("Housekeeping: cannot list processes ({e}); leaving the logs alone");
+            None
+        }
+    }
+}
+
+/// Delete `<logs>/<YYYY-MM-DD>` directories more than `keep_days` days older than `today`.
+///
+/// A dated directory carries its age in its NAME, so it is read from there and not from
+/// [`newest_mtime`], which would walk every log file on the machine on every cold start.
+///
+/// Everything this cannot account for is kept, and said so in the log:
+/// - a name that is not `YYYY-MM-DD` was not written by [`crate::core::logging`], and since this
+///   function deletes, an unreadable name is a reason to stop rather than to improvise;
+/// - `today`, and any directory dated ahead of it, stays whatever `keep_days` says;
+/// - a directory holding a log file whose pid is in `live`, or any entry that is not a log file
+///   this module recognises, stays whole. **A server running since before the retention window
+///   keeps its entire start-day directory**: it is still writing into the file it opened there,
+///   and on Unix deleting it would succeed silently and cost the operator every line that
+///   process logs from then on.
+pub(crate) fn sweep_log_dirs(
+    dir: &Path,
+    keep_days: u64,
+    today: &str,
+    live: &HashSet<u32>,
+) -> io::Result<usize> {
+    // A malformed `today` would make every directory look infinitely old, so it is an error
+    // rather than a sweep carried out against an unusable reference point.
+    let Some(today) = day_number(today) else {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!("housekeeping: {today:?} is not a YYYY-MM-DD date"),
+        ));
+    };
+    let mut deleted = 0;
+    for entry in std::fs::read_dir(dir)? {
+        let entry = match entry {
+            Ok(entry) => entry,
+            Err(e) => {
+                warn!("Housekeeping: cannot read an entry of {}: {e}", dir.display());
+                continue;
+            }
+        };
+        let path = entry.path();
+        match entry.file_type() {
+            // Only dated directories are this sweep's business; a stray file directly under
+            // `logs/` is somebody else's and stays where it is.
+            Ok(file_type) if file_type.is_dir() => {}
+            Ok(_) => {
+                warn!("Housekeeping: {} is not a log directory; kept", path.display());
+                continue;
+            }
+            Err(e) => {
+                warn!("Housekeeping: cannot type {}: {e}", path.display());
+                continue;
+            }
+        }
+        let Some(day) = day_number(&entry.file_name().to_string_lossy()) else {
+            warn!(
+                "Housekeeping: {} is not named for a date; kept rather than guessed at",
+                path.display()
+            );
+            continue;
+        };
+        // Positive before the cast, so the comparison against `keep_days` is exact; today and
+        // anything dated ahead of it fall out here.
+        let age = i64::from(today) - i64::from(day);
+        if age <= 0 || (age as u64) <= keep_days {
+            continue;
+        }
+        match is_reclaimable(&path, live) {
+            Ok(true) => {}
+            Ok(false) => {
+                info!(
+                    "Housekeeping: {} is past the retention window but still in use; kept",
+                    path.display()
+                );
+                continue;
+            }
+            Err(e) => {
+                warn!("Housekeeping: cannot inspect {}: {e}", path.display());
+                continue;
+            }
+        }
+        match std::fs::remove_dir_all(&path) {
+            Ok(()) => deleted += 1,
+            Err(e) => warn!("Housekeeping: cannot remove {}: {e}", path.display()),
+        }
+    }
+    Ok(deleted)
+}
+
+/// Whether every entry of a dated log directory is the log of a process that has exited.
+///
+/// `false` covers both "a live process is writing in there" and "there is something in there I
+/// do not recognise": the two call for the same response, which is to leave the directory alone.
+/// An unreadable directory is an error, never a partial reading - a partial one would be an
+/// argument for deletion.
+fn is_reclaimable(dir: &Path, live: &HashSet<u32>) -> io::Result<bool> {
+    for entry in std::fs::read_dir(dir)? {
+        match pid_of(&entry?.file_name().to_string_lossy()) {
+            Some(pid) if !live.contains(&pid) => {}
+            _ => return Ok(false),
+        }
+    }
+    Ok(true)
+}
+
+/// Delete the oldest log files under `dir` until the tree fits in `max_bytes`, sparing every
+/// file that may still be in use. Returns how many were removed.
+///
+/// The age rule alone does not cap a directory: one chatty process at `trace` can fill a disk
+/// well inside the retention window, and it does it inside *today's* directory, which the date
+/// rule protects. This is the second bound, and unlike the first it may reach into today.
+///
+/// **It is a soft limit.** A file is spared when its pid is in `live`, when its name is not one
+/// [`crate::core::logging`] wrote, or when it was modified within [`LIVE_WINDOW`]. Its size
+/// still counts against the budget, so a tree of live logs stays over the limit rather than
+/// being forced under it - deleting a log that is being appended to fails on Windows and
+/// silently succeeds on Unix, where the writer then logs into an unlinked inode, and the budget
+/// is not worth that. Only files inside date-named directories are weighed or removed, for the
+/// same reason [`sweep_log_dirs`] deletes nothing else: the rest of `<state>/logs` is not this
+/// module's to judge.
+pub(crate) fn sweep_by_budget(
+    dir: &Path,
+    max_bytes: u64,
+    now: SystemTime,
+    live: &HashSet<u32>,
+) -> io::Result<usize> {
+    let mut total: u64 = 0;
+    let mut oldest_first: Vec<(SystemTime, u64, std::path::PathBuf)> = Vec::new();
+    for day in std::fs::read_dir(dir)? {
+        let day = match day {
+            Ok(day) => day,
+            Err(e) => {
+                warn!("Housekeeping: cannot read an entry of {}: {e}", dir.display());
+                continue;
+            }
+        };
+        // Silently, not with a warning: `sweep_log_dirs` has already reported anything odd here
+        // this run, and a second copy of every complaint helps nobody.
+        if day_number(&day.file_name().to_string_lossy()).is_none() {
+            continue;
+        }
+        let listing = match std::fs::read_dir(day.path()) {
+            Ok(listing) => listing,
+            Err(e) => {
+                warn!("Housekeeping: cannot list {}: {e}", day.path().display());
+                continue;
+            }
+        };
+        for file in listing {
+            let file = match file {
+                Ok(file) => file,
+                Err(e) => {
+                    warn!("Housekeeping: cannot read {}: {e}", day.path().display());
+                    continue;
+                }
+            };
+            let path = file.path();
+            // `symlink_metadata`, so a link's own size is weighed and its target is never
+            // followed out of the log tree - the rule [`newest_mtime`] follows for the same
+            // reason.
+            let meta = match std::fs::symlink_metadata(&path) {
+                Ok(meta) => meta,
+                Err(e) => {
+                    warn!("Housekeeping: cannot measure {}: {e}", path.display());
+                    continue;
+                }
+            };
+            if !meta.is_file() {
+                continue;
+            }
+            total = total.saturating_add(meta.len());
+            // A file dated in the future reads as brand new here, which is the same bias
+            // `sweep_dir` applies to a clock that disagrees with us.
+            let modified = meta.modified();
+            let spared = match (pid_of(&file.file_name().to_string_lossy()), &modified) {
+                // Not a name this module wrote, or a timestamp that cannot be read: weighed,
+                // never deleted.
+                (None, _) | (_, Err(_)) => true,
+                (Some(pid), Ok(modified)) => {
+                    live.contains(&pid)
+                        || now.duration_since(*modified).unwrap_or_default() < LIVE_WINDOW
+                }
+            };
+            if let Ok(modified) = modified
+                && !spared
+            {
+                oldest_first.push((modified, meta.len(), path));
+            }
+        }
+    }
+    if total <= max_bytes {
+        return Ok(0);
+    }
+    oldest_first.sort_by_key(|(modified, ..)| *modified);
+    let mut deleted = 0;
+    for (_, len, path) in oldest_first {
+        if total <= max_bytes {
+            break;
+        }
+        match std::fs::remove_file(&path) {
+            Ok(()) => {
+                total = total.saturating_sub(len);
+                deleted += 1;
+            }
+            Err(e) => warn!("Housekeeping: cannot remove {}: {e}", path.display()),
+        }
+    }
+    if total > max_bytes {
+        info!(
+            "Housekeeping: {} still holds {total} bytes against a {max_bytes}-byte budget; \
+             the rest belongs to processes that may still be writing",
+            dir.display()
+        );
+    }
+    Ok(deleted)
+}
+
+/// A `YYYY-MM-DD` directory name as a Julian day number, or `None` for anything else.
+///
+/// A day number rather than a `Duration`: subtracting two of them gives whole days across month
+/// ends and leap years, where counting hours would drift. The format is strict - four digits,
+/// two, two, and a real calendar date - because the caller deletes what this recognises.
+fn day_number(name: &str) -> Option<i32> {
+    let (year, rest) = name.split_once('-')?;
+    let (month, day) = rest.split_once('-')?;
+    if year.len() != 4 || month.len() != 2 || day.len() != 2 {
+        return None;
+    }
+    // On its own, `parse` would accept a sign on any of the three fields.
+    if !name.bytes().all(|b| b.is_ascii_digit() || b == b'-') {
+        return None;
+    }
+    let date = time::Date::from_calendar_date(
+        year.parse().ok()?,
+        time::Month::try_from(month.parse::<u8>().ok()?).ok()?,
+        day.parse().ok()?,
+    )
+    .ok()?;
+    Some(date.to_julian_day())
+}
+
+/// The pid in a `fsmcp-<pid>-<instance>.log` name, or `None` for any other name.
+///
+/// The pid only ever asks whether that process is still running, so a pid the OS has since
+/// handed to something else merely keeps a file that could have gone - the direction this module
+/// errs in everywhere.
+fn pid_of(name: &str) -> Option<u32> {
+    let (pid, instance) = name.strip_prefix("fsmcp-")?.split_once('-')?;
+    instance.ends_with(".log").then_some(())?;
+    pid.parse().ok()
 }
 
 /// Delete entries directly in `dir` whose newest content is further in the past than `max_age`.
@@ -525,6 +873,119 @@ mod tests {
             .collect();
         assert!(left.is_empty(), "the rename must leave nothing over: {left:?}");
         assert_eq!(lease_due(root, "tmp", HOUR, now), Lease::Held);
+    }
+
+    /// A dated directory is aged by its name, and today's is never touched.
+    #[test]
+    fn log_directories_age_by_their_name() {
+        let dir = tempfile::TempDir::new().expect("tempdir");
+        for day in ["2026-09-01", "2026-09-16", "2026-09-17"] {
+            let d = dir.path().join(day);
+            std::fs::create_dir_all(&d).expect("mkdir");
+            std::fs::write(d.join("fsmcp-1-aaaaaaaa.log"), b"x").expect("write");
+        }
+        let deleted =
+            sweep_log_dirs(dir.path(), 14, "2026-09-17", &HashSet::new()).expect("sweep");
+        assert_eq!(deleted, 1, "only 2026-09-01 is older than 14 days");
+        assert!(dir.path().join("2026-09-17").is_dir(), "today must survive");
+        assert!(dir.path().join("2026-09-16").is_dir());
+    }
+
+    /// A directory whose name is not a date is left alone rather than guessed at.
+    #[test]
+    fn an_unexpected_directory_name_is_not_deleted() {
+        let dir = tempfile::TempDir::new().expect("tempdir");
+        let odd = dir.path().join("not-a-date");
+        std::fs::create_dir_all(&odd).expect("mkdir");
+        assert_eq!(
+            sweep_log_dirs(dir.path(), 0, "2026-09-17", &HashSet::new()).expect("sweep"),
+            0
+        );
+        assert!(odd.is_dir());
+    }
+
+    /// An expired directory whose files belong to a process that is still running stays: on Unix
+    /// the unlink would succeed and the server would go on writing into an unlinked inode, losing
+    /// the operator's evidence with no error anywhere.
+    #[test]
+    fn an_expired_directory_with_a_live_writer_is_kept() {
+        let dir = tempfile::TempDir::new().expect("tempdir");
+        let old = dir.path().join("2026-09-01");
+        std::fs::create_dir_all(&old).expect("mkdir");
+        std::fs::write(old.join("fsmcp-4242-aaaaaaaa.log"), b"x").expect("write");
+
+        let live = HashSet::from([4242]);
+        assert_eq!(
+            sweep_log_dirs(dir.path(), 14, "2026-09-17", &live).expect("sweep"),
+            0
+        );
+        assert!(old.is_dir(), "a live process's directory must survive");
+        // The same directory goes once nothing in it is alive, so the test above pins the
+        // liveness rule and not merely the fact that nothing is ever deleted.
+        assert_eq!(
+            sweep_log_dirs(dir.path(), 14, "2026-09-17", &HashSet::new()).expect("sweep"),
+            1
+        );
+    }
+
+    /// The budget deletes oldest first, and stops before anything written in the last hour.
+    #[test]
+    fn the_size_budget_spares_live_files() {
+        let dir = tempfile::TempDir::new().expect("tempdir");
+        let day = dir.path().join("2026-09-17");
+        std::fs::create_dir_all(&day).expect("mkdir");
+        let old = day.join("fsmcp-1-old.log");
+        let live = day.join("fsmcp-2-live.log");
+        std::fs::write(&old, vec![b'x'; 4096]).expect("write");
+        std::fs::write(&live, vec![b'x'; 4096]).expect("write");
+        set_mtime(&old, SystemTime::now() - Duration::from_secs(48 * 3600));
+
+        let deleted = sweep_by_budget(dir.path(), 4096, SystemTime::now(), &HashSet::new())
+            .expect("budget");
+        assert_eq!(deleted, 1);
+        assert!(!old.exists(), "the oldest file goes first");
+        assert!(
+            live.exists(),
+            "a file written in the last hour is never budgeted away"
+        );
+    }
+
+    /// Only a real, fully-spelled calendar date is recognised, because what this function
+    /// recognises is what the sweep deletes.
+    #[test]
+    fn only_a_real_date_is_recognised() {
+        assert!(day_number("2026-09-17").is_some());
+        // A day apart is a day apart across a month end, which an hour count would have to
+        // rediscover.
+        let (sep30, oct1) = (day_number("2026-09-30"), day_number("2026-10-01"));
+        assert_eq!(oct1.zip(sep30).map(|(a, b)| a - b), Some(1));
+        for odd in [
+            "2026-13-01", // no such month
+            "2026-02-30", // no such day
+            "20260917",   // the separators carry the field widths
+            "2026-9-17",  // unpadded
+            "+026-09-17", // a sign would parse as a number but is not a date name
+            "not-a-date",
+            "",
+        ] {
+            assert_eq!(day_number(odd), None, "{odd:?}");
+        }
+    }
+
+    /// A pid is read only from a name this module's writer produced; anything else is unknown,
+    /// and unknown means untouchable.
+    #[test]
+    fn a_pid_is_read_only_from_our_own_file_names() {
+        assert_eq!(pid_of("fsmcp-4242-aaaaaaaa.log"), Some(4242));
+        for odd in [
+            "fsmcp-4242.log",          // no instance id
+            "fsmcp-4242-aaaaaaaa.txt", // not a log
+            "server-4242-aaaaaaaa.log",
+            "fsmcp--aaaaaaaa.log",
+            "fsmcp-nope-aaaaaaaa.log",
+        ] {
+            assert_eq!(pid_of(odd), None, "{odd:?}");
+        }
     }
 
     /// The recorded mtime of a file just written, which is what the sweep will compare against.
