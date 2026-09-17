@@ -135,6 +135,9 @@ pub fn sweep_logs(now: SystemTime) -> io::Result<Sweep> {
     // clamp lives in one module and the arithmetic in another, so both are deliberate. An absurd
     // budget then means "never sweep", which is the right reading of it.
     let max_bytes = crate::core::logging::max_mb().saturating_mul(1024 * 1024);
+    // Deliberately the same condition [`sweep_logs_in`] checks: asked here so that a server with
+    // retention switched off pays neither the state-root resolution nor the process enumeration
+    // below, and asked there so the core is honest on its own. Do not "simplify" either away.
     if keep_days == 0 && max_bytes == 0 {
         return Ok(Sweep::Disabled);
     }
@@ -201,7 +204,6 @@ pub(crate) fn sweep_logs_in(
     }
     Ok(Sweep::Ran(deleted))
 }
-
 
 /// The pids running on this machine, this process's own included, or `None` when they cannot be
 /// listed.
@@ -501,13 +503,17 @@ fn day_number(name: &str) -> Option<i32> {
 /// errs in everywhere.
 ///
 /// **Known and deliberate:** a dead server's directory whose pid has been reused by an unrelated
-/// live process is held by the pid rule for as long as that unrelated process runs, which can be
-/// indefinitely. Keeping costs disk, deleting costs the operator their evidence, and
-/// distinguishing the two would mean recording process start times - a second identity mechanism
-/// beside [`crate::core::instance`], for a case that costs one file. The pair of rules cannot
-/// between them produce retention that never reclaims anything: [`sweep_by_budget`]'s own
-/// freshness check expires after [`LIVE_WINDOW`] whatever the pid says, so a genuinely quiet
-/// tree is always reclaimable by the budget even while the date rule holds a directory.
+/// live process is held for as long as that unrelated process runs, which can be indefinitely.
+/// Keeping costs disk, deleting costs the operator their evidence, and telling the two apart
+/// would mean recording process start times - a second identity mechanism beside
+/// [`crate::core::instance`], for a case that costs one file.
+///
+/// Note precisely how far that goes, because the consolation is narrower than it first looks:
+/// [`sweep_by_budget`] spares a file when its pid is live **or** it is fresh, an OR, so freshness
+/// only ever adds sparing and never overrides a live pid. A colliding file is therefore pinned
+/// under BOTH rules however quiet it becomes. What bounds the damage is only that the collision
+/// is per pid: every other file in the tree stays reclaimable, so the budget still converges on
+/// the rest and a whole tree cannot be frozen by one reused pid.
 fn pid_of(name: &str) -> Option<u32> {
     let (pid, instance) = name.strip_prefix("fsmcp-")?.split_once('-')?;
     instance.ends_with(".log").then_some(())?;
