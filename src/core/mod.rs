@@ -7,6 +7,9 @@ pub mod glob;
 pub mod logging;
 pub mod path;
 pub mod paths;
+/// Test-only guard: asserts nothing outside [`paths`] resolves a platform directory.
+#[cfg(test)]
+pub mod paths_guard;
 pub mod run_command_args;
 pub mod schema;
 pub mod serde;

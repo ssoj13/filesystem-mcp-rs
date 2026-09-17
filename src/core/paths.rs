@@ -5,9 +5,10 @@
 //! spread over four roots (`data_local_dir`, `data_dir`, two different temp subdirs), two
 //! of which differ per OS and per Windows account, which made "where is it?" unanswerable.
 //!
-//! No other module may call `dirs::*` or `std::env::temp_dir()`. Task 5 adds
-//! `paths_are_centralized` in `src/core/paths_guard.rs` to enforce that mechanically; until
-//! it lands the rule holds by review only.
+//! No other module may call `dirs::*` or `std::env::temp_dir`; tests take scratch space from
+//! `tempfile::TempDir` instead. That rule is not a convention here - the test
+//! `paths_are_centralized` in `src/core/paths_guard.rs` scans every `.rs` file under `src/` and
+//! fails the build on any call site outside this module, so the drift cannot come back quietly.
 
 use std::io;
 use std::path::{Path, PathBuf};
@@ -248,22 +249,22 @@ mod tests {
     /// This is also the seam every other test uses to avoid touching the real home dir.
     #[test]
     fn override_redirects_root_and_creates_it() {
-        let tmp = std::env::temp_dir().join(format!("fsmcp-paths-{}", uuid::Uuid::new_v4()));
+        let base = tempfile::TempDir::new().expect("scratch dir");
+        let tmp = base.path().join("state");
         let root = resolve_root(Some(tmp.clone())).expect("root resolves");
         assert_eq!(root, tmp);
         assert!(tmp.is_dir(), "root must be created on demand");
-        std::fs::remove_dir_all(&tmp).ok();
     }
 
     /// Every subdirectory hangs off the root under its documented name.
     #[test]
     fn subdirs_hang_off_root() {
-        let tmp = std::env::temp_dir().join(format!("fsmcp-paths-{}", uuid::Uuid::new_v4()));
+        let base = tempfile::TempDir::new().expect("scratch dir");
+        let tmp = base.path().join("state");
         let logs = resolve_sub(Some(tmp.clone()), SubDir::Logs).expect("logs dir");
         assert_eq!(logs, tmp.join("logs"));
         assert!(logs.is_dir());
         assert_eq!(SubDir::Tmp.as_str(), "tmp");
-        std::fs::remove_dir_all(&tmp).ok();
     }
 
     /// Scratch files land under the state root's `tmp/`, never in the OS temp directory.
@@ -324,7 +325,8 @@ mod tests {
     /// Old file present, new absent: the data moves and the old path is gone.
     #[test]
     fn migrate_moves_when_unambiguous() {
-        let base = std::env::temp_dir().join(format!("fsmcp-mig-{}", uuid::Uuid::new_v4()));
+        let scratch = tempfile::TempDir::new().expect("scratch dir");
+        let base = scratch.path().join("mig");
         let old = base.join("old/memory2.db");
         let new = base.join("new/memory2.db");
         std::fs::create_dir_all(old.parent().expect("parent")).expect("mkdir");
@@ -333,13 +335,13 @@ mod tests {
         assert_eq!(migrate(&old, &new), Migrated::Moved);
         assert!(!old.exists(), "old path must be gone after a move");
         assert_eq!(std::fs::read(&new).expect("read"), b"payload");
-        std::fs::remove_dir_all(&base).ok();
     }
 
     /// Both present: refuse to guess, touch nothing.
     #[test]
     fn migrate_refuses_when_both_exist() {
-        let base = std::env::temp_dir().join(format!("fsmcp-mig-{}", uuid::Uuid::new_v4()));
+        let scratch = tempfile::TempDir::new().expect("scratch dir");
+        let base = scratch.path().join("mig");
         let old = base.join("old/memory2.db");
         let new = base.join("new/memory2.db");
         for p in [&old, &new] {
@@ -355,13 +357,13 @@ mod tests {
             other => panic!("expected Ambiguous, got {other:?}"),
         }
         assert!(old.exists() && new.exists(), "neither file may be touched");
-        std::fs::remove_dir_all(&base).ok();
     }
 
     /// Nothing to migrate, and nothing conjured into existence while finding that out.
     #[test]
     fn migrate_reports_fresh_start() {
-        let base = std::env::temp_dir().join(format!("fsmcp-mig-{}", uuid::Uuid::new_v4()));
+        let scratch = tempfile::TempDir::new().expect("scratch dir");
+        let base = scratch.path().join("mig");
         let old = base.join("old.db");
         let new = base.join("new.db");
         assert_eq!(migrate(&old, &new), Migrated::FreshStart);
@@ -373,7 +375,8 @@ mod tests {
     /// remove one, so the cross-volume path would corrupt what the same-volume path moved fine.
     #[test]
     fn migrate_refuses_a_directory() {
-        let base = std::env::temp_dir().join(format!("fsmcp-mig-{}", uuid::Uuid::new_v4()));
+        let scratch = tempfile::TempDir::new().expect("scratch dir");
+        let base = scratch.path().join("mig");
         let old = base.join("old_dir");
         let new = base.join("new_dir");
         std::fs::create_dir_all(old.join("inner")).expect("mkdir");
@@ -387,7 +390,6 @@ mod tests {
         );
         assert!(old.join("inner").is_dir(), "the directory must be intact");
         assert!(!new.exists(), "nothing may be created at the new path");
-        std::fs::remove_dir_all(&base).ok();
     }
 
     /// When the new parent cannot be created the original must survive untouched. This is the
@@ -395,7 +397,8 @@ mod tests {
     /// where `new`'s parent directory would go, so `create_dir_all` cannot succeed.
     #[test]
     fn migrate_keeps_the_original_when_the_new_parent_cannot_be_created() {
-        let base = std::env::temp_dir().join(format!("fsmcp-mig-{}", uuid::Uuid::new_v4()));
+        let scratch = tempfile::TempDir::new().expect("scratch dir");
+        let base = scratch.path().join("mig");
         let old = base.join("old/memory2.db");
         let blocker = base.join("blocker");
         let new = blocker.join("memory2.db");
@@ -413,7 +416,6 @@ mod tests {
         assert!(old.exists(), "the original must survive a failed migration");
         assert_eq!(std::fs::read(&old).expect("read"), b"payload");
         assert!(!new.exists(), "no partial file may be left at the new path");
-        std::fs::remove_dir_all(&base).ok();
     }
 
     /// The CQ-1 cleanup arm: `copy` succeeded but `remove_file(old)` failed, so a complete
@@ -431,7 +433,8 @@ mod tests {
         // Readers allowed, deleters and renamers refused.
         const FILE_SHARE_READ: u32 = 0x0000_0001;
 
-        let base = std::env::temp_dir().join(format!("fsmcp-mig-{}", uuid::Uuid::new_v4()));
+        let scratch = tempfile::TempDir::new().expect("scratch dir");
+        let base = scratch.path().join("mig");
         let old = base.join("old/memory2.db");
         let new = base.join("new/memory2.db");
         std::fs::create_dir_all(old.parent().expect("parent")).expect("mkdir");
@@ -459,6 +462,5 @@ mod tests {
             !new.exists(),
             "the duplicate left by the successful copy must be cleaned up"
         );
-        std::fs::remove_dir_all(&base).ok();
     }
 }

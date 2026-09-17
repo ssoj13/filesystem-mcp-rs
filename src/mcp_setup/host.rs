@@ -308,7 +308,10 @@ mod resolve_tests {
     /// healthy. `status` used to have no way to tell this from a working entry.
     #[test]
     fn a_missing_path_does_not_resolve() {
-        let missing = std::env::temp_dir().join("mcp-setup-rs-definitely-not-here.exe");
+        // A fresh empty directory, so the child path is guaranteed absent without depending on
+        // what a shared OS temp directory happens to contain.
+        let dir = tempfile::TempDir::new().expect("scratch dir");
+        let missing = dir.path().join("mcp-setup-rs-definitely-not-here.exe");
         assert!(!missing.exists(), "test fixture must not exist");
         assert!(!command_resolves(&missing.to_string_lossy()));
     }
