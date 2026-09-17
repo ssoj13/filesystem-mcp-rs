@@ -20,6 +20,7 @@
 - Do not use `git reset` or revert files via git.
 - Commit messages are conventional and describe the substance of the change. No agent co-authorship trailers.
 - `FS_MCP_*` variables exist **only** in `src/env_spec.rs`; readers go through `env_spec::get` (blank = unset).
+- Gates: plain `cargo test` and `cargo clippy --all-targets -- -D warnings`. There is no lib target, so `--lib` cannot run; `--bin filesystem-mcp-rs` runs only the unit tests and silently skips `tests/integration.rs` and `tests/http_transport.rs`, so it is never the gate. A `--bin filesystem-mcp-rs <filter>` run below is a per-task iteration aid, not acceptance.
 
 ---
 
@@ -81,7 +82,7 @@ mod tests {
 
 - [ ] **Step 2: Run the tests to verify they fail**
 
-Run: `cargo test --lib core::paths -- --nocapture`
+Run: `cargo test --bin filesystem-mcp-rs core::paths -- --nocapture`
 Expected: FAIL to compile — `resolve_root`, `resolve_sub`, `resolve_root_from`, `SubDir` do not exist.
 
 - [ ] **Step 3: Write the implementation**
@@ -190,7 +191,7 @@ pub mod paths;
 
 - [ ] **Step 4: Run the tests to verify they pass**
 
-Run: `cargo test --lib core::paths`
+Run: `cargo test --bin filesystem-mcp-rs core::paths`
 Expected: PASS, 3 tests.
 
 - [ ] **Step 5: Commit**
@@ -267,7 +268,7 @@ fn migrate_reports_fresh_start() {
 
 - [ ] **Step 2: Run the tests to verify they fail**
 
-Run: `cargo test --lib core::paths`
+Run: `cargo test --bin filesystem-mcp-rs core::paths`
 Expected: FAIL to compile — `migrate` / `Migrated` do not exist.
 
 - [ ] **Step 3: Write the implementation**
@@ -334,7 +335,7 @@ pub fn legacy_ctl_dir() -> Option<PathBuf> {
 
 - [ ] **Step 4: Run the tests to verify they pass**
 
-Run: `cargo test --lib core::paths`
+Run: `cargo test --bin filesystem-mcp-rs core::paths`
 Expected: PASS, 6 tests.
 
 - [ ] **Step 5: Commit**
@@ -384,7 +385,7 @@ fn ambiguous_memory_db_disables_the_store() {
 
 - [ ] **Step 2: Run it to verify it fails**
 
-Run: `cargo test --lib core::paths::tests::ambiguous_memory_db_disables_the_store`
+Run: `cargo test --bin filesystem-mcp-rs core::paths::tests::ambiguous_memory_db_disables_the_store`
 Expected: FAIL to compile — `memory_db_decision` / `MemoryDbDecision` do not exist.
 
 - [ ] **Step 3: Implement the decision and rewire the call sites**
@@ -473,7 +474,7 @@ attempted and the old directory is left for manual cleanup. Do the same for `saf
 
 - [ ] **Step 4: Run the tests**
 
-Run: `cargo test --lib && cargo clippy --all-targets -- -D warnings`
+Run: `cargo test && cargo clippy --all-targets -- -D warnings`
 Expected: PASS; clippy clean apart from the pre-existing `line_edit.rs:64` warning.
 
 - [ ] **Step 5: Commit**
@@ -511,7 +512,7 @@ fn tmp_is_inside_the_state_root() {
 
 - [ ] **Step 2: Run it**
 
-Run: `cargo test --lib core::paths::tests::tmp_is_inside_the_state_root`
+Run: `cargo test --bin filesystem-mcp-rs core::paths::tests::tmp_is_inside_the_state_root`
 Expected: PASS already (Task 1 provides `resolve_sub`). It guards the rewiring that follows and
 fails loudly if `SubDir::Tmp` is renamed. The real red gate for this task is Task 5.
 
@@ -539,7 +540,7 @@ In `process.rs:762` replace `std::env::temp_dir()` with the same `SubDir::Tmp` d
 
 - [ ] **Step 4: Run the tests**
 
-Run: `cargo test --lib && cargo clippy --all-targets -- -D warnings`
+Run: `cargo test && cargo clippy --all-targets -- -D warnings`
 Expected: PASS.
 
 - [ ] **Step 5: Commit**
@@ -634,7 +635,7 @@ mod tests {
 
 - [ ] **Step 2: Run it to verify it fails**
 
-Run: `cargo test --lib paths_are_centralized`
+Run: `cargo test --bin filesystem-mcp-rs paths_are_centralized`
 Expected: FAIL at first, listing any call site Tasks 3-4 missed. That list is this task's value.
 
 - [ ] **Step 3: Fix every offender the test reports**
@@ -688,7 +689,7 @@ fn state_keys_are_registered_once_and_described_correctly() {
 
 - [ ] **Step 2: Run it**
 
-Run: `cargo test --lib env_spec`
+Run: `cargo test --bin filesystem-mcp-rs env_spec`
 Expected: FAIL — the keys are missing and the memory help still says `<local data>`.
 
 - [ ] **Step 3: Implement**
@@ -735,7 +736,7 @@ Correct the two stale help strings:
 
 - [ ] **Step 4: Run the tests**
 
-Run: `cargo test --lib env_spec && cargo run -- --list-env`
+Run: `cargo test --bin filesystem-mcp-rs env_spec && cargo run -- --list-env`
 Expected: PASS; `--list-env` shows both new keys and no `<data>` text.
 
 - [ ] **Step 5: Commit**
@@ -809,7 +810,7 @@ mod tests {
 
 - [ ] **Step 2: Run them**
 
-Run: `cargo test --lib core::housekeeping`
+Run: `cargo test --bin filesystem-mcp-rs core::housekeeping`
 Expected: FAIL to compile — `sweep_dir` / `lease_in` do not exist.
 
 - [ ] **Step 3: Implement**
@@ -910,7 +911,7 @@ transport starts, where failure is reported but never fatal:
 
 - [ ] **Step 4: Run the tests**
 
-Run: `cargo test --lib && cargo clippy --all-targets -- -D warnings`
+Run: `cargo test && cargo clippy --all-targets -- -D warnings`
 Expected: PASS.
 
 - [ ] **Step 5: Commit**

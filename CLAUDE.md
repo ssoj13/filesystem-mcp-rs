@@ -7,6 +7,10 @@ control (26 ctl-tools behind ctl-* features). Published crate, consumed from Git
 Build: `cargo build` / test: `cargo test` / lint: `cargo clippy --all-targets -- -D warnings`.
 Format: `cargo fmt --check` is a gate (CI runs it on Linux only). The crate was reflowed once in
 `90a3e7a`, listed in `.git-blame-ignore-revs` — never hand-wrap against rustfmt, run it.
+The test gate is **plain `cargo test`**, never `--bin filesystem-mcp-rs`. There is no lib target, so
+`--lib` cannot run; but `--bin` silently skips `tests/integration.rs` and `tests/http_transport.rs`
+(three binaries: unit + integration + http_transport). `--bin <filter>` is fine to iterate on one
+unit module; it is not the gate.
 
 ## Key layout facts
 - Tools live in `src/tools/*.rs`, registered via `#[cfg(feature = "...")]` in `src/tools/mod.rs`.

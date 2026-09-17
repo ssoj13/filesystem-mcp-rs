@@ -18,7 +18,7 @@
 - Never discard errors with `let _ =`; avoid `unwrap()`/`expect()` outside tests; avoid panicking indexing.
 - `FS_MCP_*` keys live only in `src/env_spec.rs`; readers go through `env_spec::get` (blank = unset). A registered key must have a real reader — `every_registered_key_is_read_somewhere_in_the_sources` enforces it.
 - Tests use `tempfile::TempDir`, never `std::env::temp_dir()`, and never write into the real `~/.filesystem-mcp-rs/`.
-- Gates: `cargo test --bin filesystem-mcp-rs` (there is no lib target) and `cargo clippy --all-targets -- -D warnings`.
+- Gates: plain `cargo test` and `cargo clippy --all-targets -- -D warnings`. There is no lib target, so `--lib` cannot run; `--bin filesystem-mcp-rs` runs only the unit tests and silently skips `tests/integration.rs` and `tests/http_transport.rs`, so it is never the gate. A `--bin filesystem-mcp-rs <filter>` run below is a per-task iteration aid, not acceptance.
 - Rustdoc on every public item: what it is, why it exists, where it is used. No agent co-authorship trailers in commits.
 
 ---
@@ -481,7 +481,7 @@ reasoning), and paste the lines from the log file.
 
 - [ ] **Step 1** Update the docs. The `///` and `*.md` denylists added in wave 1 will fail the build if any of them still describe the OS temp dir or an abandoned location — run the gates and let the guard check your work.
 - [ ] **Step 2** END-TO-END, reported honestly: start the server in stdio, stop it, and verify `~/.filesystem-mcp-rs/logs/<today>/fsmcp-<pid>-<id>.log` exists and contains the startup lines; start a SECOND server while the first runs and verify two distinct files with no interleaving; verify nothing was written to stderr in stdio mode (capture it and assert it is empty — this is the rule that protects the handshake); verify the `tmp` and `logs` sweeps both took their leases.
-- [ ] **Step 3** Full gates: `cargo test --bin filesystem-mcp-rs && cargo clippy --all-targets -- -D warnings`.
+- [ ] **Step 3** Full gates: `cargo test && cargo clippy --all-targets -- -D warnings`.
 - [ ] **Step 4** Commit: `docs: record per-process logging in the notes, README and spec`
 
 ---
