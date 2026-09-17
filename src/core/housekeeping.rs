@@ -113,8 +113,8 @@ pub fn sweep_tmp(now: SystemTime) -> io::Result<Sweep> {
 ///
 /// Called once at startup from `main.rs`, beside [`sweep_tmp`] and through the same lease with
 /// `kind = "logs"`, so the two kinds of housekeeping neither silence nor wait for each other.
-/// Resolves the real retention and the real directory, then delegates to the two injectable
-/// cores below.
+/// This resolves the real retention, the real state root and the real process table; every
+/// decision made with them lives in [`sweep_logs_in`], which the tests drive directly.
 ///
 /// **Both knobs switch off at zero**, following `FS_MCP_TMP_KEEP_HOURS`: a retention setting
 /// whose zero empties the directory is a foot-gun, and with dozens of processes it would fire on
@@ -139,7 +139,35 @@ pub fn sweep_logs(now: SystemTime) -> io::Result<Sweep> {
         return Ok(Sweep::Disabled);
     }
     let root = paths::state_dir()?;
-    match lease_due(&root, "logs", SWEEP_INTERVAL, now) {
+    let dir = paths::sub_dir(SubDir::Logs)?;
+    // Taken once for the whole sweep rather than per file: one process snapshot is the cost, and
+    // a set that changed halfway through could judge one directory dead by a rule the next
+    // directory is spared by.
+    sweep_logs_in(&root, &dir, keep_days, max_bytes, now, live_pids().as_ref())
+}
+
+/// The whole of [`sweep_logs`]'s decision, against a state root, a log directory and a pid set
+/// supplied by the caller, so that the tests exercise the lease and both rules without a real
+/// state directory or a real process table.
+///
+/// `live` is `None` when the process listing could not be trusted (see [`live_pids`]). That is a
+/// **completed pass whose answer was "keep everything"**, not an abandoned one, so it still
+/// stamps the lease: `hidepid=2`, a restricted container and a foreign pid namespace are
+/// permanent conditions, and leaving the lease untaken would make every start of every server on
+/// such a host pay a full process enumeration - on exactly the hosts where that enumeration is
+/// already restricted.
+pub(crate) fn sweep_logs_in(
+    root: &Path,
+    dir: &Path,
+    keep_days: u64,
+    max_bytes: u64,
+    now: SystemTime,
+    live: Option<&HashSet<u32>>,
+) -> io::Result<Sweep> {
+    if keep_days == 0 && max_bytes == 0 {
+        return Ok(Sweep::Disabled);
+    }
+    match lease_due(root, "logs", SWEEP_INTERVAL, now) {
         Lease::Due => {}
         Lease::Held => return Ok(Sweep::LeaseHeld),
         // Unreachable with the literal above, and loud on purpose for the same reason as in
@@ -151,29 +179,21 @@ pub fn sweep_logs(now: SystemTime) -> io::Result<Sweep> {
             ));
         }
     }
-    // Taken once for the whole sweep rather than per file: one process snapshot is the cost, and
-    // a set that changed halfway through could judge one directory dead by a rule the next
-    // directory is spared by. Without it nothing may be deleted at all - see `live_pids`.
-    let Some(live) = live_pids() else {
-        return Ok(Sweep::Ran(0));
-    };
-    let dir = paths::sub_dir(SubDir::Logs)?;
     let mut deleted = 0;
-    if keep_days > 0 {
-        deleted += sweep_log_dirs(
-            &dir,
-            keep_days,
-            &crate::core::logging::utc_day(now),
-            &live,
-            now,
-        )?;
-    }
-    if max_bytes > 0 {
-        deleted += sweep_by_budget(&dir, max_bytes, now, &live)?;
+    // An untrusted listing deletes nothing at all: with no way to tell a live server's logs from
+    // an abandoned one's, neither rule may run, and the pass falls through to the stamp below.
+    if let Some(live) = live {
+        if keep_days > 0 {
+            let today = crate::core::logging::utc_day(now);
+            deleted += sweep_log_dirs(dir, keep_days, &today, live, now)?;
+        }
+        if max_bytes > 0 {
+            deleted += sweep_by_budget(dir, max_bytes, now, live)?;
+        }
     }
     // Stamped only after the work, and a failure to stamp is reported rather than returned, for
     // exactly the reasons spelled out in `sweep_tmp`.
-    if let Err(e) = lease_done(&root, "logs", now) {
+    if let Err(e) = lease_done(root, "logs", now) {
         warn!(
             "Housekeeping: reclaimed {deleted} log entries but could not record the lease: {e}; \
              another process may sweep again within the hour"
@@ -181,6 +201,7 @@ pub fn sweep_logs(now: SystemTime) -> io::Result<Sweep> {
     }
     Ok(Sweep::Ran(deleted))
 }
+
 
 /// The pids running on this machine, this process's own included, or `None` when they cannot be
 /// listed.
@@ -478,6 +499,15 @@ fn day_number(name: &str) -> Option<i32> {
 /// The pid only ever asks whether that process is still running, so a pid the OS has since
 /// handed to something else merely keeps a file that could have gone - the direction this module
 /// errs in everywhere.
+///
+/// **Known and deliberate:** a dead server's directory whose pid has been reused by an unrelated
+/// live process is held by the pid rule for as long as that unrelated process runs, which can be
+/// indefinitely. Keeping costs disk, deleting costs the operator their evidence, and
+/// distinguishing the two would mean recording process start times - a second identity mechanism
+/// beside [`crate::core::instance`], for a case that costs one file. The pair of rules cannot
+/// between them produce retention that never reclaims anything: [`sweep_by_budget`]'s own
+/// freshness check expires after [`LIVE_WINDOW`] whatever the pid says, so a genuinely quiet
+/// tree is always reclaimable by the budget even while the date rule holds a directory.
 fn pid_of(name: &str) -> Option<u32> {
     let (pid, instance) = name.strip_prefix("fsmcp-")?.split_once('-')?;
     instance.ends_with(".log").then_some(())?;
@@ -1083,6 +1113,52 @@ mod tests {
         ] {
             assert_eq!(pid_of(odd), None, "{odd:?}");
         }
+    }
+
+    /// A listing this process cannot trust is a completed pass that kept everything, so it
+    /// stamps the lease. Without the stamp, a host where the process table is permanently
+    /// restricted - `hidepid=2`, a container, a foreign pid namespace - would pay a full process
+    /// enumeration on every start of every server, which is the one thing the lease exists to
+    /// prevent, on exactly the hosts that can least afford it.
+    #[test]
+    fn a_refused_process_listing_still_stamps_the_lease() {
+        let scratch = tempfile::TempDir::new().expect("scratch dir");
+        let root = scratch.path();
+        let logs = root.join("logs");
+        std::fs::create_dir_all(&logs).expect("mkdir");
+        let now = SystemTime::now();
+
+        assert_eq!(
+            sweep_logs_in(root, &logs, 14, 4096, now, None).expect("sweep"),
+            Sweep::Ran(0),
+            "an untrusted listing deletes nothing"
+        );
+        assert_eq!(
+            lease_due(root, "logs", SWEEP_INTERVAL, now),
+            Lease::Held,
+            "the pass completed, so the next process must not repeat it this interval"
+        );
+    }
+
+    /// With both knobs at zero there is nothing to do, and the lease is not spent saying so.
+    #[test]
+    fn both_knobs_at_zero_disable_the_log_sweep() {
+        let scratch = tempfile::TempDir::new().expect("scratch dir");
+        let root = scratch.path();
+        let logs = root.join("logs");
+        std::fs::create_dir_all(&logs).expect("mkdir");
+        let now = SystemTime::now();
+
+        assert_eq!(
+            sweep_logs_in(root, &logs, 0, 0, now, Some(&HashSet::new())).expect("sweep"),
+            Sweep::Disabled
+        );
+        assert_eq!(lease_due(root, "logs", SWEEP_INTERVAL, now), Lease::Due);
+        // Each knob switches off on its own, so one at zero still leaves a pass to run.
+        assert_eq!(
+            sweep_logs_in(root, &logs, 0, 4096, now, Some(&HashSet::new())).expect("sweep"),
+            Sweep::Ran(0)
+        );
     }
 
     /// The recorded mtime of a file just written, which is what the sweep will compare against.
