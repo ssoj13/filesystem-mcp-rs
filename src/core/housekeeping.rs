@@ -128,8 +128,12 @@ pub fn sweep_tmp(now: SystemTime) -> io::Result<Sweep> {
 /// can therefore sit over its budget for as long as the processes filling it keep running.
 pub fn sweep_logs(now: SystemTime) -> io::Result<Sweep> {
     let keep_days = crate::core::logging::keep_days();
-    // `max_mb` is only ever compared against a sum of file sizes, so an absurd value from the
-    // environment means "never sweep" rather than an overflow; saturating keeps it that way.
+    // Saturating, never a bare `*`: the knob is in MiB and everything below it counts bytes, so
+    // `FS_MCP_LOG_MAX_MB=<u64::MAX>` parses cleanly, survives the reader, and would overflow
+    // this conversion - a debug panic in housekeeping, before the transport starts, which is the
+    // one outcome this module must never cause. `core::logging` clamps the value as well; the
+    // clamp lives in one module and the arithmetic in another, so both are deliberate. An absurd
+    // budget then means "never sweep", which is the right reading of it.
     let max_bytes = crate::core::logging::max_mb().saturating_mul(1024 * 1024);
     if keep_days == 0 && max_bytes == 0 {
         return Ok(Sweep::Disabled);
