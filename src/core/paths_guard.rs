@@ -11,6 +11,13 @@
 //! `//!` module docs are deliberately *not* scanned by the second list; they narrate history
 //! ("the pre-2026-09 location was ...") where naming an abandoned directory is the point.
 //!
+//! [`DOC_STALE`] is applied to `.md` files as well, because the rename that prompted all of this
+//! left `README.md`'s environment table pointing at the old location while every `///` line in the
+//! tree had already been corrected - and that table is what a user actually reads. Markdown has no
+//! `///` to key on, so every line of a `.md` is scanned: all of it is prose aimed at a reader. The
+//! `.md` files that legitimately name an abandoned location are *records* - this wave's own spec
+//! and plan, the working notes describing this guard - and are listed in [`MD_ALLOWED`].
+//!
 //! [`DOC_STALE`] has to stay a denylist. `env_spec`'s positive rule - every location-shaped help
 //! string must contain the state root - works there because that corpus is eleven curated
 //! strings; over free-form doc prose it would flag hundreds of innocent lines.
@@ -23,10 +30,10 @@
 //! not just the spelling it names, so one line carrying two different forbidden spellings is
 //! excused by either - no such line exists, and writing one takes effort.
 //!
-//! The check also knows only the spellings in `FORBIDDEN`, so reaching the same directories through
-//! the environment - `env::var("HOME")`, `env::var("APPDATA")`, `env::var("TEMP")` - passes
-//! silently. None exist today, and unlike the two evasions above this one could happen by accident,
-//! so it is the gap worth remembering when reviewing anything that builds a path from a variable.
+//! Reaching the same directories through the environment is in `FORBIDDEN` too, in its three
+//! `env::var` spellings: unlike the two evasions above, that one could happen by accident. Only
+//! those literal spellings are caught, so a variable name held in a `const` still slips past -
+//! the same textual limit as everywhere else here.
 //!
 //! The scan sees only this repo's own tree under `src/` and `tests/`. A path resolved inside a
 //! dependency, in a `build.rs` (which lives at the crate root, outside both), or produced by a
@@ -44,6 +51,25 @@ mod tests {
     /// be confused for one another.
     const ROOTS: &[&str] = &["src", "tests"];
 
+    /// Directory names never walked when looking for Markdown. The `.md` scan starts at the crate
+    /// root rather than at [`ROOTS`], because the file this rule exists to catch (`README.md`)
+    /// sits there - which means it also walks into everything else that accumulates at a crate
+    /// root, and only this repo's own prose is ours to keep current.
+    ///
+    /// Dot-directories go with them, as a rule rather than a list: `.git`, `.superpowers` and
+    /// `.omc` all hold agent scratch and tool state, all three are gitignored, and the next tool
+    /// to drop a `.md` somewhere would otherwise fail this test for a file nobody here wrote.
+    /// The cost is that `.github/` is unscanned too; nothing in it describes our state layout.
+    const MD_SKIP: &[&str] = &["target", "node_modules"];
+
+    /// Whether [`visit_md`] walks into `dir`: not build output, not vendored code, not tool state.
+    fn md_skipped(dir: &Path) -> bool {
+        dir.file_name().is_some_and(|n| {
+            let name = n.to_string_lossy();
+            name.starts_with('.') || MD_SKIP.contains(&name.as_ref())
+        })
+    }
+
     /// Text that means "this file resolves a platform directory by itself".
     ///
     /// `dirs::` is matched as a whole prefix rather than a list of specific accessors: the narrow
@@ -53,7 +79,19 @@ mod tests {
     ///
     /// `env::home_dir` is listed separately because `std::env::home_dir()` is a live std API and
     /// the obvious way to do the same thing without reaching for the crate at all.
-    const FORBIDDEN: &[&str] = &["dirs::", "temp_dir(", "env::home_dir"];
+    ///
+    /// The three `env::var` spellings close the one bypass that could happen by *accident*:
+    /// reading `APPDATA`, `TEMP` or `HOME` and joining onto it reaches exactly the directories
+    /// this module exists to keep out, and unlike aliasing the `dirs` crate it needs no intent to
+    /// evade. Three entries are cheaper than the paragraph that used to document the gap.
+    const FORBIDDEN: &[&str] = &[
+        "dirs::",
+        "temp_dir(",
+        "env::home_dir",
+        "env::var(\"APPDATA\")",
+        "env::var(\"TEMP\")",
+        "env::var(\"HOME\")",
+    ];
 
     /// Spellings of locations this server no longer writes to, refused in `///` doc lines.
     ///
@@ -114,6 +152,123 @@ mod tests {
             &["%LOCALAPPDATA%", "Application Support"],
         ),
     ];
+
+    /// Markdown files allowed to spell a [`DOC_STALE`] location, relative to the crate root, with
+    /// the exact spellings each may use. Same per-string discipline as [`DOC_ALLOWED`].
+    ///
+    /// Every entry is a *record* rather than a description of the current layout: a document that
+    /// says where state used to live, written at a point in time and wrong to "correct" later.
+    /// `README.md` is deliberately absent - it is the table users read, and its going stale is the
+    /// reason this rule exists.
+    const MD_ALLOWED: &[(&str, &[&str])] = &[
+        // This wave's design doc: its inventory table IS the pre-move layout, which is its point.
+        (
+            "docs/superpowers/specs/2026-09-17-state-dir-logging-stats-design.md",
+            &["computer-mcp-rs"],
+        ),
+        // The plan that produced this wave: quotes the code it replaced, old paths and all.
+        (
+            "docs/superpowers/plans/2026-09-17-state-dir-unification.md",
+            &["computer-mcp-rs", "<local data>"],
+        ),
+        // The working notes describe this very guard, so they have to name what it catches.
+        (
+            "CLAUDE.md",
+            &["<local data>", "computer-mcp-rs", "%LOCALAPPDATA%"],
+        ),
+    ];
+
+    /// A Markdown line naming an abandoned location is an offence unless the file is cleared for
+    /// that spelling. Unlike [`doc_offence`] there is no `///` prefix to key on; see the module
+    /// doc for why every line of a `.md` is fair game.
+    fn md_offence(line: &str, exempt: &[&str]) -> bool {
+        DOC_STALE.iter().any(|s| line.contains(s)) && !exempt.iter().any(|e| line.contains(e))
+    }
+
+    /// The `.md` rule catches the exact line that went stale this wave - `README.md`'s environment
+    /// table - and leaves a corrected one alone.
+    #[test]
+    fn md_denylist_catches_a_stale_readme_row() {
+        // `FS_MCP_MEMORY_DB`'s row as it read before this wave corrected it.
+        let stale = "| `FS_MCP_MEMORY_DB` | *(unset)* | Memory database path. Unset = system data dir |";
+        assert!(md_offence(stale, &[]), "the denylist must catch: {stale}");
+        // Prose, not only table rows: markdown has no `///` marker to key on.
+        assert!(md_offence(
+            "Models are cached under `<data>/computer-mcp-rs/ocrs`.",
+            &[]
+        ));
+
+        // Correctly anchored prose is not an offence.
+        assert!(!md_offence(
+            "| `FS_MCP_MEMORY_DB` | *(unset)* | Unset = `~/.filesystem-mcp-rs/memory2.db` |",
+            &[]
+        ));
+        // An exemption clears the spelling it names, and only that one.
+        assert!(!md_offence(stale, &["system data dir"]));
+        assert!(md_offence(stale, &["computer-mcp-rs"]));
+    }
+
+    /// No `.md` file outside [`MD_ALLOWED`] may point the reader at an abandoned location.
+    #[test]
+    fn docs_name_the_current_location() {
+        let mut offenders = Vec::new();
+        visit_md(&crate_root(), &crate_root(), &mut offenders);
+        assert!(
+            offenders.is_empty(),
+            "Markdown must name the current state location (~/.filesystem-mcp-rs); a file that \
+             RECORDS where state used to live belongs in MD_ALLOWED with its reason; \
+             offenders: {offenders:#?}"
+        );
+    }
+
+    /// Walk `dir` for `.md` files, appending `path:line: text` for every unexempt stale line.
+    /// Mirrors [`visit`] minus the [`FORBIDDEN`] pass: a `.md` file holds no code to guard.
+    fn visit_md(root: &Path, dir: &Path, offenders: &mut Vec<String>) {
+        let entries = match std::fs::read_dir(dir) {
+            Ok(entries) => entries,
+            Err(e) => {
+                offenders.push(format!("{}: cannot list directory: {e}", dir.display()));
+                return;
+            }
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                if !md_skipped(&path) {
+                    visit_md(root, &path, offenders);
+                }
+                continue;
+            }
+            if path.extension().is_none_or(|e| e != "md") {
+                continue;
+            }
+            let rel = path
+                .strip_prefix(root)
+                .unwrap_or(&path)
+                .to_string_lossy()
+                .replace(MAIN_SEPARATOR, "/");
+            let exempt: &[&str] = MD_ALLOWED
+                .iter()
+                .find(|(file, _)| *file == rel)
+                .map_or(&[], |(_, spellings)| *spellings);
+            let text = match std::fs::read_to_string(&path) {
+                Ok(text) => text,
+                Err(e) => {
+                    offenders.push(format!("{rel}: cannot read, so cannot be cleared: {e}"));
+                    continue;
+                }
+            };
+            for (i, line) in text.lines().enumerate() {
+                if md_offence(line, exempt) {
+                    offenders.push(format!(
+                        "{rel}:{}: doc names an abandoned location: {}",
+                        i + 1,
+                        line.trim()
+                    ));
+                }
+            }
+        }
+    }
 
     /// Every `.rs` file under `src/` and `tests/` must get its state locations from `core::paths`,
     /// and no `///` line may point the reader at a location this server abandoned.
@@ -192,6 +347,23 @@ mod tests {
             dead.is_empty(),
             "ALLOWED/DOC_ALLOWED name files that do not exist or are outside {ROOTS:?}, so the \
              exemption is never consulted; delete these entries: {dead:#?}"
+        );
+    }
+
+    /// The same rule for [`MD_ALLOWED`], whose keys are relative to the crate root instead of to
+    /// [`ROOTS`]. A spec or plan renamed later must not leave its exemption behind for the next
+    /// document of that name to inherit.
+    #[test]
+    fn md_allowed_entries_all_exist() {
+        let dead: Vec<&str> = MD_ALLOWED
+            .iter()
+            .map(|(file, _)| *file)
+            .filter(|file| !crate_root().join(file).is_file())
+            .collect();
+        assert!(
+            dead.is_empty(),
+            "MD_ALLOWED names files that do not exist, so the exemption is never consulted; \
+             delete these entries: {dead:#?}"
         );
     }
 

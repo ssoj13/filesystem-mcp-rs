@@ -75,13 +75,22 @@ below, the `env` block written by `install`, and that command all come from one 
 (`src/env_spec.rs`), and only keys whose feature is compiled in are shown. Precedence is
 **CLI arg > env > default**, and a blank value means "unset", not "empty".
 
+### State
+Everything this server owns lives under one per-user root, identically on every platform. The
+keys below are listed first because the locations named further down resolve relative to it.
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `FS_MCP_STATE_DIR` | *(unset)* | State directory for every file this server owns; must be absolute. Unset = `~/.filesystem-mcp-rs` |
+| `FS_MCP_TMP_KEEP_HOURS` | `24` | Delete scratch under `<state>/tmp` older than this many hours. `0` = never sweep |
+
 ### Core
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `FS_MCP_HTTP_ALLOW_LIST` | `*` | HTTP allowlist domains (comma/semicolon/whitespace separated). Use `*` to allow all |
 | `FS_MCP_S3_ALLOW_LIST` | `*` | S3 allowlist buckets (comma/semicolon/whitespace separated). Use `*` to allow all |
 | `FS_MCP_MEMORY_ACCESS_MODE` | `enforce_private_only` | Memory access mode: `enforce_private_only`, `allow_all`, or `enforce_visibility` |
-| `FS_MCP_MEMORY_DB` | *(unset)* | Memory database path. Unset = system data dir |
+| `FS_MCP_MEMORY_DB` | *(unset)* | SQLite file for the memory tools. Unset = `~/.filesystem-mcp-rs/memory2.db` |
 | `DISABLE_THOUGHT_LOGGING` | *(unset)* | Set to `true` to disable thought logging |
 
 ### Computer control (`ctl-*` features)
@@ -92,7 +101,7 @@ below, the `env` block written by `install`, and that command all come from one 
 | `FS_MCP_CTL_ARM_TTL_MS` | `30000` | How long one `arm` call keeps input tools unlocked |
 | `FS_MCP_CTL_OPS_PER_MIN` | `240` | Runaway cap on executed input ops per minute (also `--ctl-ops-per-min`) |
 | `FS_MCP_CTL_BACKEND` | *(unset)* | Pin the desktop backend. Unset = auto-detect; `null` disables input (testing) |
-| `FS_MCP_CTL_OCRS_MODELS_DIR` | *(unset)* | Cache dir for downloaded `ocrs` models |
+| `FS_MCP_CTL_OCRS_MODELS_DIR` | *(unset)* | Cache dir for the downloaded `ocrs` models. Unset = `~/.filesystem-mcp-rs/ocrs` |
 
 ### LLM API Keys
 | Variable | Description |
