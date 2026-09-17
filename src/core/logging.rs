@@ -104,7 +104,7 @@ pub struct Logging {
 /// Decide the plan, then carry it out, returning what was actually done.
 ///
 /// Infallible on purpose: logging must never prevent the transport from starting, so there is no
-/// error for the caller to propagate. Every degradation — an unopenable file, an unusable state
+/// error for the caller to propagate. Every degradation — an unopenable file, an unusable log
 /// directory, a subscriber someone else already installed — is reported through the returned
 /// [`Logging`] instead. Called once, from `main`.
 pub fn init_logging(mode: TransportMode, log_file: Option<String>) -> Logging {
@@ -172,16 +172,23 @@ fn degraded_line(reason: &str) -> String {
 
 /// Decide the plan against the real state directory.
 ///
-/// Resolves `<state>/logs` (creating it) and hands the rest to [`target_for_in`]; an unusable
-/// state directory arrives there as `None`. The directory is resolved even when `--log` names a
-/// file elsewhere, which costs one empty directory and keeps this wrapper to one behaviour.
+/// Resolves `<state>/logs` (creating it) and hands the rest to [`target_for_in`], which sees
+/// `None` when it cannot be made. The directory is resolved even when `--log` names a file
+/// elsewhere, which costs one empty directory and keeps this wrapper to one behaviour.
+///
+/// **`None` is not "the state root is unusable".** `main` validates the root before logging is
+/// initialised and refuses to start without it, because every other consumer of it - the memory
+/// database, the blob spool, captures - needs it too. What is left, and what the degradation
+/// below is for, is `<state>/logs` itself being unmakeable under a root that is fine: a plain
+/// file already sitting at that name, a permission set on that one directory. `paths`'
+/// `a_usable_root_can_still_have_an_unusable_subdir` pins that this can happen at all.
 pub fn target_for(mode: TransportMode, log_file: Option<String>, level: Option<&str>) -> Plan {
     let root = crate::core::paths::sub_dir(crate::core::paths::SubDir::Logs);
     target_for_in(root.as_deref().ok(), mode, log_file, level)
 }
 
-/// Decide the plan. `root` is `<state>/logs`, or `None` when the state directory is unusable;
-/// `level` is the raw `FS_MCP_LOG` value (already blank-filtered).
+/// Decide the plan. `root` is `<state>/logs`, or `None` when that directory cannot be made (see
+/// [`target_for`]); `level` is the raw `FS_MCP_LOG` value (already blank-filtered).
 ///
 /// Takes the log directory as an argument, like [`crate::core::paths`]'s own resolvers, so the
 /// decision can be tested against a `TempDir` instead of creating directories under the real
@@ -201,7 +208,7 @@ fn target_for_in(
         Some(p) => PathBuf::from(p),
         None => match root.map(|r| log_path_in(r, &today())) {
             Some(Ok(p)) => p,
-            // The state directory is unusable, or the dated directory under it cannot be made.
+            // `<state>/logs` cannot be made, or the dated directory under it cannot be.
             // stdio still must not touch stderr, so it runs without logs rather than breaking
             // the handshake; stream can still say so.
             Some(Err(_)) | None => {
@@ -578,10 +585,16 @@ mod tests {
         assert!(sinks(&stream).1);
     }
 
-    /// With no usable state directory, stdio goes quiet and stream keeps the one channel it has.
+    /// With no usable log directory, stdio goes quiet and stream keeps the one channel it has.
     /// Neither refuses to start, which is the whole point of the degradation.
+    ///
+    /// `None` here is `<state>/logs` being unmakeable, not the state root: the root is validated
+    /// in `main` before this runs and startup fails outright without it, so a test pinning that
+    /// would pin a state production cannot reach. The reachable cause is a file sitting where the
+    /// subdirectory belongs, which `paths`' `a_usable_root_can_still_have_an_unusable_subdir`
+    /// demonstrates.
     #[test]
-    fn an_unusable_state_directory_degrades_per_transport() {
+    fn an_unusable_log_directory_degrades_per_transport() {
         assert_eq!(
             target_for_in(None, TransportMode::Stdio, None, None),
             Plan::Disabled
@@ -590,7 +603,7 @@ mod tests {
             target_for_in(None, TransportMode::Stream, None, None),
             Plan::Stderr
         );
-        // An explicit `--log` needs no state directory, so it survives one being unusable.
+        // An explicit `--log` needs no log directory at all, so it survives one being unusable.
         assert!(matches!(
             target_for_in(None, TransportMode::Stdio, Some("x.log".into()), None),
             Plan::File(_)

@@ -632,6 +632,26 @@ mod tests {
         assert_eq!(SubDir::Tmp.as_str(), "tmp");
     }
 
+    /// A usable root does not imply a usable subdirectory.
+    ///
+    /// `main` validates the state root before logging is initialised and refuses to start
+    /// without it, so "the root is unusable" is not a state the rest of the process can observe.
+    /// A subdirectory under a perfectly good root is another matter - here `logs` already exists
+    /// as a plain file - and that is the failure
+    /// [`crate::core::logging::target_for`] degrades on. Pinned here so the degradation path
+    /// over there is not mistaken for dead code and deleted.
+    #[test]
+    fn a_usable_root_can_still_have_an_unusable_subdir() {
+        let base = tempfile::TempDir::new().expect("scratch dir");
+        let root = base.path().join("state");
+        resolve_root(Some(root.clone())).expect("the root itself is fine");
+        std::fs::write(root.join("logs"), b"not a directory").expect("write");
+        assert!(
+            resolve_sub(Some(root), SubDir::Logs).is_err(),
+            "a file where the subdirectory belongs must be an error, not a silent success"
+        );
+    }
+
     /// Scratch files land under the state root's `tmp/`, never in the OS temp directory.
     /// This pins the location the scratch call sites (captures, annotations, `run_command`
     /// stream logs, the temporary `.bat`, the blob spool) resolve through, and fails loudly
