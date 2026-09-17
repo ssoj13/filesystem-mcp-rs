@@ -44,12 +44,30 @@ const MAX_DEPTH: u32 = 64;
 
 /// How recently a log file must have been written to count as possibly still in use.
 ///
-/// The pid set answers "is that process running", but a file whose pid has already exited and
-/// whose pid has since been *reused* by something unrelated is not in it, and neither is a file
-/// written by a process that died a minute ago and is about to be replaced. An hour of quiet is
-/// a cheap second opinion, and it is what makes [`sweep_by_budget`] a soft limit rather than a
-/// rule that can reach into a log being appended to right now.
-const LIVE_WINDOW: Duration = Duration::from_secs(3600);
+/// **This, not the pid set, is what makes deleting another process's log safe.** The pid set
+/// answers "is that process running" only as well as the process listing behind it, and a listing
+/// can be short in ways this process cannot detect: under Linux `hidepid=2`, inside a restricted
+/// container, or seen from a foreign pid namespace, a sibling server owned by another user is
+/// simply invisible. Our own pid - the one entry [`trust_listing`] can check for - stays visible
+/// in every one of those cases, so such a listing passes every check this module can make while
+/// reading "that server is gone". A file's own mtime is the single piece of evidence none of
+/// those conditions can take away, and it is weighed per file, so it costs nothing elsewhere.
+///
+/// A day, not an hour. The window has to bound the gap between two writes by a server that is
+/// *alive*, and an MCP server is idle for exactly as long as its client is idle: overnight is
+/// ordinary and an hour bounds nothing. A day is the same reading of "unremarkable" that
+/// `FS_MCP_TMP_KEEP_HOURS` already defaults to. What it costs is only that a log whose process
+/// really did exit becomes reclaimable a day later than it used to - and both rules that consult
+/// this are bounds on disk rather than promises about it ([`sweep_by_budget`] is a soft limit by
+/// construction), so a day of latency for a rule that holds without a trustworthy process table
+/// is cheap.
+///
+/// **What it still does not cover**, said plainly rather than papered over: a live server that
+/// logs nothing at all for longer than this window, on a host where the listing is *also*
+/// truncated, is indistinguishable from a dead one by any evidence this process can gather.
+/// Closing that needs a liveness signal the process table cannot hide - an OS-level lock held on
+/// the log file for as long as it is open - which is a change to the writer, not to the sweep.
+const LIVE_WINDOW: Duration = Duration::from_secs(24 * 3600);
 
 /// What one sweep did. The three cases are distinct because a caller may need to act on them
 /// differently: wave 3's statistics compaction has to know whether to reschedule itself, and
@@ -225,13 +243,15 @@ pub(crate) fn sweep_logs_in(
 ///
 /// **A listing that does not contain the process doing the listing is not a listing**, and is
 /// refused. With both patterns `None` the call has no real error path, so `Err` is the failure
-/// that cannot happen; the one that can is an `Ok` holding too FEW pids - Linux `hidepid=2`, a
-/// restricted container, a pid namespace where a sibling server is simply invisible. Trusted, a
-/// short list makes a live server's log look abandoned, and [`sweep_log_dirs`] would hand the
-/// directory it is writing in to `remove_dir_all`. Own pid is the one entry this process can
-/// check for, so it is the test for the whole listing rather than something to paper over by
-/// inserting it. That judgement is [`trust_listing`], which is pure and tested; this function is
-/// only the wiring that fetches the listing for it.
+/// that cannot happen; the one that can is an `Ok` holding too FEW pids. Own pid is the one entry
+/// this process can check for, so it is the test for the whole listing rather than something to
+/// paper over by inserting it. That judgement is [`trust_listing`], which is pure and tested;
+/// this function is only the wiring that fetches the listing for it.
+///
+/// Read [`trust_listing`] for how far that goes, because it is narrower than it sounds: it
+/// catches an enumeration that came back empty or wholesale wrong, and it cannot catch one
+/// truncated by `hidepid=2`, a restricted container or a foreign pid namespace, every one of
+/// which leaves our own pid visible. Deletion is kept safe under those by [`LIVE_WINDOW`].
 fn live_pids() -> Option<HashSet<u32>> {
     let found = match crate::tools::process::search_processes(None, None) {
         Ok(found) => found,
@@ -253,6 +273,25 @@ fn live_pids() -> Option<HashSet<u32>> {
 /// that function is only the fetch: as a pure function it can be tested in both directions, and
 /// `cargo mutants` reported the fused version as a place where the trust rule could be deleted
 /// outright with the suite still green.
+///
+/// **What this catches is an enumeration that failed wholesale** - an empty set, or one from a
+/// listing so restricted that not even the caller appears in it. That is worth catching, because
+/// an empty set reads as "nothing on this machine is alive" and would hand every log file on it
+/// to the sweep at once.
+///
+/// **It does not catch a truncated listing, and must not be read as if it did.** `hidepid=2`, a
+/// restricted container and a foreign pid namespace all leave this process's own pid plainly
+/// visible - `/proc/self` exists under `hidepid=2`, and a pid is always visible inside its own
+/// namespace - so a listing holding our own user's processes and none of another user's passes
+/// here intact. Nor can the log tree be cross-examined for the missing pids: a tree legitimately
+/// accumulates the pids of servers that have exited, so "a pid named in the tree that is not in
+/// the listing" is the *ordinary* state of a healthy machine, and a rule refusing on it would
+/// switch the sweep off permanently after the first server ever exited. Absent-because-hidden
+/// and absent-because-dead are not distinguishable from in here at all.
+///
+/// That ambiguity is therefore answered per file rather than per listing, where it is harmless
+/// because both readings call for the same action: [`LIVE_WINDOW`] keeps any log written recently
+/// enough to belong to something still running, whatever the process table says about it.
 ///
 /// The set is returned untouched on success. Nothing is inserted into it, deliberately: inserting
 /// `own` is precisely what would hide the signal this rule reads.
@@ -362,15 +401,17 @@ pub(crate) fn sweep_log_dirs(
 
 /// Whether every entry of a dated log directory is the quiet log of a process that has exited.
 ///
-/// `false` covers "a live process is writing in there", "something in there was written in the
-/// last hour" and "there is something in there I do not recognise" alike: all three call for the
+/// `false` covers "a live process is writing in there", "something in there was written within
+/// [`LIVE_WINDOW`]" and "there is something in there I do not recognise" alike: all three call for the
 /// same response, which is to leave the directory alone. An unreadable directory or entry is an
 /// error, never a partial reading - a partial one would be an argument for deletion.
 ///
-/// The mtime is a second opinion on `live`, not a refinement of it. `live` comes from a process
-/// listing, and a listing can be short (see [`live_pids`]) in ways this module cannot detect; a
-/// file being appended to right now says so in its own right. Either check alone would close
-/// the hole today, which is why both are here: a later change to one input cannot reopen it.
+/// The two checks are not interchangeable, and it matters which one carries the weight. `live`
+/// comes from a process listing, and a listing can be truncated in ways no check inside this
+/// process can detect (see [`trust_listing`]); the mtime is the file speaking for itself, and no
+/// process table can contradict it. So [`LIVE_WINDOW`] is what closes the hole, and removing it
+/// would reopen it outright, while `live` only makes the sweep quicker to reclaim logs it is
+/// already entitled to. Keep both, but do not read the pid check as a safety net.
 fn is_reclaimable(dir: &Path, live: &HashSet<u32>, now: SystemTime) -> io::Result<bool> {
     for entry in std::fs::read_dir(dir)? {
         let entry = entry?;
@@ -1068,11 +1109,12 @@ mod tests {
         );
     }
 
-    /// A file written in the last hour keeps its directory whatever the pid set says.
+    /// A file written within [`LIVE_WINDOW`] keeps its directory whatever the pid set says.
     ///
-    /// The second opinion on `live`, and the one that survives a process listing this module
-    /// cannot tell is short - `hidepid=2`, a container, a pid namespace - where the writer's pid
-    /// is simply absent and the directory would otherwise look abandoned.
+    /// This is the check that carries the safety property, and the only one that survives a
+    /// process listing this module cannot tell is short - `hidepid=2`, a container, a foreign pid
+    /// namespace - where the writer's pid is simply absent and the directory would otherwise look
+    /// abandoned.
     #[test]
     fn an_expired_directory_written_to_just_now_is_kept() {
         let dir = tempfile::TempDir::new().expect("tempdir");
@@ -1089,23 +1131,17 @@ mod tests {
             0
         );
         assert!(old.is_dir(), "a directory being written to must survive");
-        // Two hours of quiet later it is reclaimed, so the assertion above pins the window and
+        // Two days of quiet later it is reclaimed, so the assertion above pins the window and
         // not merely the fact that nothing is ever deleted.
         assert_eq!(
-            sweep_log_dirs(
-                dir.path(),
-                14,
-                "2026-09-17",
-                &HashSet::new(),
-                now + 2 * HOUR
-            )
-            .expect("sweep"),
+            sweep_log_dirs(dir.path(), 14, "2026-09-17", &HashSet::new(), now + 2 * DAY)
+                .expect("sweep"),
             1
         );
     }
 
-    /// The budget deletes oldest first, and stops before anything written in the last hour or
-    /// belonging to a process that is still running.
+    /// The budget deletes oldest first, and stops before anything written within
+    /// [`LIVE_WINDOW`] or belonging to a process that is still running.
     #[test]
     fn the_size_budget_spares_live_files() {
         let dir = tempfile::TempDir::new().expect("tempdir");
@@ -1134,7 +1170,7 @@ mod tests {
         assert!(!old.exists(), "the oldest file goes first");
         assert!(
             live.exists(),
-            "a file written in the last hour is never budgeted away"
+            "a file written within the live window is never budgeted away"
         );
     }
 
@@ -1245,6 +1281,78 @@ mod tests {
             None,
             "an empty listing is not a listing either"
         );
+    }
+
+    /// A live sibling the process listing cannot see keeps its whole start-day directory.
+    ///
+    /// This is the case [`trust_listing`] is often misread as covering and cannot: server B runs
+    /// as another user, or in another pid namespace, so our listing simply does not name it -
+    /// while naming us, which is all that check can test for. B started twenty days ago, past any
+    /// ordinary `keep_days`, and last logged two hours ago because its client has been quiet.
+    ///
+    /// Nothing but [`LIVE_WINDOW`] stands between that directory and `remove_dir_all`, and on
+    /// Unix the unlink of an open file succeeds silently: B would go on writing into an unlinked
+    /// inode and the operator would lose every line from that moment with no error anywhere. So
+    /// this test fails the instant the window is shortened back below a live server's idle gap -
+    /// which is exactly what it is here to prevent.
+    #[test]
+    fn a_live_siblings_directory_survives_a_listing_that_cannot_see_it() {
+        let scratch = tempfile::TempDir::new().expect("scratch dir");
+        let root = scratch.path();
+        let logs = root.join("logs");
+        let now = SystemTime::now();
+        let start_day = crate::core::logging::utc_day(now - 20 * DAY);
+        let sibling = write_log(
+            &logs,
+            &start_day,
+            "fsmcp-4242-aaaaaaaa.log",
+            4096,
+            now - 2 * HOUR,
+        );
+
+        // A listing that passes every check this module can make: it contains the process doing
+        // the listing. It just does not contain 4242, because 4242 is not ours to see.
+        let own = crate::core::instance::pid();
+        let live = trust_listing(HashSet::from([own]), own).expect("a listing naming us is taken");
+
+        assert_eq!(
+            sweep_logs_in(root, &logs, 14, 0, now, Some(&live)).expect("sweep"),
+            Sweep::Ran(0),
+            "a directory whose log was written within the live window is not this sweep's to take"
+        );
+        assert!(
+            sibling.is_file(),
+            "a live server's log must survive a listing that cannot see the server"
+        );
+    }
+
+    /// The same sibling, against the budget rule, which reaches into today and so gets there
+    /// faster. A budget of one byte is unsatisfiable on purpose: the rule must still refuse to
+    /// close the gap with a file that was written two hours ago.
+    #[test]
+    fn the_budget_spares_a_live_sibling_the_listing_cannot_see() {
+        let scratch = tempfile::TempDir::new().expect("scratch dir");
+        let root = scratch.path();
+        let logs = root.join("logs");
+        let now = SystemTime::now();
+        let today = crate::core::logging::utc_day(now);
+        let sibling = write_log(
+            &logs,
+            &today,
+            "fsmcp-4242-aaaaaaaa.log",
+            4096,
+            now - 2 * HOUR,
+        );
+
+        let own = crate::core::instance::pid();
+        let live = trust_listing(HashSet::from([own]), own).expect("a listing naming us is taken");
+
+        assert_eq!(
+            sweep_logs_in(root, &logs, 0, 1, now, Some(&live)).expect("sweep"),
+            Sweep::Ran(0),
+            "the budget is a soft limit and stops at a file that may still be written to"
+        );
+        assert!(sibling.is_file(), "the sibling's current log must survive");
     }
 
     /// With the budget off, the date rule runs alone - and the count it returns is the count of
