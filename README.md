@@ -82,8 +82,25 @@ keys below are listed first because the locations named further down resolve rel
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `FS_MCP_STATE_DIR` | *(unset)* | State directory for every file this server owns; must be absolute. Unset = `~/.filesystem-mcp-rs` |
-| `FS_MCP_LOG` | `info` | Log level: `trace`/`debug`/`info`/`warn`/`error`, or `off` to log nothing. Each run writes one file under `~/.filesystem-mcp-rs/logs/<date>/` |
+| `FS_MCP_LOG` | `info` | Level for this server's log under `<state>/logs`: `trace`\|`debug`\|`info`\|`warn`\|`error`, or `off`. Bare words are levels; a target filter needs `=` or `,` (`info,hyper=warn`) |
+| `FS_MCP_LOG_KEEP_DAYS` | `14` | Delete dated log directories under `<state>/logs` older than this many days. `0` = never sweep |
+| `FS_MCP_LOG_MAX_MB` | `512` | Total size budget (MiB) for `<state>/logs`; oldest files are deleted first once it is exceeded. `0` = no budget |
 | `FS_MCP_TMP_KEEP_HOURS` | `24` | Delete scratch under `<state>/tmp` older than this many hours. `0` = never sweep |
+
+#### Logs
+**Logging is on by default in every transport mode**, at `info`. Each run writes its own file,
+`<state>/logs/<YYYY-MM-DD>/fsmcp-<pid>-<instance>.log` — one file per process, so dozens of
+servers on one machine never contend for a shared file and there is no rotation to arbitrate. A
+new day is a new directory; a process that outlives midnight keeps the file it opened. `--log
+<FILE>` writes to that path instead, and `FS_MCP_LOG=off` is the way out: no subscriber, no file.
+
+Under stdio the file is the *only* sink — anything on stderr during the MCP handshake closes the
+connection — so a log file that cannot be opened leaves that run silent rather than breaking the
+transport. Stream mode also writes to stderr, which nobody is parsing.
+
+Old logs are reclaimed on start by the same leased housekeeping sweep that clears `<state>/tmp`,
+by age (`FS_MCP_LOG_KEEP_DAYS`) and then by total size (`FS_MCP_LOG_MAX_MB`). A file belonging to
+a live process is never deleted, and today's directory is never touched.
 
 ### Core
 | Variable | Default | Description |
@@ -931,7 +948,7 @@ Options:
   -s, --stream                HTTP mode (default: stdio)
   -p, --port <PORT>           HTTP port [default: 8000]
   -b, --bind <ADDR>           Bind address [default: 127.0.0.1]
-  -l, --log [<FILE>]          Log to file [default: filesystem-mcp-rs.log]
+  -l, --log [<FILE>]          Log to this file instead of the per-process default
   -h, --help                  Print help
   -V, --version               Print version
 ```
@@ -942,18 +959,19 @@ cargo test              # All tests (unit + integration + HTTP transport)
 cargo test --test http_transport  # HTTP transport only
 ```
 
-Tests:
-- **222 unit tests** (was 158):
-  - Core: hash (12), compare (18), duplicates (8), watch (6), json_reader (10), pdf_reader (10), archive (4), stats (4), process (23)
-  - Text: line_edit (5), bulk_edit (7), edit (4), grep (6), search (5)
-  - Binary: binary (10)
-  - **New - wave2** (29): net (6), proc (5), sys (5), file (7), util (6)
-  - **New - xlsx** (6): read, info, unicode support
-  - **New - docx** (3): error handling
-  - **New - llm** (5): transform, model mapping
-- **39 integration tests**: file operations, search, grep, extract, binary, pagination
-- **4 HTTP transport tests**: server startup, health, MCP endpoint
+`cargo test` is the gate, and it runs **637 tests** across three suites:
+
+- **569 unit tests** (`src/`, 5 ignored): path resolution and the centralization guard, housekeeping
+  sweeps and leases, logging plans and retention, the env registry, text/binary/archive/document
+  readers, process and system queries, and the computer-control driver.
+- **64 integration tests** (`tests/integration.rs`): file operations, search, grep, extract,
+  binary, pagination.
+- **4 HTTP transport tests** (`tests/http_transport.rs`): server startup, health, MCP endpoint,
+  logging to an explicit `--log` path.
 - **Unicode tested**: Russian (Привет), Chinese (你好), Emoji (🦀)
+
+Every spawned server in the suite gets a `FS_MCP_STATE_DIR` of its own under a `TempDir`, so a
+full run leaves nothing in the real `~/.filesystem-mcp-rs/`.
 
 ## Development
 

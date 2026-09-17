@@ -2,6 +2,35 @@
 
 ## [Unreleased]
 
+### One log file per process, on by default
+
+- **Every run now writes its own log**, `~/.filesystem-mcp-rs/logs/<YYYY-MM-DD>/fsmcp-<pid>-<instance>.log`,
+  in every transport mode and without a flag. Dozens of these servers run at once on one machine,
+  so there is no shared file and therefore no rotation to arbitrate: a new process is a new file,
+  a new day is a new directory. `tracing-appender` exists to rotate a shared file and is
+  deliberately not used. Wave 1's migration warnings, which previously had nowhere to go, now
+  land here.
+- **`--log <FILE>` still wins** when an operator names a path, and **`FS_MCP_LOG=off`** is the way
+  out: no subscriber, no file.
+- **stdio still never writes to stderr.** Anything on stderr during the MCP handshake closes the
+  connection, so under stdio the file is the only sink, and a file that cannot be opened leaves
+  that run silent rather than breaking the transport. The rule is one pure function over the
+  logging plan, so a stderr sink added to any stdio path fails a test instead of a handshake.
+  Why a run is quieter than it was asked to be is kept and will be reported by the `health`
+  section rather than through a second, bespoke channel.
+- **New `FS_MCP_LOG` (default `info`), `FS_MCP_LOG_KEEP_DAYS` (14) and `FS_MCP_LOG_MAX_MB` (512).**
+  `info`, not `warn`: every event this wave exists to make visible — "Migrated X -> Y", "memory
+  tools disabled", "removed N stale scratch files" — is logged at `info`. A mistyped level is now
+  complained about in the log rather than silently swallowing it: `FS_MCP_LOG=bogus` parses as a
+  *target* filter, which used to switch the rest of the log off and produce a zero-byte file.
+- **Logs are reclaimed on start** by the same leased housekeeping sweep that clears `<state>/tmp`,
+  by age and then by total size. A dated directory is aged by its name, never by walking its tree;
+  today's directory is never touched and a file whose process is still alive is never deleted —
+  on Windows that unlink fails, and on Unix the server would go on writing into an unlinked inode.
+- **CI now runs `cargo clippy --all-targets -- -D warnings`** on every OS alongside `cargo test`
+  and `cargo fmt --check`. It was a stated gate of this project that existed only as a habit;
+  clippy runs per-OS rather than once because half this crate is behind `#[cfg(windows)]`.
+
 ### One state directory: `~/.filesystem-mcp-rs/`
 
 - **Every durable and scratch file now lives under a single per-user root**, identical on Windows,

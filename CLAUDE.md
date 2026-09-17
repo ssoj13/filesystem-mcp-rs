@@ -10,7 +10,12 @@ Format: `cargo fmt --check` is a gate (CI runs it on Linux only). The crate was 
 The test gate is **plain `cargo test`**, never `--bin filesystem-mcp-rs`. There is no lib target, so
 `--lib` cannot run; but `--bin` silently skips `tests/integration.rs` and `tests/http_transport.rs`
 (three binaries: unit + integration + http_transport). `--bin <filter>` is fine to iterate on one
-unit module; it is not the gate.
+unit module; it is not the gate. The gate is 637 tests: 569 unit + 64 integration + 4 http.
+`cargo mutants --in-diff <diff>` is how this project checks whether the tests actually test
+anything — a surviving mutant is a line no assertion pins. It builds its baseline from HEAD, so it
+needs a COMMITTED, compiling tree: commit first, then run. `mutants.out/` is gitignored.
+CI (`.github/workflows/ci.yml`) runs all three gates; clippy runs on every OS, because half this
+crate is behind `#[cfg(windows)]` and a Linux-only pass never sees the driver.
 
 ## Key layout facts
 - Tools live in `src/tools/*.rs`, registered via `#[cfg(feature = "...")]` in `src/tools/mod.rs`.
@@ -21,6 +26,15 @@ unit module; it is not the gate.
   client config (blank = unset), the hint block renders from it, `--list-env` prints it. Never
   hardcode an env key or its default anywhere else; readers must go through `env_spec::get`
   (blank/whitespace = unset) or a blank config value becomes a literal empty path/mode.
+- **Per-process logging** (`src/core/logging.rs`, wave 2): on by default in every transport at
+  `info`, one file per process at `<state>/logs/<YYYY-MM-DD>/fsmcp-<pid>-<instance>.log`. No
+  shared file, therefore no rotation and no `tracing-appender`. `--log <FILE>` overrides the path;
+  `FS_MCP_LOG=off` is the only opt-out. **stdio still never touches stderr** — that rule lives in
+  the pure `sinks(&Plan)`, so any stdio path gaining a stderr sink fails a test. Retention
+  (`FS_MCP_LOG_KEEP_DAYS`/`_MAX_MB`) runs in `core::housekeeping` under wave 1's lease, ages a
+  dated directory by its NAME, and never deletes a file whose pid is still alive.
+- Any live run of the binary must point `FS_MCP_STATE_DIR` at a temp directory, or it writes into
+  the developer's real `~/.filesystem-mcp-rs/`. The suite does this for every server it spawns.
 - `src/tools/computer/` — self-contained computer-control module (extractable; recipe in mod.rs):
   driver/mod.rs = OS seam (imp backend selection, portable types, Caps), safety/input/win/capture/
   steps/wait/uia/ocr/ocrs_local/find/clip/notify + server_*.rs (per-domain #[tool_router] impls).

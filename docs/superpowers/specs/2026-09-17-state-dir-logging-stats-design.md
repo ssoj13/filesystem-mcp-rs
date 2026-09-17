@@ -153,8 +153,14 @@ The level defaults to **`info`**, not the `warn` this section first drafted: "Mi
 "memory tools disabled" and "removed N stale scratch files" are all `info!`, so a warn-only
 default would hide exactly the record this wave exists to put in front of an operator.
 
-**Retention.** The housekeeping sweep deletes log directories older than `FS_MCP_LOG_KEEP_DAYS`
-(default 14) and, within the current day, files over `FS_MCP_LOG_MAX_MB` total, oldest first.
+**Retention, as built.** The housekeeping sweep deletes dated log directories older than
+`FS_MCP_LOG_KEEP_DAYS` (default 14), aging each by its NAME rather than by walking its tree, and
+then deletes oldest-first across the whole of `logs/` until it is under `FS_MCP_LOG_MAX_MB`. The
+budget is a **soft** limit: the sweep never deletes a file whose pid is still alive and never
+touches today's directory, and it stops at the first file it may not delete. A process that
+outlives midnight keeps writing into its start-of-day directory, so that directory becomes
+deletable only once it holds no live-pid files — on Windows the unlink would fail, and on Unix
+the server would go on writing into an unlinked inode and its logs would vanish with no trace.
 Either knob set to `0` switches that half of the sweep **off**, following `FS_MCP_TMP_KEEP_HOURS`:
 a retention knob whose zero destroys data would fire on every one of dozens of starts. The
 lease is a **marker file per kind**, `<state>/.housekeeping-<kind>`, holding the Unix timestamp of
