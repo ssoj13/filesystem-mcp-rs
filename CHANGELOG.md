@@ -6,14 +6,21 @@
 
 - **`src/core/tool_surface_guard.rs` enforces `docs/TOOL_STYLE.md` on every `cargo test`**, over the
   real router `tools/list` serves: a description is at most 600 chars, description + schema at most
-  2,000, no two tools may ship a costly byte-identical schema, **and every parameter a description
-  names must actually exist**. That last rule checks truth rather than size, and it is the worse
+  2,000, no two tools may ship a costly byte-identical schema, **every parameter a description names
+  must actually exist, and a description that lists a property's options must list all of them**. That last rule checks truth rather than size, and it is the worse
   failure it guards: a verbose description wastes context, a lying one wastes the caller's reasoning
   and then fails silently, because an unknown key is ignored. `search_processes` documented an
   `include_window_title` knob that does not exist, and nothing noticed until someone read the text
   against the type. The check is deliberately narrow — only backtick-quoted, lowercase-initial,
   compound identifiers count as parameter claims — so shell names, env keys and file names need no
-  exemption, and a check with false alarms is one the next person deletes. Exceptions carry a ceiling and a
+  exemption, and a check with false alarms is one the next person deletes.
+- **Enum drift is checked too**: a variant added to a type while the prose listing the old set stays
+  behind is the failure most likely to recur, and `wait` had it. A variant counts as listed only
+  when the text offers it (backtick-quoted, or beside a `|`), so "(default)" as English prose is not
+  mistaken for the `default` variant. Reach is known rather than assumed: 14 of 525 top-level
+  properties carry a schema enum and 12 are guarded, the other two having a variant too short to
+  tell from ordinary English. Six properties document options in prose while typed as a bare
+  `String` — `wait.kind` among them — and are out of reach until they are given real enum types. Exceptions carry a ceiling and a
   written reason, so "exempt" never means "unbounded", and an exception that stops being needed
   fails the test by name instead of lingering. A budget nobody checks decays within two waves —
   `paths_guard` exists for the same reason.

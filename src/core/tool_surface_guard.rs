@@ -11,7 +11,8 @@
 //! 1. a tool description is at most [`MAX_DESCRIPTION`] chars;
 //! 2. description + JSON schema is at most [`MAX_TOOL`] chars;
 //! 3. no two tools ship byte-identical schemas;
-//! 4. every parameter a description names actually exists.
+//! 4. every parameter a description names actually exists;
+//! 5. a description that lists a property's options lists all of them.
 //!
 //! Rule 4 checks **truth**, where the first three check size, and it is here because reading the
 //! text against the types found three defects the size rules were blind to: `search_processes`
@@ -61,6 +62,13 @@ mod tests {
     use std::collections::BTreeMap;
 
     use crate::FileSystemServer;
+
+    /// Shortest enum variant rule 5 will look for in prose.
+    ///
+    /// Below this a variant cannot be told from ordinary English by any textual match: `run`,
+    /// `sh` and `cmd` occur constantly in descriptions that are not offering them as options.
+    /// Enums with a short variant are skipped whole rather than waived per tool.
+    const MIN_VARIANT_LEN: usize = 4;
 
     /// Longest tool description. Past this a tool is either doing too much or explaining what it
     /// does not need to.
@@ -234,6 +242,90 @@ mod tests {
         }
     }
 
+    /// The string variants a property schema allows, following one `$ref` into `definitions`.
+    ///
+    /// schemars renders a plain unit enum as `"enum": [...]` and a documented one as a `oneOf`
+    /// of `const` branches, so both shapes are read.
+    fn enum_variants(
+        node: &serde_json::Value,
+        defs: &serde_json::Value,
+        depth: usize,
+    ) -> Vec<String> {
+        let Some(map) = node.as_object() else {
+            return Vec::new();
+        };
+        if depth > 4 {
+            return Vec::new();
+        }
+        if let Some(values) = map.get("enum").and_then(|v| v.as_array()) {
+            return values
+                .iter()
+                .filter_map(|v| v.as_str().map(str::to_string))
+                .collect();
+        }
+        if let Some(reference) = map.get("$ref").and_then(|v| v.as_str())
+            && let Some(name) = reference.strip_prefix("#/definitions/")
+            && let Some(target) = defs.get(name)
+        {
+            return enum_variants(target, defs, depth + 1);
+        }
+        for key in ["oneOf", "anyOf", "allOf"] {
+            let Some(branches) = map.get(key).and_then(|v| v.as_array()) else {
+                continue;
+            };
+            let consts: Vec<String> = branches
+                .iter()
+                .filter_map(|b| b.get("const").and_then(|c| c.as_str()).map(str::to_string))
+                .collect();
+            if !consts.is_empty() && consts.len() == branches.len() {
+                return consts;
+            }
+        }
+        Vec::new()
+    }
+
+    /// Identifiers the text presents as an OPTION, not merely as a word it contains.
+    ///
+    /// Two forms count: a backtick-quoted span that is the variant (bare or in JSON/shell
+    /// quotes), and a word adjacent to a `|`. English prose like "(default)" matches neither,
+    /// which is what stops `default` in `false` (default) being read as the `"default"` variant.
+    fn offered_options(text: &str) -> std::collections::BTreeSet<String> {
+        let mut out = std::collections::BTreeSet::new();
+        for span in quoted_spans(text) {
+            out.insert(span.trim().trim_matches(['"', '\'']).to_string());
+        }
+        let parts: Vec<&str> = text.split('|').collect();
+        for pair in parts.windows(2) {
+            if let Some(left) = edge_ident(pair[0], true) {
+                out.insert(left);
+            }
+            if let Some(right) = edge_ident(pair[1], false) {
+                out.insert(right);
+            }
+        }
+        out
+    }
+
+    /// The identifier at one end of a string, skipping quotes and spaces: `trailing` takes the
+    /// word before a `|`, otherwise the word after it. `mode replace|insert` therefore yields
+    /// `replace` and `insert`, not the whole phrase before the bar.
+    fn edge_ident(text: &str, trailing: bool) -> Option<String> {
+        let skip = |c: &char| c.is_whitespace() || *c == '"' || *c == '\'';
+        let keep = |c: &char| c.is_ascii_alphanumeric() || *c == '_';
+        let word: String = if trailing {
+            let rev: String = text
+                .chars()
+                .rev()
+                .skip_while(skip)
+                .take_while(keep)
+                .collect();
+            rev.chars().rev().collect()
+        } else {
+            text.chars().skip_while(skip).take_while(keep).collect()
+        };
+        (!word.is_empty()).then_some(word)
+    }
+
     /// The tool surface as `tools/list` serves it: name -> (description, compact schema).
     fn tool_surface() -> BTreeMap<String, (String, String)> {
         FileSystemServer::build_tool_router()
@@ -318,6 +410,74 @@ mod tests {
              the weight is prose, cut it; if it is schema, the tool has too many parameters and \
              that is a design question, not a wording one. A tool that genuinely earns more goes \
              in OVER_BUDGET_ALLOWED with a ceiling and a reason.\noffenders: {offenders:#?}"
+        );
+    }
+
+    /// Rule 5: a description that lists a property's options must list all of them.
+    ///
+    /// The failure this catches is drift: a variant is added to the type and the prose listing
+    /// the old set stays behind. Mentioning none of the variants is fine — plenty of properties
+    /// rightly do not enumerate — and mentioning exactly one is fine too, because one is an
+    /// example rather than a list. Two is where the text starts claiming to be the options.
+    ///
+    /// No allowlist, deliberately. The only exclusion is [`MIN_VARIANT_LEN`], stated as a
+    /// property of the matching rather than of any tool: a variant under four characters cannot
+    /// be told from ordinary English, so those enums are skipped whole.
+    #[test]
+    fn descriptions_list_all_of_a_property_options_or_none() {
+        let mut offenders = Vec::new();
+        let mut in_reach = 0usize;
+
+        for (name, (tool_description, schema)) in &tool_surface() {
+            let Ok(schema) = serde_json::from_str::<serde_json::Value>(schema) else {
+                continue; // rule 4 already reports a schema that will not parse back
+            };
+            let defs = schema
+                .get("definitions")
+                .cloned()
+                .unwrap_or(serde_json::Value::Null);
+            let Some(properties) = schema.get("properties").and_then(|p| p.as_object()) else {
+                continue;
+            };
+
+            for (property, property_schema) in properties {
+                let variants = enum_variants(property_schema, &defs, 0);
+                if variants.len() < 2 || variants.iter().any(|v| v.len() < MIN_VARIANT_LEN) {
+                    continue;
+                }
+                in_reach += 1;
+
+                let text = format!(
+                    "{}\n{tool_description}",
+                    property_schema
+                        .get("description")
+                        .and_then(|d| d.as_str())
+                        .unwrap_or_default()
+                );
+                let offered = offered_options(&text);
+                let listed: Vec<&String> =
+                    variants.iter().filter(|v| offered.contains(*v)).collect();
+                if listed.len() >= 2 && listed.len() < variants.len() {
+                    let missing: Vec<&String> =
+                        variants.iter().filter(|v| !offered.contains(*v)).collect();
+                    offenders.push(format!(
+                        "{name}.{property}: lists {listed:?} but the type also accepts {missing:?}"
+                    ));
+                }
+            }
+        }
+
+        assert!(
+            in_reach > 0,
+            "rule 5 reached no property at all — the variant extraction has stopped matching the \
+             schemas it is meant to read, so this test is passing vacuously"
+        );
+        assert!(
+            offenders.is_empty(),
+            "docs/TOOL_STYLE.md: a description that lists a property's options must list all of \
+             them. A partial list is how enum drift reads to a caller: the missing variants look \
+             unsupported, so nobody uses them and nobody reports it. Add the variants, or drop the \
+             list entirely and let the schema carry the options.\noffenders: {offenders:#?}"
         );
     }
 

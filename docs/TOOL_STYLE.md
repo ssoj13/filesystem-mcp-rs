@@ -93,6 +93,23 @@ against the type. The guard now scans the tool description and every property de
 backtick-quoted token that **reads as a parameter** must be a property of that tool's schema, the
 name of another tool, or listed in `NOT_A_PARAMETER` under a category with its reason.
 
+**A description that lists a property's options must list all of them.** Enum drift — a variant
+added to the type while the prose listing the old set stays behind — is the failure most likely to
+recur, and `wait` had it: three `kind` values documented where the code accepts four. Mentioning no
+variants is fine, and mentioning exactly one is fine (that is an example); two is where the text
+starts claiming to be the options. A variant counts as listed only when the text *offers* it —
+backtick-quoted, or adjacent to a `|` — so "(default)" as English prose is not read as the
+`"default"` variant.
+
+The reach is small and worth knowing rather than assuming: of **525 top-level properties, 14 carry
+a schema enum**, and 2 of those are skipped because a variant is under four characters and cannot
+be told from ordinary English (`run`, `sh`, `cmd`). So the rule guards **12 properties**. It cannot
+see the six properties that document an option list in prose while typed as a bare `String` —
+`wait.kind`, `mouse_click.button`, `mouse_drag.button`, `mouse_drag.ease`, `win_geom.state`,
+`win_layout.op` — because there is no enum in the schema to compare against. Giving those
+properties real enum types is the change that would bring them under this rule; until then they are
+read-and-hope.
+
 "Reads as a parameter" is deliberately narrow: lowercase first character, `[A-Za-z0-9_]` only, and
 compound — an interior capital or an underscore. That admits `filePattern` and `context_after` while
 rejecting shell names (`bash`), env keys (`FS_MCP_STATE_DIR`, which starts uppercase), file names
