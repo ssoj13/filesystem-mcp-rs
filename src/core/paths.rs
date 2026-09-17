@@ -63,6 +63,24 @@ pub fn sub_dir(kind: SubDir) -> io::Result<PathBuf> {
     resolve_sub(env_spec::get("FS_MCP_STATE_DIR").map(PathBuf::from), kind)
 }
 
+/// How long a file under [`SubDir::Tmp`] may survive before the housekeeping sweep deletes it.
+///
+/// Lives here rather than in the sweep because this module owns `<state>/tmp` and therefore its
+/// retention policy; the sweep is only the thing that acts on it. An unparseable value is
+/// reported and the default applied: refusing to start over a malformed cleanup interval would
+/// be a worse outcome than keeping scratch files for the standard day.
+#[allow(dead_code)] // wired when the tmp sweep lands (task 7); delete this attribute there
+pub fn tmp_keep_hours() -> u64 {
+    const DEFAULT: u64 = 24; // keep in sync with the default in `env_spec::paths_vars`
+    match env_spec::get("FS_MCP_TMP_KEEP_HOURS") {
+        None => DEFAULT,
+        Some(raw) => raw.parse().unwrap_or_else(|_| {
+            warn!("FS_MCP_TMP_KEEP_HOURS is not a whole number of hours ({raw}); using {DEFAULT}");
+            DEFAULT
+        }),
+    }
+}
+
 /// Resolve and create the root. Split from [`state_dir`] so tests can inject an override
 /// without mutating the process environment.
 fn resolve_root(override_dir: Option<PathBuf>) -> io::Result<PathBuf> {

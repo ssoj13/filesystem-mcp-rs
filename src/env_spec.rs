@@ -26,10 +26,30 @@ pub struct EnvVar {
 /// One `vec!` per group rather than one growing list: each group is feature-gated as a whole,
 /// which keeps the gating at the group boundary instead of on every element.
 pub fn vars() -> Vec<EnvVar> {
-    let mut v = net_vars();
+    let mut v = paths_vars();
+    v.extend(net_vars());
     v.extend(memory_vars());
     v.extend(ctl_vars());
     v
+}
+
+/// Where the server keeps its state, and how long scratch files survive there.
+///
+/// Listed first because it describes where everything the other groups name actually lives:
+/// `FS_MCP_MEMORY_DB` and the ocrs cache are both resolved relative to this root.
+fn paths_vars() -> Vec<EnvVar> {
+    vec![
+        EnvVar {
+            key: "FS_MCP_STATE_DIR",
+            default: "",
+            help: "State directory for every file this server owns; must be absolute. Blank = ~/.filesystem-mcp-rs.",
+        },
+        EnvVar {
+            key: "FS_MCP_TMP_KEEP_HOURS",
+            default: "24",
+            help: "Delete scratch files under <state>/tmp older than this many hours.",
+        },
+    ]
 }
 
 // `vec![]` cannot express these: an element carrying `#[cfg(...)]` is not valid inside the
@@ -63,7 +83,7 @@ fn memory_vars() -> Vec<EnvVar> {
         EnvVar {
             key: "FS_MCP_MEMORY_DB",
             default: "",
-            help: "SQLite file for the memory tools. Blank = <local data>/filesystem-mcp-rs/memory2.db.",
+            help: "SQLite file for the memory tools. Blank = ~/.filesystem-mcp-rs/memory2.db.",
         },
     ]
 }
@@ -104,7 +124,7 @@ fn ctl_vars() -> Vec<EnvVar> {
     v.push(EnvVar {
         key: "FS_MCP_CTL_OCRS_MODELS_DIR",
         default: "",
-        help: "Cache dir for the downloaded ocrs models. Blank = <data>/computer-mcp-rs/ocrs.",
+        help: "Cache dir for the downloaded ocrs models. Blank = ~/.filesystem-mcp-rs/ocrs.",
     });
     v
 }
@@ -155,6 +175,34 @@ mod tests {
         for v in vars() {
             assert!(v.key.starts_with("FS_MCP_"), "{} lacks the prefix", v.key);
             assert!(seen.insert(v.key), "{} listed twice", v.key);
+        }
+    }
+
+    /// Every key is registered exactly once, and any key naming a path describes where that
+    /// path actually is now. The stale-text assertion is a regression guard: the memory and
+    /// ocrs help strings survived the move to `~/.filesystem-mcp-rs` by a full wave, pointing
+    /// operators at directories the server no longer touches.
+    #[test]
+    fn state_keys_are_registered_once_and_described_correctly() {
+        let all = vars();
+        for key in ["FS_MCP_STATE_DIR", "FS_MCP_TMP_KEEP_HOURS"] {
+            assert_eq!(all.iter().filter(|v| v.key == key).count(), 1, "{key}");
+        }
+        let mem = all
+            .iter()
+            .find(|v| v.key == "FS_MCP_MEMORY_DB")
+            .expect("memory db key");
+        assert!(
+            mem.help.contains("~/.filesystem-mcp-rs"),
+            "stale help: {}",
+            mem.help
+        );
+        // Both spellings of the old per-OS root, so no variant of the stale text can return.
+        for stale in ["<data>", "<local data>", "computer-mcp-rs"] {
+            assert!(
+                !all.iter().any(|v| v.help.contains(stale)),
+                "stale {stale} help text remains"
+            );
         }
     }
 
