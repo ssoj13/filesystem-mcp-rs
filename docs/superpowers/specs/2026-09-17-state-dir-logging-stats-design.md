@@ -62,9 +62,15 @@ Other verified facts this design relies on:
 ## 3. Invariants (each one removes a class of bugs)
 
 **I1 — One state root, one resolver.** `core::paths::state_dir()` = `dirs::home_dir()/.filesystem-mcp-rs`,
-identical on Windows, macOS and Linux. Every path is derived from it. No `data_dir()`,
-`data_local_dir()` or `temp_dir()` call survives anywhere in the crate. A future "I'll just put
-it here" cannot happen because there is nowhere else to put it.
+identical on Windows, macOS and Linux. Every path is derived from it. A future "I'll just put it
+here" cannot happen because there is nowhere else to put it.
+
+Read precisely: no call resolves a platform directory *for new state*. `core::paths` itself keeps
+`data_dir()` and `data_local_dir()` in `legacy_local_dir()` and `legacy_ctl_audit()`, which exist
+solely to **find** data left by pre-2026-09 builds so it can be migrated — deleting them as a
+tidy-up would silently strand every existing user's memory database and audit log. `paths_guard`
+enforces the invariant with a per-file, per-spelling exemption list precisely so those two stay
+legal while nothing else does.
 
 **I2 — No file is written by two processes.** Logs are per process; the stats DB is per-row
 partitioned by `instance_id` so two processes never target the same row. Rotation, interleaving
@@ -93,8 +99,16 @@ one shared file cannot silently write into columns whose meaning changed.
 **I8 — Closed key sets.** Tool names are interned against the router's own list; anything else
 becomes `__unknown`. Cardinality cannot grow from the wire.
 
-**I9 — One retention mechanism.** A single leased housekeeping sweep applies age rules to
-`tmp/`, `logs/` and the stats DB. One process does it per interval, not fifty.
+**I9 — One lease, one place retention is expressed.** A single leased housekeeping sweep does the
+work, so one process per interval acts, not fifty. `core::housekeeping` owns the lease
+(`lease_due`/`lease_done`, one per `kind`) and each caller's age rule runs under it.
+
+Not yet one *mechanism*: what wave 1 landed is the lease plus a single age rule, `sweep_dir`,
+which deletes entries older than a `max_age`. Two of the retention policies this design calls for
+are not expressible in it and need their own code under the same lease — §5's "files over
+`FS_MCP_LOG_MAX_MB`, oldest first" is a size budget rather than an age cutoff, and §6.4's
+`tool_agg` → `tool_daily` compaction rewrites rows rather than deleting files. Wave 3 should add
+them as further `kind`s, not as a second leasing scheme.
 
 ## 4. Wave 1 — unified state directory
 
@@ -138,9 +152,19 @@ stays. A file sink is safe, and without it every `warn!` in the default deployme
 
 **Retention.** The housekeeping sweep deletes log directories older than `FS_MCP_LOG_KEEP_DAYS`
 (default 14) and, within the current day, files over `FS_MCP_LOG_MAX_MB` total, oldest first. The
-lease is a row in `stats.db` (`housekeeping(kind, leased_until, by_instance)`): one process per
-interval does the work, the rest skip. If stats are disabled the sweep falls back to a lock file
-in the state root — the same lease semantics, no second mechanism.
+lease is a **marker file per kind**, `<state>/.housekeeping-<kind>`, holding the Unix timestamp of
+the last completed run: one process per interval does the work, the rest skip.
+
+This is what wave 1 built (`core::housekeeping::lease_due`/`lease_done`), and it replaces the row
+in `stats.db` this section originally specified. The marker needs no database, no lock to release
+and nothing to clean up after a killed process, so it works identically whether stats are on or
+off — which removed the reason for the lock-file fallback the row-based design required. **Wave 3
+must reuse it rather than add a `housekeeping` table**; the stamp is written to a private name and
+renamed, so a reader never sees a half-written marker.
+
+Two details that are load-bearing for a later caller: the timestamp is read from the file's
+*contents*, not its mtime, so a lease is reset by deleting the marker and not by `touch`ing it;
+and a marker that is missing, malformed or dated in the future reads as expired.
 
 ## 6. Wave 3 — tool-call statistics
 
@@ -221,7 +245,7 @@ CREATE TABLE sessions (
   started_at INTEGER, last_seen INTEGER,
   PRIMARY KEY (instance_id, session_id));
 
-CREATE TABLE housekeeping (kind TEXT PRIMARY KEY, leased_until INTEGER, by_instance TEXT);
+-- No `housekeeping` table: the lease is a marker file per kind, built in wave 1. See §5.
 ```
 
 `instance_id` is in the primary key, so **two processes never write the same row** — cross-process
