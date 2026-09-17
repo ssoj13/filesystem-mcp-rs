@@ -203,7 +203,12 @@ async fn test_custom_port_and_bind() {
 async fn test_server_with_logging() {
     let port = find_available_port().await;
     let bind = "127.0.0.1";
-    let log_file = format!("test-http-{}.log", port);
+    // The log goes into a directory of our own, like the state root does: an absolute `-l` under
+    // a `TempDir` cannot leave a stray file in the checkout when the assertions below fail, which
+    // a relative path resolved against `CARGO_MANIFEST_DIR` did.
+    let log_dir = TempDir::new().expect("Failed to create log dir");
+    let log_path = log_dir.path().join(format!("test-http-{}.log", port));
+    let log_file = log_path.to_string_lossy().into_owned();
 
     let _guard = spawn_server(&["-s", "-b", bind, "-p", &port.to_string(), "-l", &log_file]);
 
@@ -223,10 +228,7 @@ async fn test_server_with_logging() {
 
     assert_eq!(response.status(), 200);
 
-    // Check that log file was created
-    let log_path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(&log_file);
+    // Check that log file was created. `log_dir` is dropped at the end of the test, taking the
+    // file with it whether or not this assertion holds.
     assert!(log_path.exists(), "Log file should be created");
-
-    // Clean up log file (guard will kill the server)
-    let _ = std::fs::remove_file(&log_path);
 }
