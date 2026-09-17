@@ -846,12 +846,12 @@ mod tests {
     }
 
     #[test]
-    fn strict_draft07_schema_for_mem_put_has_no_item_string_coercion() {
-        use crate::core::schema::to_draft07_schema_strict;
+    fn strict_served_schema_for_mem_put_has_no_item_string_coercion() {
+        use crate::core::schema::served_schema_strict;
 
         let schema = schemars::schema_for!(MemPutArgs);
         let mut value = serde_json::to_value(&schema).expect("schema");
-        value = to_draft07_schema_strict(value);
+        value = served_schema_strict(value);
         let item = &value["properties"]["item"];
         assert!(
             item.get("oneOf").is_none(),

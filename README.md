@@ -860,17 +860,25 @@ cargo build --release
 ## Troubleshooting
 
 ### JSON Schema draft compatibility
-Some clients (qwen code, gemini-cli) validate tool schemas with Draft 7 only, while rmcp generates JSON Schema 2020-12 by default. This causes errors like:
+Some clients (qwen code, gemini-cli) validate tool schemas with a Draft 7 validator, while rmcp
+generates JSON Schema 2020-12. Such a client fails to resolve the dialect the schema *declares*:
 ```
 no schema with key or ref "https://json-schema.org/draft/2020-12/schema"
 ```
 
-Fix applied here: rewrite tool input schemas to Draft 7 at startup. This is done once when building the tool router (see `src/main.rs`) and includes:
-- Force `$schema` to `http://json-schema.org/draft-07/schema#`
-- Convert `$defs` -> `definitions`
-- Rewrite `$ref` paths `#/$defs/...` -> `#/definitions/...`
+Fix applied here (reviewed 2026-09-17): tool input schemas are served with **no `$schema` key at
+all**, which is what that error is about — a validator cannot fail to resolve a meta-schema that
+was never named. MCP 2025-06-18 requires no dialect (`inputSchema` is just "JSON Schema defining
+expected parameters"), so dropping the key is spec-shaped, and it also takes ~7.4k characters of
+repeated boilerplate out of every session.
 
-This removes the Draft 2020-12 dependency from tool schemas so Draft 7 validators succeed. This is a per-server fix; other MCP servers will still need the same rewrite if they emit 2020-12.
+The schema **body** is served exactly as rmcp generates it — 2020-12, with `$defs` and
+`#/$defs/...` refs. An earlier version of this server also rewrote `$defs` into draft-07
+`definitions`; that rewrite was removed on 2026-09-17 because nothing was found to need it: rmcp
+chooses 2020-12 deliberately to match MCP's own alignment (modelcontextprotocol PR #655), so every
+unmodified rmcp server — and every pydantic-based server in the official Python SDK — already puts
+`$defs` on the wire, and `#/$defs/...` resolves as a plain JSON pointer under a Draft 7 validator
+too. The only post-processing left is in `src/core/schema.rs`.
 
 ## Transport Modes
 

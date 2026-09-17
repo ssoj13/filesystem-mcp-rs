@@ -224,7 +224,8 @@ struct FileSystemServer {
 
 impl FileSystemServer {
     /// Assemble the complete tool router: the main `#[tool_router]` plus every
-    /// computer-control domain router, with schemas normalized to Draft-07.
+    /// computer-control domain router, with schemas post-processed by
+    /// [`normalize_tool_schemas`].
     ///
     /// Separate from [`Self::new`] because it needs nothing from the server (no
     /// state root, no allowed dirs) and `core::tool_surface_guard` measures the

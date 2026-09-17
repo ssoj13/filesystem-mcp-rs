@@ -45,7 +45,7 @@
 //! and the reason is worth writing down because it changes what to do about them. Measured over a
 //! real handshake, the schema half of `tools/list` is ~101k chars of which only ~28k is prose:
 //! the rest is JSON Schema *structure* — `type`, `required`, `$ref`, `properties`, `anyOf`,
-//! `definitions` — with no text to cut. So most entries below are not tools that over-explain;
+//! `$defs` — with no text to cut. So most entries below are not tools that over-explain;
 //! they are tools whose *type* is large. `mem_update` is the clearest case: a 102-char
 //! description and 2,238 chars of schema carrying no descriptions at all. Cutting those needs
 //! fewer parameters, not fewer words, which is a design change and not a documentation one.
@@ -150,8 +150,6 @@ mod tests {
         ("find_image", 2_400, "CapTarget's six wire forms"),
         ("ocr", 2_200, "CapTarget's six wire forms"),
         ("capture", 2_100, "CapTarget's six wire forms"),
-        // Line-range editing with ContentRef payloads.
-        ("edit_lines", 2_100, "ContentRef payloads per edit"),
     ];
 
     /// Identifiers a description may quote although they are not parameters of that tool.
@@ -204,7 +202,7 @@ mod tests {
         token.chars().any(|c| c.is_ascii_uppercase() || c == '_')
     }
 
-    /// Every property name anywhere in a schema, including nested `definitions` — `oldText` is a
+    /// Every property name anywhere in a schema, including nested `$defs` — `oldText` is a
     /// knob of `bulk_edits` even though it belongs to the `EditOperation` definition.
     fn property_names(schema: &serde_json::Value, out: &mut std::collections::BTreeSet<String>) {
         match schema {
@@ -245,7 +243,7 @@ mod tests {
         }
     }
 
-    /// The string variants a property schema allows, following one `$ref` into `definitions`.
+    /// The string variants a property schema allows, following one `$ref` into `$defs`.
     ///
     /// schemars renders a plain unit enum as `"enum": [...]` and a documented one as a `oneOf`
     /// of `const` branches, so both shapes are read.
@@ -267,7 +265,7 @@ mod tests {
                 .collect();
         }
         if let Some(reference) = map.get("$ref").and_then(|v| v.as_str())
-            && let Some(name) = reference.strip_prefix("#/definitions/")
+            && let Some(name) = reference.strip_prefix("#/$defs/")
             && let Some(target) = defs.get(name)
         {
             return enum_variants(target, defs, depth + 1);
@@ -436,7 +434,7 @@ mod tests {
                 continue; // rule 4 already reports a schema that will not parse back
             };
             let defs = schema
-                .get("definitions")
+                .get("$defs")
                 .cloned()
                 .unwrap_or(serde_json::Value::Null);
             let Some(properties) = schema.get("properties").and_then(|p| p.as_object()) else {
