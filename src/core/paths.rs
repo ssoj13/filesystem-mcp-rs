@@ -8,8 +8,15 @@
 //! No other module may call `dirs::*`, `std::env::temp_dir` or `std::env::home_dir`; tests take
 //! scratch space from `tempfile::TempDir` instead. That rule is not a convention here - the test
 //! `paths_are_centralized` in `src/core/paths_guard.rs` scans every `.rs` file under `src/` and
-//! `tests/` and fails the build on any call site outside this module, so the drift cannot come
-//! back quietly. That module's doc records the few spellings the check cannot see.
+//! `tests/` and fails the build on any call site not listed in that module's `ALLOWED`, so the
+//! drift cannot come back quietly. `ALLOWED` is not only this file: `src/mcp_setup/types.rs` and
+//! `src/mcp_setup/host.rs` are cleared for `dirs::home_dir`, because the installer locates *other*
+//! applications' config files - so the call appears in three files, not one.
+//!
+//! The guard sees only this repo's tree under `src/` and `tests/`. A path resolved inside a
+//! dependency, in a `build.rs` (crate root, outside both roots) or through a macro expansion is
+//! invisible to it; `build.rs` is the concrete near-miss, since the crate has none today and one
+//! added later would be unguarded. That module's doc records the further spellings it cannot see.
 
 use std::io;
 use std::path::{Path, PathBuf};
