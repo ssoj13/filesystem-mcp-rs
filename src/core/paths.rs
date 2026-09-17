@@ -8,10 +8,6 @@
 //! No other module may call `dirs::*` or `std::env::temp_dir()`; `paths_are_centralized`
 //! in `src/core/paths_guard.rs` enforces that mechanically.
 
-// The resolver lands before its callers: the call sites move onto it in the later tasks of
-// this wave, so parts of the surface are legitimately unreferenced until then.
-#![allow(dead_code)]
-
 use std::io;
 use std::path::{Path, PathBuf};
 use tracing::{info, warn};
@@ -23,14 +19,19 @@ use crate::env_spec;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SubDir {
     /// Per-process log files (wave 2).
+    #[allow(dead_code)] // wired when logging lands in wave 2; delete this attribute there
     Logs,
     /// Downloaded OCR models.
+    #[allow(dead_code)] // wired by Task 4; delete this attribute there
     Ocrs,
     /// Saved window layouts.
+    #[allow(dead_code)] // wired by Task 4; delete this attribute there
     Layouts,
     /// Computer-control safety state.
+    #[allow(dead_code)] // wired by Task 4; delete this attribute there
     Safety,
     /// Scratch: captures, `run_command` output, temporary scripts. Swept by age.
+    #[allow(dead_code)] // wired by Task 4; delete this attribute there
     Tmp,
 }
 
@@ -48,17 +49,20 @@ impl SubDir {
 }
 
 /// The state root, created if missing.
+#[allow(dead_code)] // wired by Task 3; delete this attribute there
 pub fn state_dir() -> io::Result<PathBuf> {
     resolve_root(env_spec::get("FS_MCP_STATE_DIR").map(PathBuf::from))
 }
 
 /// Path of a file directly in the state root (`stats.db`, `memory2.db`, `panic.log`).
 /// The root is created; the file is not.
+#[allow(dead_code)] // wired by Task 3; delete this attribute there
 pub fn db_path(name: &str) -> io::Result<PathBuf> {
     Ok(state_dir()?.join(name))
 }
 
 /// A subdirectory of the state root, created if missing.
+#[allow(dead_code)] // wired by Task 4; delete this attribute there
 pub fn sub_dir(kind: SubDir) -> io::Result<PathBuf> {
     resolve_sub(env_spec::get("FS_MCP_STATE_DIR").map(PathBuf::from), kind)
 }
@@ -83,8 +87,21 @@ fn resolve_sub(override_dir: Option<PathBuf>, kind: SubDir) -> io::Result<PathBu
 /// Returns an error rather than falling back to the current directory: a silent fallback
 /// would put a database wherever the agent happened to start, and the resulting
 /// "my memory disappeared" bug costs far more than a loud failure at startup.
+///
+/// A relative override is rejected for the same reason: `FS_MCP_STATE_DIR=state` resolves
+/// against the process working directory, which is whatever launched the server, and would
+/// reintroduce exactly the scattering this module exists to remove.
 fn resolve_root_from(override_dir: Option<PathBuf>, home: Option<PathBuf>) -> io::Result<PathBuf> {
     if let Some(dir) = override_dir {
+        if !dir.is_absolute() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!(
+                    "FS_MCP_STATE_DIR must be an absolute path, got {}",
+                    dir.display()
+                ),
+            ));
+        }
         return Ok(dir);
     }
     match home {
@@ -97,26 +114,47 @@ fn resolve_root_from(override_dir: Option<PathBuf>, home: Option<PathBuf>) -> io
 }
 
 /// Outcome of migrating one location from its pre-2026-09 home to the state root.
+#[allow(dead_code)] // wired by Task 5; delete this attribute there
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Migrated {
     /// The old location existed and was moved to the new one.
     Moved,
-    /// Neither location existed: the caller starts fresh.
+    /// Nothing to migrate: either neither path exists, or only the new one does. The latter is
+    /// the steady state of every run after a successful migration, so this variant means "no
+    /// action required", not "the server has no data".
     FreshStart,
-    /// Both existed, or the move failed. Nothing was touched.
+    /// Both existed, or the move failed. Nothing was touched: the data is still at `old`.
     Ambiguous { old: PathBuf, new: PathBuf },
 }
 
 /// Move `old` to `new` when that is unambiguous.
 ///
+/// **Single files only.** Every location this wave migrates is one file; the directories under
+/// the state root (`ocrs`, `layouts`, `safety`) are regenerable and are never migrated. A
+/// directory `old` is therefore a programming error, and is refused rather than half-moved:
+/// `fs::copy` cannot copy a directory and `fs::remove_file` cannot remove one, so the
+/// cross-volume path would corrupt the outcome while the same-volume path silently worked.
+///
 /// `rename` is instantaneous within a volume; across volumes it fails with a platform-specific
-/// error, so we fall back to copy + remove. A failed copy leaves the original untouched and is
-/// reported as `Ambiguous`, which is the honest answer: the data is still at the old path.
+/// error, so we fall back to copy + remove. On any failure the original at `old` is left intact
+/// and a partial or duplicate `new` is removed, so `Ambiguous` means literally what it says:
+/// after a failed migration the only file that exists is the original.
+///
+/// Coverage note: the cross-volume copy fallback itself cannot be exercised on a single-volume
+/// test machine, so it is verified only by inspection; the failure handling around it is tested.
+#[allow(dead_code)] // wired by Task 5; delete this attribute there
 pub fn migrate(old: &Path, new: &Path) -> Migrated {
     let ambiguous = || Migrated::Ambiguous {
         old: old.to_path_buf(),
         new: new.to_path_buf(),
     };
+    if old.is_dir() {
+        warn!(
+            "Refusing to migrate {}: migrate() moves single files, not directories",
+            old.display()
+        );
+        return ambiguous();
+    }
     match (old.exists(), new.exists()) {
         (true, false) => {
             if let Some(parent) = new.parent()
@@ -136,6 +174,18 @@ pub fn migrate(old: &Path, new: &Path) -> Migrated {
                 }
                 Err(e) => {
                     warn!("Failed to migrate {} -> {}: {e}", old.display(), new.display());
+                    // The copy may have half-written `new`, or have succeeded with only the
+                    // removal of `old` failing. Either way `new` must go: a truncated database
+                    // would be opened as real data, and a complete duplicate would make every
+                    // later startup see two candidates and report a conflict forever.
+                    if new.exists()
+                        && let Err(e) = std::fs::remove_file(new)
+                    {
+                        warn!(
+                            "Left a redundant copy at {} that could not be removed: {e}",
+                            new.display()
+                        );
+                    }
                     ambiguous()
                 }
             }
@@ -147,14 +197,9 @@ pub fn migrate(old: &Path, new: &Path) -> Migrated {
 
 /// The pre-2026-09 root for files that lived in `data_local_dir`, used only to find data left
 /// by older builds. Never used for new writes.
+#[allow(dead_code)] // wired by Task 5; delete this attribute there
 pub fn legacy_local_dir() -> Option<PathBuf> {
     dirs::data_local_dir().map(|d| d.join("filesystem-mcp-rs"))
-}
-
-/// The pre-2026-09 root for computer-control state, which used `data_dir` under the name of
-/// the crate this module was extracted from. Never used for new writes.
-pub fn legacy_ctl_dir() -> Option<PathBuf> {
-    dirs::data_dir().map(|d| d.join("computer-mcp-rs"))
 }
 
 #[cfg(test)]
@@ -190,6 +235,18 @@ mod tests {
         let err = resolve_root_from(None, None).expect_err("must not fall back");
         assert_eq!(err.kind(), std::io::ErrorKind::NotFound);
         assert!(err.to_string().contains("FS_MCP_STATE_DIR"));
+    }
+
+    /// A relative override is refused: it would resolve against whatever directory launched the
+    /// server, which is the scattering this module exists to remove.
+    #[test]
+    fn relative_override_is_rejected() {
+        let err = resolve_root_from(Some(PathBuf::from("state")), dirs::home_dir())
+            .expect_err("a relative override must not be accepted");
+        assert_eq!(err.kind(), std::io::ErrorKind::InvalidInput);
+        let msg = err.to_string();
+        assert!(msg.contains("FS_MCP_STATE_DIR"), "{msg}");
+        assert!(msg.contains("state"), "{msg}");
     }
 
     /// Old file present, new absent: the data moves and the old path is gone.
@@ -229,13 +286,61 @@ mod tests {
         std::fs::remove_dir_all(&base).ok();
     }
 
-    /// Nothing to migrate.
+    /// Nothing to migrate, and nothing conjured into existence while finding that out.
     #[test]
     fn migrate_reports_fresh_start() {
         let base = std::env::temp_dir().join(format!("fsmcp-mig-{}", uuid::Uuid::new_v4()));
+        let old = base.join("old.db");
+        let new = base.join("new.db");
+        assert_eq!(migrate(&old, &new), Migrated::FreshStart);
+        assert!(!old.exists() && !new.exists(), "nothing may be created");
+        assert!(!base.exists(), "the parent may not be created either");
+    }
+
+    /// A directory is refused outright: `fs::copy` cannot copy one and `fs::remove_file` cannot
+    /// remove one, so the cross-volume path would corrupt what the same-volume path moved fine.
+    #[test]
+    fn migrate_refuses_a_directory() {
+        let base = std::env::temp_dir().join(format!("fsmcp-mig-{}", uuid::Uuid::new_v4()));
+        let old = base.join("old_dir");
+        let new = base.join("new_dir");
+        std::fs::create_dir_all(old.join("inner")).expect("mkdir");
+
         assert_eq!(
-            migrate(&base.join("old.db"), &base.join("new.db")),
-            Migrated::FreshStart
+            migrate(&old, &new),
+            Migrated::Ambiguous {
+                old: old.clone(),
+                new: new.clone()
+            }
         );
+        assert!(old.join("inner").is_dir(), "the directory must be intact");
+        assert!(!new.exists(), "nothing may be created at the new path");
+        std::fs::remove_dir_all(&base).ok();
+    }
+
+    /// When the new parent cannot be created the original must survive untouched. This is the
+    /// portable stand-in for the failure handling around the cross-volume copy: a plain file sits
+    /// where `new`'s parent directory would go, so `create_dir_all` cannot succeed.
+    #[test]
+    fn migrate_keeps_the_original_when_the_new_parent_cannot_be_created() {
+        let base = std::env::temp_dir().join(format!("fsmcp-mig-{}", uuid::Uuid::new_v4()));
+        let old = base.join("old/memory2.db");
+        let blocker = base.join("blocker");
+        let new = blocker.join("memory2.db");
+        std::fs::create_dir_all(old.parent().expect("parent")).expect("mkdir");
+        std::fs::write(&old, b"payload").expect("write");
+        std::fs::write(&blocker, b"not a directory").expect("write blocker");
+
+        assert_eq!(
+            migrate(&old, &new),
+            Migrated::Ambiguous {
+                old: old.clone(),
+                new: new.clone()
+            }
+        );
+        assert!(old.exists(), "the original must survive a failed migration");
+        assert_eq!(std::fs::read(&old).expect("read"), b"payload");
+        assert!(!new.exists(), "no partial file may be left at the new path");
+        std::fs::remove_dir_all(&base).ok();
     }
 }
