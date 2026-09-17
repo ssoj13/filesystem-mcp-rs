@@ -2,7 +2,7 @@
 //!
 //! All coordinates are virtual-screen physical pixels (multi-monitor, negative
 //! origins allowed). SendInput batches are serialized by
-//! one mutex so concurrent MCP calls cannot interleave down/up pairs (§5). Every
+//! one mutex so concurrent MCP calls cannot interleave down/up pairs. Every
 //! action returns the focus window so the agent catches a focus race for free.
 
 use std::sync::Mutex;
@@ -26,7 +26,7 @@ use super::win;
 pub use crate::tools::computer::driver::{Btn, Ease, FocusInfo, TypeResult};
 use crate::tools::computer::safety::{CtlError, SafetyGate};
 
-/// One mutex serializes every SendInput batch (macro down/up ordering, §5).
+/// One mutex serializes every SendInput batch (macro down/up ordering).
 static INPUT_MTX: Mutex<()> = Mutex::new(());
 
 /// Mouse button down/up flag pair (win32 backend).
@@ -40,7 +40,7 @@ impl Btn {
     }
 }
 
-/// Named-key -> VK map (combos resolve to VK codes: layout-independent, §10).
+/// Named-key -> VK map (combos resolve to VK codes: layout-independent).
 pub fn vk(name: &str) -> Option<VIRTUAL_KEY> {
     let n = name.to_ascii_lowercase();
     let k = match n.as_str() {

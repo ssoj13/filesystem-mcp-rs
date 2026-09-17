@@ -13,7 +13,7 @@ use super::capture::{self, CapTarget, default_cursor_size, hash_dist};
 use super::driver::{self, Btn, WinTarget};
 use super::safety::SafetyGate;
 
-/// Default dhash distance above which a screen counts as "changed" (§6.6).
+/// Default dhash distance above which a screen counts as "changed".
 const CHANGE_EPS: u32 = 6;
 
 /// Point in virtual-screen px.
@@ -213,7 +213,7 @@ fn run_step(gate: &SafetyGate, step: &Step) -> anyhow::Result<serde_json::Value>
         Step::Type { text, paste } => {
             let paste = paste.unwrap_or(true);
             // Paste safety: the expected window is whatever is focused NOW —
-            // a focus change between steps refuses the paste (critic §10.2).
+            // a focus change between steps refuses the paste.
             let expect = if paste {
                 Some(driver::focus()?.hwnd)
             } else {

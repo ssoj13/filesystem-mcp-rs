@@ -4,7 +4,7 @@
 //! supported: we locate the monitor containing the
 //! rect's center, capture that monitor and crop with validated offsets —
 //! never a silent clamp. Results go to disk; inline base64 is opt-in at the
-//! srv layer (token economy, §2).
+//! srv layer (token economy).
 
 use image::RgbaImage;
 use serde::Serialize;
@@ -217,7 +217,7 @@ pub(super) fn now_ms() -> u128 {
 }
 
 /// 64-bit dhash: 9x8 luma downscale, horizontal gradient per row.
-/// Used by `wait_screen_change` (P2) as a cheap change gate (§6.6).
+/// Used by `wait_screen_change` as a cheap change gate.
 pub fn dhash64(img: &RgbaImage) -> u64 {
     const W: usize = 9;
     const H: usize = 8;
@@ -243,7 +243,7 @@ pub fn dhash64(img: &RgbaImage) -> u64 {
     hash
 }
 
-/// Hamming distance between two dhashes; `<= eps` means "same screen" (§6.6).
+/// Hamming distance between two dhashes; `<= eps` means "same screen".
 pub fn hash_dist(a: u64, b: u64) -> u32 {
     (a ^ b).count_ones()
 }

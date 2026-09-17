@@ -158,7 +158,7 @@ impl FileSystemServer {
         let interval =
             super::safety::resolve_interval_ms(interval_ms, paste).map_err(super::ctl_err)?;
         // Focus gate for paste: resolve the target window first so the paste
-        // can never land in a wrong app (critic §10.2).
+        // can never land in a wrong app.
         let expect = match target {
             Some(t) => {
                 let hwnd_id = tokio::task::spawn_blocking(move || driver::resolve_target(&t))

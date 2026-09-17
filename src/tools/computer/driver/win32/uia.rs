@@ -81,7 +81,7 @@ fn matcher(
 
 /// Enumerate elements under a window (defaults to the active window).
 /// `query` filters names case-insensitively; `max` caps the result size
-/// (raw UIA trees are token bombs — server-side filter is mandatory, §3).
+/// (raw UIA trees are token bombs — server-side filter is mandatory).
 pub fn tree(
     win_target: Option<WinTarget>,
     query: Option<String>,

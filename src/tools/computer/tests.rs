@@ -103,7 +103,7 @@ fn canary_run() -> anyhow::Result<()> {
     let dist = hash_dist(base.hash, after.hash);
     println!("after hash={:016x} dist={}", after.hash, dist);
 
-    // 8. OCR the whole window: the typed ASCII must appear (PLAN2 §9).
+    // 8. OCR the whole window: the typed ASCII must appear.
     let win_cap = capture::capture(CapTarget::Win { win: id })?;
     let img = image::open(&win_cap.path)?;
     let ocr = super::driver::win32::ocr::recognize(&img.to_rgba8(), Some("canary"))?;

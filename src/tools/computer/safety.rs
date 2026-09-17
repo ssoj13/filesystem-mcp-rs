@@ -113,7 +113,7 @@ pub fn resolve_paste(explicit: Option<bool>) -> anyhow::Result<bool> {
 
 /// Effective per-char interval: explicit arg > env > default (paste: 0,
 /// chars: 12 ms — the safe floor: Win11 Notepad drops unicode chars below
-/// ~10 ms, PLAN2 §6.7).
+/// ~10 ms).
 #[cfg(feature = "ctl-input")]
 pub fn resolve_interval_ms(explicit: Option<u32>, paste: bool) -> anyhow::Result<u32> {
     if let Some(v) = explicit {

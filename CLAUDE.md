@@ -1,9 +1,11 @@
 # CLAUDE.md — filesystem-mcp-rs (working notes)
 
 ## What this is
-Rust MCP server (rmcp 3.1.3 + axum, tokio, edition 2024), 130 tools: filesystem, grep, run_command,
+Rust MCP server (rmcp 3.1.3 + axum, tokio, edition 2024): filesystem, grep, run_command,
 process mgmt, S3, HTTP, screenshots (xcap), clipboard (arboard), memory (SQLite), and computer
-control (26 ctl-tools behind ctl-* features). Published crate, consumed from GitHub (ssh ref).
+control (26 ctl-tools behind ctl-* features). **132 tools on a default build, 2026-09-17** — the
+count depends on which features are compiled in, so re-derive it (`tools/list` over a stdio
+handshake) rather than trusting this line; `--list-features` says which groups this build has. Published crate, consumed from GitHub (ssh ref).
 Build: `cargo build` / test: `cargo test` / lint: `cargo clippy --all-targets -- -D warnings`.
 Format: `cargo fmt --check` is a gate (CI runs it on Linux only). The crate was reflowed once in
 `90a3e7a`, listed in `.git-blame-ignore-revs` — never hand-wrap against rustfmt, run it.

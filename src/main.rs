@@ -1114,7 +1114,7 @@ struct GrepContextArgs {
     /// Glob pattern for files to include (e.g., "*.rs", "**/*.txt")
     // Aliases accept the built-in Grep/ripgrep vocabulary clients reflexively
     // send; without them `glob` was silently dropped and the search widened to
-    // the whole tree (see BUG.md).
+    // the whole tree.
     #[serde(
         skip_serializing_if = "Option::is_none",
         alias = "glob",

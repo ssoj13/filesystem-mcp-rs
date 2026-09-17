@@ -70,7 +70,7 @@ fn default_env() -> BTreeMap<String, String> {
         .into_iter()
         .map(|v| (v.key.to_string(), v.default.to_string()))
         .collect();
-    // Snapshot the installing process PATH (option 1+2 / BUG5): no registry read.
+    // Snapshot the installing process PATH: no registry read.
     // Re-install from a “good” terminal refreshes it; a hand edit in mcp.json lasts until then.
     if let Ok(path) = std::env::var("PATH") {
         env.insert("PATH".to_string(), path);

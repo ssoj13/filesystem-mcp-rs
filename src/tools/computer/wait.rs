@@ -9,7 +9,7 @@ use super::capture::{self, CapTarget, default_cursor_size, hash_dist};
 use super::driver;
 use super::driver::WinQuery;
 
-/// Default dhash distance for "screen changed" (§6.6).
+/// Default dhash distance for "screen changed".
 const CHANGE_EPS: u32 = 6;
 
 /// What to wait for.

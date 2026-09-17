@@ -167,7 +167,7 @@ impl Rect {
 ///
 /// Must run before any window/capture work. When a host app that embeds this
 /// code already fixed awareness, the setter fails with E_ACCESSDENIED — that is
-/// acceptable as long as the host chose SOME aware context (critic §10.4), so
+/// acceptable as long as the host chose SOME aware context, so
 /// we query the actual context and succeed; only a truly DPI-unaware process
 /// is an error, because clicks/captures would land misaligned.
 #[cfg(any(feature = "ctl-input", feature = "ctl-uia", feature = "ctl-ocr"))]

@@ -286,7 +286,7 @@ pub enum RunMode {
     Detached,
 }
 
-/// Default-on fail-fast for `run_command` (BUG5). A bare `bool` would default to false.
+/// Default-on fail-fast for `run_command`. A bare `bool` would default to false.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct FailFast(pub bool);
 
@@ -870,7 +870,7 @@ fn bash_candidates() -> Vec<std::path::PathBuf> {
 }
 
 // ---------------------------------------------------------------------------
-// Temp .bat for multi-line cmd.exe (BUG5)
+// Temp .bat for multi-line cmd.exe
 // ---------------------------------------------------------------------------
 
 /// Owns a temporary `.bat` script used to run a multi-line `cmd.exe` command.
@@ -1036,7 +1036,7 @@ pub async fn run_command(
         apply_fail_fast(spawn);
     }
 
-    // BUG5: a multi-line command under cmd.exe (`shell:"cmd"`, or `shell:true`/
+    // A multi-line command under cmd.exe (`shell:"cmd"`, or `shell:true`/
     // default on Windows, which both resolve to cmd) would lose every line past
     // the first, because `cmd /C "<string>"` runs only the first line. When the
     // resolved shell is cmd (the only kind that sets `windows_raw_arg`) and the
@@ -1216,8 +1216,8 @@ pub async fn run_command(
 
         // A multi-line cmd run uses a temp `.bat` that cmd reads lazily; in
         // detached mode the child outlives this function, so the guard must be
-        // moved into a reaper task and dropped only after the child exits
-        // (BUG5). Dropping it here would delete the .bat mid-execution.
+        // moved into a reaper task and dropped only after the child exits.
+        // Dropping it here would delete the .bat mid-execution.
         #[cfg(windows)]
         let bat_guard = _bat_guard.take();
 
@@ -1891,7 +1891,7 @@ mod tests {
         assert!(result.finished_at >= result.started_at);
     }
 
-    /// BUG5: `cmd /C "<string>"` ran only the first line of a multi-line
+    /// Regression: `cmd /C "<string>"` ran only the first line of a multi-line
     /// command, silently dropping the rest. With the temp-`.bat` path every
     /// line must run.
     #[cfg(windows)]
@@ -2007,7 +2007,7 @@ mod tests {
         );
     }
 
-    /// BUG5 secondary symptom: a multi-line `set "PATH=...;%PATH%"` (with
+    /// Secondary symptom of the same defect: a multi-line `set "PATH=...;%PATH%"` (with
     /// parentheses in the value) plus a `>nul` redirect must run cleanly via the
     /// temp `.bat` — the fragile single-line `&&` chain was what failed before.
     #[cfg(windows)]
@@ -2032,7 +2032,7 @@ mod tests {
     }
 
     /// A single-line cmd command must keep the original verbatim `cmd /C <line>`
-    /// path (no temp `.bat`), so its behavior is unchanged by the BUG5 fix.
+    /// path (no temp `.bat`), so its behavior is unchanged by the temp-`.bat` fix.
     #[cfg(windows)]
     #[tokio::test]
     async fn test_cmd_singleline_unchanged() {
