@@ -223,15 +223,15 @@ struct FileSystemServer {
 }
 
 impl FileSystemServer {
-    /// Build the server.
+    /// Assemble the complete tool router: the main `#[tool_router]` plus every
+    /// computer-control domain router, with schemas normalized to Draft-07.
     ///
-    /// Fallible because the content plane's blob spool is created here. An unresolvable state
-    /// root is no longer diagnosed at this point — `run` validates it before anything under it is
-    /// built, precisely so that the narrowest consumer does not get to frame a failure that
-    /// equally breaks the memory database, captures, stream logs and temporary scripts. What
-    /// reaches this message now is a genuine spool failure: the root resolved, but the spool
-    /// directory beneath it could not be created.
-    fn new(allowed: AllowedDirs) -> std::io::Result<Self> {
+    /// Separate from [`Self::new`] because it needs nothing from the server (no
+    /// state root, no allowed dirs) and `core::tool_surface_guard` measures the
+    /// exact router `tools/list` serves. Rebuilding that merge list in the test
+    /// would let the two drift, and a guard measuring a different surface from
+    /// the one shipped is worse than no guard.
+    fn build_tool_router() -> ToolRouter<Self> {
         let mut tool_router = Self::tool_router();
         // Computer-control domains: per-domain routers (S1 spike — rmcp cannot
         // cfg-gate methods inside one impl), merged before schema normalization.
@@ -248,9 +248,21 @@ impl FileSystemServer {
         #[cfg(feature = "ctl-clip-files")]
         tool_router.merge(Self::ctl_clip_router());
         normalize_tool_schemas(&mut tool_router);
+        tool_router
+    }
+
+    /// Build the server.
+    ///
+    /// Fallible because the content plane's blob spool is created here. An unresolvable state
+    /// root is no longer diagnosed at this point — `run` validates it before anything under it is
+    /// built, precisely so that the narrowest consumer does not get to frame a failure that
+    /// equally breaks the memory database, captures, stream logs and temporary scripts. What
+    /// reaches this message now is a genuine spool failure: the root resolved, but the spool
+    /// directory beneath it could not be created.
+    fn new(allowed: AllowedDirs) -> std::io::Result<Self> {
         Ok(Self {
             allowed,
-            tool_router,
+            tool_router: Self::build_tool_router(),
             allow_symlink_escape: false,
             process_manager: process::ProcessManager::new(),
             #[cfg(feature = "http-tools")]
@@ -1868,15 +1880,12 @@ struct ExtractLinesArgs {
 struct ExtractSymbolsArgs {
     /// Path to file
     path: String,
-    /// Start position (0-indexed, in Unicode characters, not bytes).
-    /// Example: in "Hello" start=0 is 'H', start=4 is 'o'
+    /// Start position, 0-indexed, in Unicode characters rather than bytes.
     start: RUsize,
-    /// End position (exclusive, 0-indexed). Use either 'end' or 'length', not both.
-    /// Example: start=0, end=5 extracts "Hello" from "Hello World"
+    /// End position, exclusive. Use either `end` or `length`, never both.
     #[serde(default)]
     end: FlexUsize,
-    /// Number of characters to extract. Use either 'length' or 'end', not both.
-    /// Example: start=0, length=5 extracts "Hello" from "Hello World"
+    /// Number of characters to cut. Use either `length` or `end`, never both.
     #[serde(default)]
     length: FlexUsize,
     /// Dry run mode - return content without removing from file
@@ -2496,20 +2505,7 @@ struct WhichArgs {
 impl FileSystemServer {
     #[tool(
         name = "read_text_file",
-        description = "PREFERRED over built-in Read/cat. Read file with advanced pagination for large files.\n\n\
-            **Why use this:** UTF-8 safe, handles large files without token overflow, returns totalLines metadata.\n\n\
-            **Pagination options:**\n\
-            - `offset` + `limit`: Read N lines starting from line M (1-indexed)\n\
-            - `head`: First N lines only\n\
-            - `tail`: Last N lines only\n\
-            - `max_chars`: Truncate output to N characters (prevents token overflow)\n\n\
-            **Line numbers:**\n\
-            - `line_numbers`: Prefix output lines with 1-indexed line numbers and include `lines[]` in structured_content\n\n\
-            **Examples:**\n\
-            - Read lines 100-200: `{offset: 100, limit: 100}`\n\
-            - Read first 50 lines: `{head: 50}`\n\
-            - Limit output size: `{max_chars: 50000}`\n\
-            - Read with line numbers: `{offset: 100, limit: 20, line_numbers: true}`"
+        description = "PREFERRED over built-in Read/cat: UTF-8 safe, and it reports `totalLines`, so a large file can be paged through the fields below instead of swallowed whole."
     )]
     async fn read_text_file(
         &self,
@@ -3305,15 +3301,8 @@ impl FileSystemServer {
 
     #[tool(
         name = "search_files",
-        description = "PREFERRED over built-in Glob/find. Search paths by glob (not file contents — use grep_files for that).\n\n\
-            **Why use this:** Exclusions, structured JSON (path, size, modified unix secs), symlink-safe validation.\n\n\
-            **Filters:** fileType (file/dir/symlink/any), minSize/maxSize (bytes), modifiedAfter/modifiedBefore.\n\
-            Time filters: RFC3339 (2024-01-01T12:00:00Z) or duration (17m 20s, 17m20s, 2h, 7d) = cutoff at now minus span.\n\n\
-            **Workflow examples:**\n\
-            - Files touched in the last 17m 20s: {path:\".\", pattern:\"**/*\", fileType:\"file\", modifiedAfter:\"17m 20s\"}\n\
-            - Exclude build dirs: excludePatterns:[\"target/**\",\"node_modules/**\"]\n\
-            - Older than 7 days: modifiedBefore:\"7d\"\n\
-            - Window 1h..10m ago: modifiedAfter:\"1h\", modifiedBefore:\"10m\""
+        description = "PREFERRED over built-in Glob/find: matches PATHS by glob, never file contents (that is grep_files). Returns path, size and `modified` as unix seconds.\n\
+            `modifiedAfter`/`modifiedBefore` take RFC3339 (2024-01-01T12:00:00Z) or a relative duration (`17m 20s`, `2h`, `7d`). A duration is a cutoff at now minus that span, so `modifiedBefore: \"7d\"` means older than 7 days — the opposite of how it reads."
     )]
     async fn search_files(
         &self,
@@ -3609,14 +3598,18 @@ impl FileSystemServer {
 
         if args.nearby_patterns.is_empty() {
             return Err(McpError::invalid_params(
-                "nearbyPatterns must contain at least one pattern",
+                "grep_context was called with an empty nearbyPatterns; with no context terms it \
+                 would behave as a plain grep. Pass the terms that must appear near a match, or \
+                 call grep_files instead.",
                 None,
             ));
         }
 
         if args.nearby_window_words.is_none() && args.nearby_window_chars.is_none() {
             return Err(McpError::invalid_params(
-                "Provide nearbyWindowWords and/or nearbyWindowChars",
+                "grep_context was called without a window, so \"nearby\" has no meaning. Pass \
+                 nearbyWindowWords and/or nearbyWindowChars to say how far from the match a \
+                 context term may sit.",
                 None,
             ));
         }
@@ -4811,10 +4804,9 @@ impl FileSystemServer {
 
     #[tool(
         name = "bulk_edits",
-        description = "Apply the SAME ordered edits to every file matching a glob (mass search/replace), writing in place.\n\
-All edits in one call are matched against a FROZEN SNAPSHOT of each file, and overlapping spans from different edits resolve as: longest span wins, ties go to the earlier edit. Without that rule an `oldText` that is a substring of another cascades into duplicates.\n\
-The result is deliberately compact for runs over thousands of files: `results`/`errorResults` carry only the files that changed or errored, so unchanged files are `scannedFiles - modified - errors`; `modifiedFiles` lists the changed paths; `diffsTruncated` means a diff was clipped, never that an edit was.\n\
-`editsSummary[]` totals every edit across ALL scanned files (totalMatches/totalApplied/filesWithMatches) — that is how a silently no-op edit is caught in a large migration; `matchesPerEdit[]`/`appliedPerEdit[]` report the same per file."
+        description = "OVERWRITES every file matching the glob, applying the same ordered edits to each (`dryRun` previews instead).\n\
+All edits match against a FROZEN SNAPSHOT of the file; overlapping spans resolve longest-first, ties to the earlier edit. Without that, an `oldText` contained in another cascades into duplicates.\n\
+`results`/`errorResults` list only files that changed or errored, so unchanged = `scannedFiles - modified - errors`. `diffsTruncated` means a diff was clipped, never an edit. `editsSummary[]` totals each edit across ALL scanned files: how a silently no-op edit is caught in a large migration."
     )]
     async fn bulk_edits(
         &self,
@@ -5022,22 +5014,7 @@ The result is deliberately compact for runs over thousands of files: `results`/`
 
     #[tool(
         name = "extract_lines",
-        description = "Extract (cut) lines from a text file by line numbers. Removes lines from file unless dryRun=true.
-
-PARAMETERS:
-- path: File path
-- line: Start line (1-indexed, so first line is 1)
-- endLine: End line inclusive (optional, defaults to same as 'line' for single line)
-- dryRun: If true, only preview - don't modify file
-- returnExtracted: If true, include extracted text in response (default: false to save tokens)
-
-EXAMPLES:
-- Delete line 5: {path: 'file.txt', line: 5}
-- Delete lines 10-20: {path: 'file.txt', line: 10, endLine: 20}
-- Preview deletion: {path: 'file.txt', line: 5, dryRun: true}
-- Get deleted content: {path: 'file.txt', line: 5, returnExtracted: true}
-
-USE CASES: Remove imports, delete code blocks, cut sections to paste elsewhere."
+        description = "DELETES lines from a text file by line number, in place, unless `dryRun` is true. `returnExtracted` also hands the removed text back."
     )]
     async fn extract_lines(
         &self,
@@ -5178,24 +5155,8 @@ USE CASES: Remove imports, delete code blocks, cut sections to paste elsewhere."
 
     #[tool(
         name = "extract_symbols",
-        description = "Extract (cut) characters from a file by position. Removes chars from file unless dryRun=true.
-
-PARAMETERS:
-- path: File path
-- start: Start position (0-indexed Unicode chars, not bytes)
-- end: End position exclusive (optional) - use EITHER end OR length
-- length: Number of chars to extract (optional) - use EITHER end OR length
-- dryRun: If true, only preview - don't modify file
-- returnExtracted: If true, include extracted text in response (default: false to save tokens)
-
-EXAMPLES:
-- First 10 chars: {path: 'file.txt', start: 0, length: 10}
-- Chars 100-199: {path: 'file.txt', start: 100, end: 200}
-- Preview cut: {path: 'file.txt', start: 50, length: 25, dryRun: true}
-- Get cut content: {path: 'file.txt', start: 0, length: 100, returnExtracted: true}
-
-USE CASES: Remove headers, cut text blocks, extract specific character ranges.
-Note: Uses Unicode chars (safe for multibyte), not raw bytes. If range exceeds file, returns available content."
+        description = "DELETES a character range from a file, in place, unless `dryRun` is true. `returnExtracted` also hands the removed text back.\n\
+            Positions count Unicode characters, not bytes, so a multibyte file cannot be split mid-character. A range running past the end returns what exists rather than failing."
     )]
     async fn extract_symbols(
         &self,
@@ -6472,17 +6433,7 @@ USE CASES: Patch executables, fix binary data, search-replace in non-text files.
 
     #[tool(
         name = "search_processes",
-        description = "Search for running processes by name or command line pattern.\n\n\
-            CROSS-PLATFORM: Works on Windows, macOS, and Linux.\n\n\
-            **Parameters:**\n\
-            - name_pattern: Regex to match process name (e.g., 'chrome', 'python.*')\n\
-            - cmdline_pattern: Regex to match full command line (e.g., '--port=8080')\n\
-            - include_window_title: Include window titles (Windows only, slower)\n\n\
-            **Examples:**\n\
-            - Find Chrome: {name_pattern: 'chrome'}\n\
-            - Find by port: {cmdline_pattern: '--port=3000'}\n\
-            - Find Python scripts: {name_pattern: 'python', cmdline_pattern: 'script\\\\.py'}\n\n\
-            **Note:** At least one of name_pattern or cmdline_pattern must be provided."
+        description = "Find running processes whose name or command line matches a regex, case-insensitively. At least one of `name_pattern`/`cmdline_pattern` is required, although the schema cannot mark them so; giving both narrows (a process must match each)."
     )]
     async fn search_processes(
         &self,
@@ -6490,7 +6441,9 @@ USE CASES: Patch executables, fix binary data, search-replace in non-text files.
     ) -> Result<CallToolResult, McpError> {
         if args.name_pattern.is_none() && args.cmdline_pattern.is_none() {
             return Err(McpError::invalid_params(
-                "At least one of name_pattern or cmdline_pattern must be provided",
+                "search_processes was called with neither name_pattern nor cmdline_pattern, \
+                 which would match every process on the machine. Pass at least one regex \
+                 (giving both narrows: a process must match each).",
                 None,
             ));
         }
