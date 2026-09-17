@@ -10,7 +10,16 @@
 //!
 //! 1. a tool description is at most [`MAX_DESCRIPTION`] chars;
 //! 2. description + JSON schema is at most [`MAX_TOOL`] chars;
-//! 3. no two tools ship byte-identical schemas.
+//! 3. no two tools ship byte-identical schemas;
+//! 4. every parameter a description names actually exists.
+//!
+//! Rule 4 checks **truth**, where the first three check size, and it is here because reading the
+//! text against the types found three defects the size rules were blind to: `search_processes`
+//! documented an `include_window_title` knob that does not exist, `wait` listed three `kind`
+//! values where the code accepts four, and `grep_files` never mentioned that its walk honours
+//! `.gitignore`. A description that promises a parameter the code lacks is worse than a verbose
+//! one — a verbose description wastes context, a lying one wastes the caller's reasoning and then
+//! fails silently, because an unknown key is simply ignored.
 //!
 //! **Rule 3 is enforced by what the repetition costs, not by its letter.** Taken literally it is
 //! unenforceable: MCP cannot `$ref` a schema across tools, so two tools that genuinely take the
@@ -134,6 +143,97 @@ mod tests {
         ("edit_lines", 2_100, "ContentRef payloads per edit"),
     ];
 
+    /// Identifiers a description may quote although they are not parameters of that tool.
+    ///
+    /// Each entry is a **category** with the reason it is one, never a per-tool waiver: a waiver
+    /// list grows one tool at a time until it means nothing, which is exactly how the rule this
+    /// guard replaces would die. Both categories below are global — a token listed here is
+    /// explained for every tool — and that is the deliberate trade-off: none of these names is a
+    /// knob anywhere in this server, so a per-tool list would buy precision nobody needs at the
+    /// price of a list that rots. Every token must be quoted by some description or the test says
+    /// to delete it.
+    const NOT_A_PARAMETER: &[(&str, &[&str])] = &[
+        (
+            "fields of the tool's JSON RESULT: a description legitimately says what comes back, \
+             and the caller cannot pass them",
+            &["diffsTruncated", "errorResults", "totalLines"],
+        ),
+        (
+            "serde aliases: keys the deserializer accepts but the schema does not advertise, so \
+             documenting them is true even though they are not properties",
+            &["workingDir", "working_dir", "working_directory", "end_line"],
+        ),
+    ];
+
+    /// Every `\u{60}`-quoted span in `text`.
+    fn quoted_spans(text: &str) -> Vec<&str> {
+        text.split('`').skip(1).step_by(2).collect()
+    }
+
+    /// Does `token` read as a parameter name rather than as prose?
+    ///
+    /// Deliberately narrow, because a check that cries wolf gets deleted by the next person under
+    /// time pressure. A claim must start lowercase, contain nothing but `[A-Za-z0-9_]`, and be
+    /// **compound** — carry an interior capital or an underscore. That admits `filePattern` and
+    /// `context_after` while rejecting every shape a description quotes for other reasons: prose
+    /// and shell names (`bash`, `pwsh`, `cmd`), env keys (`FS_MCP_STATE_DIR`, which starts
+    /// uppercase), paths and file names (a `.` or `/` disqualifies), expressions and enum values
+    /// written with punctuation, and anything containing a space. The cost of the narrowness is
+    /// that a lie about a single-word parameter slips through; the benefit is a check with no
+    /// false alarms, which is the only kind that survives.
+    fn reads_as_parameter(token: &str) -> bool {
+        let mut chars = token.chars();
+        match chars.next() {
+            Some(c) if c.is_ascii_lowercase() => {}
+            _ => return false,
+        }
+        if !token.chars().all(|c| c.is_ascii_alphanumeric() || c == '_') {
+            return false;
+        }
+        token.chars().any(|c| c.is_ascii_uppercase() || c == '_')
+    }
+
+    /// Every property name anywhere in a schema, including nested `definitions` — `oldText` is a
+    /// knob of `bulk_edits` even though it belongs to the `EditOperation` definition.
+    fn property_names(schema: &serde_json::Value, out: &mut std::collections::BTreeSet<String>) {
+        match schema {
+            serde_json::Value::Object(map) => {
+                if let Some(serde_json::Value::Object(props)) = map.get("properties") {
+                    out.extend(props.keys().cloned());
+                }
+                for value in map.values() {
+                    property_names(value, out);
+                }
+            }
+            serde_json::Value::Array(items) => {
+                for item in items {
+                    property_names(item, out);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    /// Every `description` string inside a schema, so a lying property doc is caught too.
+    fn nested_descriptions(schema: &serde_json::Value, out: &mut Vec<String>) {
+        match schema {
+            serde_json::Value::Object(map) => {
+                if let Some(serde_json::Value::String(text)) = map.get("description") {
+                    out.push(text.clone());
+                }
+                for value in map.values() {
+                    nested_descriptions(value, out);
+                }
+            }
+            serde_json::Value::Array(items) => {
+                for item in items {
+                    nested_descriptions(item, out);
+                }
+            }
+            _ => {}
+        }
+    }
+
     /// The tool surface as `tools/list` serves it: name -> (description, compact schema).
     fn tool_surface() -> BTreeMap<String, (String, String)> {
         FileSystemServer::build_tool_router()
@@ -218,6 +318,82 @@ mod tests {
              the weight is prose, cut it; if it is schema, the tool has too many parameters and \
              that is a design question, not a wording one. A tool that genuinely earns more goes \
              in OVER_BUDGET_ALLOWED with a ceiling and a reason.\noffenders: {offenders:#?}"
+        );
+    }
+
+    /// Rule 4: a description may not name a parameter the tool does not accept.
+    ///
+    /// Scans the tool description AND every property description, since a property doc lies just
+    /// as readily. A quoted token that reads as a parameter must be a property of that tool's
+    /// schema, the name of another tool, or listed in [`NOT_A_PARAMETER`].
+    #[test]
+    fn descriptions_name_only_parameters_that_exist() {
+        use std::collections::{BTreeMap, BTreeSet};
+
+        let surface = tool_surface();
+        let tool_names: BTreeSet<&str> = surface.keys().map(String::as_str).collect();
+        let explained: BTreeMap<&str, &str> = NOT_A_PARAMETER
+            .iter()
+            .flat_map(|(reason, tokens)| tokens.iter().map(move |t| (*t, *reason)))
+            .collect();
+
+        let mut offenders = Vec::new();
+        let mut used: BTreeSet<&str> = BTreeSet::new();
+
+        for (name, (description, schema)) in &surface {
+            let schema: serde_json::Value = match serde_json::from_str(schema) {
+                Ok(value) => value,
+                Err(e) => {
+                    offenders.push(format!("{name}: schema did not parse back: {e}"));
+                    continue;
+                }
+            };
+            let mut properties = BTreeSet::new();
+            property_names(&schema, &mut properties);
+            let mut texts = vec![description.clone()];
+            nested_descriptions(&schema, &mut texts);
+
+            for text in &texts {
+                for token in quoted_spans(text) {
+                    if !reads_as_parameter(token)
+                        || properties.contains(token)
+                        || tool_names.contains(token)
+                    {
+                        continue;
+                    }
+                    match explained.get_key_value(token) {
+                        Some((listed, _)) => {
+                            used.insert(listed);
+                        }
+                        None => offenders.push(format!(
+                            "{name}: names `{token}`, which is not one of its parameters"
+                        )),
+                    }
+                }
+            }
+        }
+
+        // Staleness, as everywhere else here: a token nothing quotes any more is a line nobody
+        // will delete unless the test asks for it.
+        for (_, tokens) in NOT_A_PARAMETER {
+            for token in *tokens {
+                if !used.contains(token) {
+                    offenders.push(format!(
+                        "`{token}` is no longer quoted by any description — drop it from \
+                         NOT_A_PARAMETER"
+                    ));
+                }
+            }
+        }
+
+        assert!(
+            offenders.is_empty(),
+            "docs/TOOL_STYLE.md: a description must not promise a parameter the tool does not \
+             accept. An unknown key is silently ignored, so the caller is misled and then gets no \
+             error to learn from. Either the parameter is missing from the code or the sentence is \
+             wrong — fix whichever is actually broken. If the identifier is not a parameter at all, \
+             it belongs in a NOT_A_PARAMETER category, with the reason that category \
+             exists.\noffenders: {offenders:#?}"
         );
     }
 

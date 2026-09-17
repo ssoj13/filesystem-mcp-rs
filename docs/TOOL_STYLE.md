@@ -79,11 +79,26 @@ Never return a bare `io::Error` where the caller cannot tell which path failed: 
 
 ## Enforcement
 
-`src/core/tool_surface_guard.rs` checks all three rules against the real router — the one
-`tools/list` serves, built by `FileSystemServer::build_tool_router` with schemas already
-normalized — the same way `paths_are_centralized` checks where state may live. A rule this file
-states but the guard cannot see is a rule that will decay, so either make it checkable or accept
-that it is advice and mark it as such.
+`src/core/tool_surface_guard.rs` checks all three budgets **and one rule about truth** against the
+real router — the one `tools/list` serves, built by `FileSystemServer::build_tool_router` with
+schemas already normalized — the same way `paths_are_centralized` checks where state may live. A
+rule this file states but the guard cannot see is a rule that will decay, so either make it
+checkable or accept that it is advice and mark it as such.
+
+**Every parameter a description names must exist.** Size rules cannot see this, and it is the worse
+failure: a verbose description wastes context, a lying one wastes the caller's reasoning and then
+fails silently, because an unknown key is simply ignored. `search_processes` documented an
+`include_window_title` knob that does not exist and nothing noticed until someone read the text
+against the type. The guard now scans the tool description and every property description, and a
+backtick-quoted token that **reads as a parameter** must be a property of that tool's schema, the
+name of another tool, or listed in `NOT_A_PARAMETER` under a category with its reason.
+
+"Reads as a parameter" is deliberately narrow: lowercase first character, `[A-Za-z0-9_]` only, and
+compound — an interior capital or an underscore. That admits `filePattern` and `context_after` while
+rejecting shell names (`bash`), env keys (`FS_MCP_STATE_DIR`, which starts uppercase), file names
+and paths (a `.` or `/` disqualifies) and anything with a space. A lie about a single-word parameter
+slips through; that is the price of a check with no false alarms, and a check that cries wolf is one
+the next person deletes under time pressure.
 
 The error-message shape above is **advice**: it is a judgement about prose that no assertion can
 make. Every message touched since this document was written follows it.

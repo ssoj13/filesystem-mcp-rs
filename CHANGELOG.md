@@ -6,7 +6,14 @@
 
 - **`src/core/tool_surface_guard.rs` enforces `docs/TOOL_STYLE.md` on every `cargo test`**, over the
   real router `tools/list` serves: a description is at most 600 chars, description + schema at most
-  2,000, and no two tools may ship a costly byte-identical schema. Exceptions carry a ceiling and a
+  2,000, no two tools may ship a costly byte-identical schema, **and every parameter a description
+  names must actually exist**. That last rule checks truth rather than size, and it is the worse
+  failure it guards: a verbose description wastes context, a lying one wastes the caller's reasoning
+  and then fails silently, because an unknown key is ignored. `search_processes` documented an
+  `include_window_title` knob that does not exist, and nothing noticed until someone read the text
+  against the type. The check is deliberately narrow — only backtick-quoted, lowercase-initial,
+  compound identifiers count as parameter claims — so shell names, env keys and file names need no
+  exemption, and a check with false alarms is one the next person deletes. Exceptions carry a ceiling and a
   written reason, so "exempt" never means "unbounded", and an exception that stops being needed
   fails the test by name instead of lingering. A budget nobody checks decays within two waves —
   `paths_guard` exists for the same reason.

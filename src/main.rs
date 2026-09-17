@@ -3440,7 +3440,7 @@ impl FileSystemServer {
         name = "grep_files",
         description = "Search file CONTENTS by regex (ripgrep's library). Use instead of shell grep.\n\
             `pattern` is matched against file contents; `filePattern` is a glob matched against file names — the two are easy to swap by accident.\n\
-            Pass `pattern` as a plain JSON string with no extra quote characters, and search for the identifier itself rather than its surrounding source delimiters (`spawn_worker`, not `\"spawn_worker\"` or `spawn_worker;`).\n\
+            Pass `pattern` as a plain JSON string with no extra quote characters, and search for the identifier itself rather than the source delimiters around it — not the quotes it sits in, nor a trailing `;`.\n\
             Honours .gitignore and skips binary files, so a file that exists can still be absent from the results."
     )]
     async fn grep_files(
