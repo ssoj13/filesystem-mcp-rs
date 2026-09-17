@@ -220,7 +220,14 @@ struct FileSystemServer {
 }
 
 impl FileSystemServer {
-    fn new(allowed: AllowedDirs) -> Self {
+    /// Build the server.
+    ///
+    /// Fallible because the content plane's blob spool lives under the state root, and an
+    /// unresolvable state root breaks the memory database, captures, stream logs and temporary
+    /// scripts alike. Reporting it once here — in the same `io::Error` shape `main` already uses
+    /// for a bad memory access mode — beats smearing one root cause across a dozen unrelated
+    /// per-tool failures later.
+    fn new(allowed: AllowedDirs) -> std::io::Result<Self> {
         let mut tool_router = Self::tool_router();
         // Computer-control domains: per-domain routers (S1 spike — rmcp cannot
         // cfg-gate methods inside one impl), merged before schema normalization.
@@ -237,7 +244,7 @@ impl FileSystemServer {
         #[cfg(feature = "ctl-clip-files")]
         tool_router.merge(Self::ctl_clip_router());
         normalize_tool_schemas(&mut tool_router);
-        Self {
+        Ok(Self {
             allowed,
             tool_router,
             allow_symlink_escape: false,
@@ -274,8 +281,13 @@ impl FileSystemServer {
             memory_store: None,
             llm_server: None,
             session_footer: true,
-            content_plane: ContentPlane::new().expect("content plane temp dir"),
-        }
+            content_plane: ContentPlane::new().map_err(|e| {
+                std::io::Error::new(
+                    e.kind(),
+                    format!("Cannot create the content-plane blob spool: {e}"),
+                )
+            })?,
+        })
     }
 
     fn require_llm(&self) -> Result<&tools::llm::LlmMcpServer, McpError> {
@@ -2244,8 +2256,9 @@ struct RunCommandArgs {
     /// the log file. `stdoutTotalLines` always reports the true length.
     #[serde(default = "default_flex_true", alias = "stream_output")]
     stream_output: FlexBool,
-    /// Directory for streamed output files (optional). Defaults to the OS temp
-    /// dir (`<temp>/filesystem-mcp`) so auto-created logs never litter the cwd.
+    /// Directory for streamed output files (optional). Defaults to the server's
+    /// own scratch dir (`~/.filesystem-mcp-rs/tmp/`) so auto-created logs never
+    /// litter the cwd and are swept by the same retention as other scratch files.
     #[serde(alias = "stream_dir")]
     stream_dir: Option<String>,
     /// DEPRECATED: use mode="detached" instead. Kept for backward compat.
@@ -7581,7 +7594,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Create server instance
     let allowed = AllowedDirs::new(args.allowed_dirs);
-    let mut server = FileSystemServer::new(allowed);
+    let mut server = FileSystemServer::new(allowed)?;
     server.allow_symlink_escape = args.allow_symlink_escape;
     server.session_footer = !args.no_session_footer;
     #[cfg(feature = "http-tools")]

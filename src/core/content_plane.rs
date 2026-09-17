@@ -477,12 +477,6 @@ impl ContentPlane {
     }
 }
 
-impl Default for ContentPlane {
-    fn default() -> Self {
-        Self::new().expect("failed to create content plane temp dir")
-    }
-}
-
 fn enforce_inline_limit(len: usize) -> Result<(), ContentError> {
     if len > INLINE_MAX_BYTES {
         Err(ContentError::InlineTooLarge {
