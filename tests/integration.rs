@@ -243,7 +243,7 @@ async fn run_command_cwd_description_uses_plain_quotes() -> Result<()> {
     assert!(
         desc.contains("\"C:/projects/repo\""),
         "run_command cwd example must use plain quotes; got desc snippet: {:?}",
-        &desc[desc.find("cwd").unwrap_or(0)..]
+        desc[desc.find("cwd").unwrap_or(0)..]
             .chars()
             .take(120)
             .collect::<String>()
