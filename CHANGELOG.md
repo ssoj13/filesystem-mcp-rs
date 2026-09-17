@@ -13,10 +13,18 @@
 - **The tool list is a prompt, not documentation**: every character of it is loaded before a session's
   first request. A real handshake measured 132 tools at 148,435 chars; the fifteen heaviest were 40%
   of that, while the median tool was already lean. The heavy ones are now trimmed to
-  **121,058 chars (-18.4%)** without losing a fact a caller cannot infer — units, precedence,
+  **114,194 chars (-23.1%)** without losing a fact a caller cannot infer — units, precedence,
   platform traps and "0 = unlimited" conventions all stayed. What went was prose restating the type
   system, worked examples re-spelling the schema, and facts said twice (once in the description and
   once in the property that owns them). `docs/TOOL_STYLE.md` is the resulting contract.
+- **Tool schemas no longer declare `$schema`** (-7,068 chars). The MCP spec (2025-06-18) never asks
+  for one on `inputSchema` and its examples are bare objects, so the declaration was ~7.4k chars of
+  every session's context for nothing. It was also not what it appeared: rmcp generates with
+  `SchemaSettings::draft2020_12()`, and this crate was *overwriting* that declaration with the
+  draft-07 URL "for MCP compatibility" — a claim the spec does not support. Merely dropping the
+  overwrite would have left a 2020-12 declaration over a draft-07 body, so the key is stripped
+  outright. Verified over a live handshake: no tool declares it, and `grep_files` / `edit_file` calls
+  with nested and array arguments still validate and run.
 - **`ai_messages_gemini` / `_openai` / `_cerebras` and the three `ai_count_tokens_*` variants each
   shipped a byte-identical copy of their sibling's schema** — 13.5k chars of pure duplication. They
   already share the Rust type, and MCP cannot share a schema between tools, so the pinned variants

@@ -1,6 +1,18 @@
 //! JSON Schema conversion utilities.
 //!
-//! Converts schemars 2020-12 schemas to Draft-07 for MCP compatibility.
+//! Rewrites schemars' 2020-12 output into the Draft-07 shape MCP clients expect: `$defs` becomes
+//! `definitions` and every `$ref` is repointed at it.
+//!
+//! It deliberately **strips** `$schema`. The MCP specification (2025-06-18, Server Features /
+//! Tools) never mentions one for `inputSchema`, and its own examples are bare
+//! `{"type": "object", "properties": {...}, "required": [...]}` objects. rmcp generates with
+//! `SchemaSettings::draft2020_12()`, so every tool schema arrives declaring
+//! `https://json-schema.org/draft/2020-12/schema`; this code used to overwrite that with the
+//! draft-07 URL "for MCP compatibility" — a claim the spec does not support and no client was
+//! ever found to need. Merely dropping the overwrite would be worse than either: the declaration
+//! would say 2020-12 while the body uses draft-07 `definitions`. So the key goes entirely, which
+//! is both spec-shaped and ~7.4k chars off every session's context before a single request, for
+//! no information the caller can use (`docs/TOOL_STYLE.md`).
 
 use rmcp::handler::server::router::tool::ToolRouter;
 use serde_json::Value;
@@ -41,11 +53,9 @@ pub fn to_draft07_schema_strict(mut schema: Value) -> Value {
 }
 
 fn prepare_draft07(schema: &mut Value) {
+    // Drop rmcp's 2020-12 declaration rather than restating it: see the module doc.
     if let Value::Object(root) = schema {
-        root.insert(
-            "$schema".to_string(),
-            Value::String("http://json-schema.org/draft-07/schema#".to_string()),
-        );
+        root.remove("$schema");
     }
     rewrite_schema_refs(schema);
 }
@@ -159,13 +169,28 @@ mod tests {
     use super::*;
     use serde_json::json;
 
+    /// A served schema declares no `$schema`: MCP never asks for one, and 132 copies of the
+    /// declaration cost ~7.4k chars of every session's context for no information. The input
+    /// carries rmcp's real 2020-12 declaration, because stripping is the point — an earlier
+    /// version of this test passed while the key was merely being overwritten.
     #[test]
-    fn test_to_draft07_adds_schema() {
-        let input = json!({
-            "type": "object"
-        });
-        let output = to_draft07_schema(input);
-        assert_eq!(output["$schema"], "http://json-schema.org/draft-07/schema#");
+    fn test_to_draft07_strips_the_schema_keyword() {
+        let rmcp_shaped = || {
+            json!({
+                "$schema": "https://json-schema.org/draft/2020-12/schema",
+                "type": "object"
+            })
+        };
+        assert!(
+            to_draft07_schema(rmcp_shaped()).get("$schema").is_none(),
+            "served schemas must not declare $schema"
+        );
+        assert!(
+            to_draft07_schema_strict(rmcp_shaped())
+                .get("$schema")
+                .is_none(),
+            "the strict mem_* path must strip it too"
+        );
     }
 
     #[test]
