@@ -7679,7 +7679,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // serving, so a failure here is reported and the server starts anyway. Placed after the
     // server is built so that nothing about it can delay the handshake on the error path.
     match core::housekeeping::sweep_tmp(std::time::SystemTime::now()) {
-        Ok(n) if n > 0 => info!("Housekeeping: removed {n} stale scratch entries"),
+        Ok(core::housekeeping::Sweep::Ran(n)) if n > 0 => {
+            info!("Housekeeping: removed {n} stale scratch entries")
+        }
+        // Nothing to say: no stale entries, another process is handling it, or retention is off.
         Ok(_) => {}
         Err(e) => warn!("Housekeeping skipped: {e}"),
     }

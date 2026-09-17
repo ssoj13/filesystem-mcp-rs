@@ -47,7 +47,7 @@ fn paths_vars() -> Vec<EnvVar> {
         EnvVar {
             key: "FS_MCP_TMP_KEEP_HOURS",
             default: "24",
-            help: "Delete scratch files under <state>/tmp older than this many hours.",
+            help: "Delete scratch under <state>/tmp older than this many hours. 0 = never sweep.",
         },
     ]
 }

@@ -285,8 +285,6 @@ impl ContentPlane {
     /// can spool into a `TempDir` instead of the real state root.
     pub fn in_dir(root: PathBuf) -> std::io::Result<Self> {
         std::fs::create_dir_all(&root)?;
-        std::fs::create_dir_all(root.join("sessions"))?;
-        std::fs::create_dir_all(root.join("blobs"))?;
         Ok(Self {
             root,
             sessions: Arc::new(Mutex::new(HashMap::new())),
@@ -294,10 +292,22 @@ impl ContentPlane {
         })
     }
 
+    /// The named subdirectory of the spool, created if it is missing.
+    ///
+    /// Created before every write rather than once in [`ContentPlane::in_dir`] because the spool
+    /// lives under `<state>/tmp`, which the retention sweep reclaims by age. A server that stayed
+    /// up but idle long enough for its spool to be swept must keep working when it is next asked
+    /// to stage bytes, instead of failing every later blob call with a bare NotFound.
+    fn dir(&self, name: &str) -> Result<PathBuf, ContentError> {
+        let dir = self.root.join(name);
+        std::fs::create_dir_all(&dir).map_err(|e| ContentError::Io(e.to_string()))?;
+        Ok(dir)
+    }
+
     pub fn begin(&self) -> Result<String, ContentError> {
         let id = Uuid::new_v4().to_string();
         let seq = self.seq.fetch_add(1, Ordering::Relaxed);
-        let path = self.root.join("sessions").join(format!("{id}-{seq}.part"));
+        let path = self.dir("sessions")?.join(format!("{id}-{seq}.part"));
         std::fs::File::create(&path).map_err(|e| ContentError::Io(e.to_string()))?;
         let mut guard = self
             .sessions
@@ -367,7 +377,7 @@ impl ContentPlane {
                 got: sha256,
             });
         }
-        let dest = self.root.join("blobs").join(&sha256);
+        let dest = self.dir("blobs")?.join(&sha256);
         if dest.exists() {
             let _ = std::fs::remove_file(&session.path);
         } else {

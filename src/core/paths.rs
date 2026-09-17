@@ -69,8 +69,17 @@ pub fn sub_dir(kind: SubDir) -> io::Result<PathBuf> {
 /// retention policy; the sweep is only the thing that acts on it. An unparseable value is
 /// reported and the default applied: refusing to start over a malformed cleanup interval would
 /// be a worse outcome than keeping scratch files for the standard day.
+///
+/// **Zero means retention is off**, not "delete everything now". A knob set to zero reading as
+/// "destroy all scratch immediately" is a foot-gun, and with dozens of concurrent servers it
+/// would reclaim live spools on every start; "switch it off" is also the only thing an operator
+/// plausibly means by 0. The caller ([`crate::core::housekeeping::sweep_tmp`]) applies that.
+///
+/// The result is clamped to [`TMP_KEEP_HOURS_MAX`] so that no caller can overflow converting it
+/// to a duration: in debug that overflow panics, and a panic in housekeeping would keep the
+/// transport from ever starting.
 pub fn tmp_keep_hours() -> u64 {
-    match env_spec::get("FS_MCP_TMP_KEEP_HOURS") {
+    let hours = match env_spec::get("FS_MCP_TMP_KEEP_HOURS") {
         None => TMP_KEEP_HOURS_DEFAULT,
         Some(raw) => raw.parse().unwrap_or_else(|_| {
             warn!(
@@ -78,7 +87,14 @@ pub fn tmp_keep_hours() -> u64 {
             );
             TMP_KEEP_HOURS_DEFAULT
         }),
+    };
+    if hours > TMP_KEEP_HOURS_MAX {
+        warn!(
+            "FS_MCP_TMP_KEEP_HOURS={hours} exceeds the {TMP_KEEP_HOURS_MAX}-hour maximum; using that instead"
+        );
+        return TMP_KEEP_HOURS_MAX;
     }
+    hours
 }
 
 /// The retention applied when `FS_MCP_TMP_KEEP_HOURS` is unset.
@@ -89,6 +105,14 @@ pub fn tmp_keep_hours() -> u64 {
 /// declaration; `env_spec`'s `state_keys_are_registered_once_and_described_correctly` asserts
 /// they agree instead.
 pub const TMP_KEEP_HOURS_DEFAULT: u64 = 24;
+
+/// The longest retention accepted, one year.
+///
+/// An upper bound exists so the value can always be converted to a `Duration` without overflow,
+/// and a year is where "keep it longer" stops being distinguishable from "keep it forever" for a
+/// scratch directory. Anything above is clamped with a warning rather than refused: a silly
+/// number in an environment variable must not stop the server from starting.
+pub const TMP_KEEP_HOURS_MAX: u64 = 24 * 365;
 
 /// Resolve and create the root. Split from [`state_dir`] so tests can inject an override
 /// without mutating the process environment.
