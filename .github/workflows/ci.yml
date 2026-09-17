@@ -30,7 +30,7 @@ jobs:
 
       - uses: dtolnay/rust-toolchain@stable
         with:
-          components: rustfmt
+          components: rustfmt, clippy
 
       # Once per matrix, not three times: rustfmt's answer does not depend on the OS, and a
       # failure here is the same failure on every runner.
@@ -54,6 +54,11 @@ jobs:
             libdrm-dev \
             libgbm-dev \
             libclang-dev
+
+      # On every runner, unlike `cargo fmt`: half this crate is behind `#[cfg(windows)]`, so a
+      # Linux-only lint pass would never look at the computer-control driver at all.
+      - name: Clippy
+        run: cargo clippy --all-targets -- -D warnings
 
       - name: Build
         run: cargo build --release
