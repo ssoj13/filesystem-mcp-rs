@@ -5,6 +5,7 @@ pub mod dollar_guard;
 pub mod format;
 pub mod glob;
 pub mod housekeeping;
+pub mod instance;
 pub mod logging;
 pub mod path;
 pub mod paths;
