@@ -327,9 +327,22 @@ mod tests {
         (!word.is_empty()).then_some(word)
     }
 
+    /// The fewest tools a build this guard is asked about can plausibly serve.
+    ///
+    /// Every rule here is a loop over the surface, so an empty surface satisfies all of them
+    /// vacuously and the guard would go green over a `tools/list` that serves nothing. A floor,
+    /// not the exact count (132 under the features `cargo test` builds), because the count moves
+    /// with the feature flags and an equality would have to be edited on every legitimate change
+    /// - which is how a number stops being read and starts being updated reflexively. This one
+    /// is below every supported feature combination and still nowhere near zero.
+    const MIN_TOOLS: usize = 100;
+
     /// The tool surface as `tools/list` serves it: name -> (description, compact schema).
+    ///
+    /// Asserts [`MIN_TOOLS`] here rather than in one test, so that every rule inherits it and
+    /// none of them can pass over a router that failed to build.
     fn tool_surface() -> BTreeMap<String, (String, String)> {
-        FileSystemServer::build_tool_router()
+        let surface: BTreeMap<String, (String, String)> = FileSystemServer::build_tool_router()
             .map
             .iter()
             .map(|(name, route)| {
@@ -338,7 +351,13 @@ mod tests {
                     .unwrap_or_else(|e| panic!("{name}: schema is not serializable: {e}"));
                 (name.to_string(), (description, schema))
             })
-            .collect()
+            .collect();
+        assert!(
+            surface.len() >= MIN_TOOLS,
+            "the tool router served {} tools; under {MIN_TOOLS} every rule here passes vacuously",
+            surface.len()
+        );
+        surface
     }
 
     /// Look an allowlist entry up by tool name.
