@@ -3,16 +3,22 @@
 //! Rewrites schemars' 2020-12 output into the Draft-07 shape MCP clients expect: `$defs` becomes
 //! `definitions` and every `$ref` is repointed at it.
 //!
-//! It deliberately **strips** `$schema`. The MCP specification (2025-06-18, Server Features /
-//! Tools) never mentions one for `inputSchema`, and its own examples are bare
-//! `{"type": "object", "properties": {...}, "required": [...]}` objects. rmcp generates with
+//! It deliberately **strips** `$schema`, and this is the note that should stop anyone re-adding
+//! it. **Checked against the specification on 2026-09-17** (MCP 2025-06-18, Server Features /
+//! Tools): `inputSchema` is described only as "JSON Schema defining expected parameters",
+//! `$schema` appears nowhere in the requirements, and every example in that section ships a bare
+//! `{"type": "object", "properties": {...}, "required": [...]}`. Nothing in rmcp 3.1.4 reads it
+//! either: its only `$schema` handling is in `model::elicitation_schema` (a different MCP
+//! feature), where the field is optional, skipped when absent, and covered by a test asserting no
+//! key is emitted without a dialect. rmcp generates with
 //! `SchemaSettings::draft2020_12()`, so every tool schema arrives declaring
 //! `https://json-schema.org/draft/2020-12/schema`; this code used to overwrite that with the
 //! draft-07 URL "for MCP compatibility" — a claim the spec does not support and no client was
-//! ever found to need. Merely dropping the overwrite would be worse than either: the declaration
-//! would say 2020-12 while the body uses draft-07 `definitions`. So the key goes entirely, which
-//! is both spec-shaped and ~7.4k chars off every session's context before a single request, for
-//! no information the caller can use (`docs/TOOL_STYLE.md`).
+//! ever found to need. That comment is how the key survived this long, which is why this one is
+//! dated and cites what was read. Merely dropping the overwrite would be worse than either: the
+//! declaration would say 2020-12 while the body uses draft-07 `definitions`. So the key goes
+//! entirely, which is both spec-shaped and ~7.4k chars off every session's context before a
+//! single request, for no information the caller can use (`docs/TOOL_STYLE.md`).
 
 use rmcp::handler::server::router::tool::ToolRouter;
 use serde_json::Value;
