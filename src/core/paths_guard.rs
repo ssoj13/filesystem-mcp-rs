@@ -10,6 +10,11 @@
 //! not just the spelling it names, so one line carrying two different forbidden spellings is
 //! excused by either - no such line exists, and writing one takes effort.
 //!
+//! The check also knows only the spellings in `FORBIDDEN`, so reaching the same directories through
+//! the environment - `env::var("HOME")`, `env::var("APPDATA")`, `env::var("TEMP")` - passes
+//! silently. None exist today, and unlike the two evasions above this one could happen by accident,
+//! so it is the gap worth remembering when reviewing anything that builds a path from a variable.
+//!
 //! The module is test-only; it contains no runtime code and is compiled out of release builds.
 
 #[cfg(test)]
@@ -76,16 +81,23 @@ mod tests {
 
     /// An exemption for a file that no longer exists is a hole waiting for the next file of that
     /// name to walk into it, so a stale `ALLOWED` key fails the build rather than sitting unread.
+    ///
+    /// A key must also live under one of [`ROOTS`]: `benches/x.rs` could name a real file and still
+    /// be dead, because [`visit`] never walks there and so never consults it.
     #[test]
     fn allowed_entries_all_exist() {
-        let missing: Vec<&str> = ALLOWED
+        let dead: Vec<&str> = ALLOWED
             .iter()
             .map(|(file, _)| *file)
-            .filter(|file| !crate_root().join(file).is_file())
+            .filter(|file| {
+                !crate_root().join(file).is_file()
+                    || !ROOTS.iter().any(|r| file.starts_with(&format!("{r}/")))
+            })
             .collect();
         assert!(
-            missing.is_empty(),
-            "ALLOWED names files that do not exist; delete these entries: {missing:#?}"
+            dead.is_empty(),
+            "ALLOWED names files that do not exist or are outside {ROOTS:?}, so the exemption is \
+             never consulted; delete these entries: {dead:#?}"
         );
     }
 

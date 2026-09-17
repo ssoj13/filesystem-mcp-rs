@@ -5,10 +5,11 @@
 //! spread over four roots (`data_local_dir`, `data_dir`, two different temp subdirs), two
 //! of which differ per OS and per Windows account, which made "where is it?" unanswerable.
 //!
-//! No other module may call `dirs::*` or `std::env::temp_dir`; tests take scratch space from
-//! `tempfile::TempDir` instead. That rule is not a convention here - the test
+//! No other module may call `dirs::*`, `std::env::temp_dir` or `std::env::home_dir`; tests take
+//! scratch space from `tempfile::TempDir` instead. That rule is not a convention here - the test
 //! `paths_are_centralized` in `src/core/paths_guard.rs` scans every `.rs` file under `src/` and
-//! fails the build on any call site outside this module, so the drift cannot come back quietly.
+//! `tests/` and fails the build on any call site outside this module, so the drift cannot come
+//! back quietly. That module's doc records the few spellings the check cannot see.
 
 use std::io;
 use std::path::{Path, PathBuf};
