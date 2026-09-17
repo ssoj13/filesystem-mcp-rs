@@ -140,8 +140,11 @@ pub enum Migrated {
 /// and a partial or duplicate `new` is removed, so `Ambiguous` means literally what it says:
 /// after a failed migration the only file that exists is the original.
 ///
-/// Coverage note: the cross-volume copy fallback itself cannot be exercised on a single-volume
-/// test machine, so it is verified only by inspection; the failure handling around it is tested.
+/// Coverage note, precisely: the cross-volume `copy` fallback is never entered on a single-volume
+/// test machine, so the copy step itself is verified by inspection only. The cleanup that removes
+/// a leftover `new` is reached on Windows by `migrate_removes_the_leftover_when_the_original_cannot_be_unlinked`;
+/// on Unix that arm is verified by reading. The parent-creation failure returns before any of
+/// this and is covered separately.
 #[allow(dead_code)] // wired by Task 5; delete this attribute there
 pub fn migrate(old: &Path, new: &Path) -> Migrated {
     let ambiguous = || Migrated::Ambiguous {
@@ -173,7 +176,11 @@ pub fn migrate(old: &Path, new: &Path) -> Migrated {
                     Migrated::Moved
                 }
                 Err(e) => {
-                    warn!("Failed to migrate {} -> {}: {e}", old.display(), new.display());
+                    warn!(
+                        "Failed to migrate {} -> {}: {e}",
+                        old.display(),
+                        new.display()
+                    );
                     // The copy may have half-written `new`, or have succeeded with only the
                     // removal of `old` failing. Either way `new` must go: a truncated database
                     // would be opened as real data, and a complete duplicate would make every
@@ -181,8 +188,10 @@ pub fn migrate(old: &Path, new: &Path) -> Migrated {
                     if new.exists()
                         && let Err(e) = std::fs::remove_file(new)
                     {
+                        // Deliberately not "copy": this file may be a truncated partial, and an
+                        // operator told it is a copy would assume the data there is complete.
                         warn!(
-                            "Left a redundant copy at {} that could not be removed: {e}",
+                            "Left a leftover file at {} that could not be removed: {e}",
                             new.display()
                         );
                     }
@@ -200,6 +209,18 @@ pub fn migrate(old: &Path, new: &Path) -> Migrated {
 #[allow(dead_code)] // wired by Task 5; delete this attribute there
 pub fn legacy_local_dir() -> Option<PathBuf> {
     dirs::data_local_dir().map(|d| d.join("filesystem-mcp-rs"))
+}
+
+/// The pre-2026-09 path of the computer-control audit log, the one file under the old
+/// `computer-mcp-rs` directory that cannot be regenerated. Used only to migrate it; the
+/// sibling directories there (ocrs models, layouts, safety state) are re-created on demand
+/// and are deliberately not moved.
+///
+/// Returns the file, not the directory it sits in, so no caller can hand a directory to
+/// [`migrate`], which refuses those.
+#[allow(dead_code)] // wired by Task 3; delete this attribute there
+pub fn legacy_ctl_audit() -> Option<PathBuf> {
+    dirs::data_dir().map(|d| d.join("computer-mcp-rs").join("audit.jsonl"))
 }
 
 #[cfg(test)]
@@ -341,6 +362,52 @@ mod tests {
         assert!(old.exists(), "the original must survive a failed migration");
         assert_eq!(std::fs::read(&old).expect("read"), b"payload");
         assert!(!new.exists(), "no partial file may be left at the new path");
+        std::fs::remove_dir_all(&base).ok();
+    }
+
+    /// The CQ-1 cleanup arm: `copy` succeeded but `remove_file(old)` failed, so a complete
+    /// duplicate exists at `new` and must be removed - otherwise every later startup would see
+    /// two candidates and report a conflict that never resolves.
+    ///
+    /// Windows-only because this is the one way to provoke that exact shape without injecting a
+    /// filesystem seam: a handle opened with `share_mode(FILE_SHARE_READ)` lets `copy` read the
+    /// file while denying the DELETE access that `rename` and `remove_file` both need. Unix has
+    /// no equivalent (an open file is still unlinkable), so there that arm is verified by reading.
+    #[test]
+    #[cfg(windows)]
+    fn migrate_removes_the_leftover_when_the_original_cannot_be_unlinked() {
+        use std::os::windows::fs::OpenOptionsExt;
+        // Readers allowed, deleters and renamers refused.
+        const FILE_SHARE_READ: u32 = 0x0000_0001;
+
+        let base = std::env::temp_dir().join(format!("fsmcp-mig-{}", uuid::Uuid::new_v4()));
+        let old = base.join("old/memory2.db");
+        let new = base.join("new/memory2.db");
+        std::fs::create_dir_all(old.parent().expect("parent")).expect("mkdir");
+        std::fs::write(&old, b"payload").expect("write");
+
+        let handle = std::fs::OpenOptions::new()
+            .read(true)
+            .share_mode(FILE_SHARE_READ)
+            .open(&old)
+            .expect("hold the original open");
+
+        let outcome = migrate(&old, &new);
+        drop(handle);
+
+        assert_eq!(
+            outcome,
+            Migrated::Ambiguous {
+                old: old.clone(),
+                new: new.clone()
+            }
+        );
+        assert!(old.exists(), "the original must survive");
+        assert_eq!(std::fs::read(&old).expect("read"), b"payload");
+        assert!(
+            !new.exists(),
+            "the duplicate left by the successful copy must be cleaned up"
+        );
         std::fs::remove_dir_all(&base).ok();
     }
 }
