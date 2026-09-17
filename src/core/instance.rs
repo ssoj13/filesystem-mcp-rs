@@ -6,20 +6,36 @@
 //! any later record naming that file agree.
 //!
 //! Used by [`crate::core::logging`] to name this process's log file; wave 3's `sessions` table
-//! will key its row by the same pair.
+//! must key its rows on the same triple the file name carries - day, pid, instance - and never on
+//! the instance alone. See [`id`] for why.
 
 use std::sync::OnceLock;
 
-/// A short, filename-safe, per-process identity: the first 32 bits of a v4 uuid, rendered as
-/// eight lowercase hex digits. Long enough that two concurrent servers do not collide in
-/// practice, short enough to read in a directory listing, and free of anything a filesystem
-/// would object to.
+/// A short, filename-safe, per-process identity: the high 64 bits of a v4 uuid, rendered as
+/// sixteen lowercase hex digits. Short enough to read in a directory listing, and free of
+/// anything a filesystem would object to.
 ///
-/// Taken from the uuid's fields rather than by slicing its string form, which would be a
+/// **This is a nonce, not a unique id, and it is not unique across time.** It is drawn fresh per
+/// process with nothing remembering what was drawn before, so collisions follow the birthday
+/// bound over however many values a reader is comparing. Among the handful of servers alive on
+/// one machine that is nothing; over the rows of a table that accumulates, it is the whole
+/// question. 64 bits puts the even-odds point at ~2^32 rows, which no such table reaches - but
+/// the property that matters is the next paragraph, not the width.
+///
+/// **Any persistent key must be (day, pid, instance), never the instance alone.** That is what
+/// the log file name already is - `fsmcp-<pid>-<instance>.log` under `<YYYY-MM-DD>/` - and a
+/// stored row that refers to a log file has to be keyed the same way or it cannot name the file
+/// it is about. A table keyed on the instance alone would also be keyed on the one part of the
+/// triple that is random rather than observed.
+///
+/// Widened from 32 bits, which put even odds at ~65k rows. It cost eight characters in a file
+/// name and removed the only reading under which this value could be mistaken for a primary key.
+///
+/// Taken from the uuid's halves rather than by slicing its string form, which would be a
 /// panicking index on a value this module does not construct itself.
 pub fn id() -> &'static str {
     static ID: OnceLock<String> = OnceLock::new();
-    ID.get_or_init(|| format!("{:08x}", uuid::Uuid::new_v4().as_fields().0))
+    ID.get_or_init(|| format!("{:016x}", uuid::Uuid::new_v4().as_u64_pair().0))
 }
 
 /// This process's pid. Kept for diagnostics and for the human reading a directory listing —
@@ -40,11 +56,15 @@ mod tests {
         assert!(!id().is_empty());
     }
 
-    /// Short enough for a file name, long enough not to collide in practice, and containing
-    /// nothing a filesystem would object to.
+    /// Short enough for a file name, wide enough that a table keyed partly on it does not meet
+    /// the birthday bound, and containing nothing a filesystem would object to.
     #[test]
     fn id_is_filename_safe() {
-        assert_eq!(id().len(), 8);
+        assert_eq!(
+            id().len(),
+            16,
+            "64 bits, rendered without dropping leading zeroes"
+        );
         assert!(id().chars().all(|c| c.is_ascii_hexdigit()));
     }
 
