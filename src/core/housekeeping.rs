@@ -75,7 +75,17 @@ pub fn sweep_tmp(now: SystemTime) -> io::Result<Sweep> {
     let deleted = sweep_dir(&paths::sub_dir(SubDir::Tmp)?, max_age, now)?;
     // Stamped only now: a sweep that failed to list its directory has not done the hour's work,
     // and the next process to start should retry rather than be turned away for an hour.
-    lease_done(&root, "tmp", now)?;
+    //
+    // A marker that cannot be written is reported here rather than returned, because by this point
+    // the sweep HAS run and files are gone; propagating would make the caller report the whole
+    // thing as skipped, which is the one description that is untrue. The consequence is only that
+    // the next process to start will sweep again this interval.
+    if let Err(e) = lease_done(&root, "tmp", now) {
+        warn!(
+            "Housekeeping: swept {deleted} entries but could not record the lease: {e}; \
+             another process may sweep again within the hour"
+        );
+    }
     Ok(Sweep::Ran(deleted))
 }
 
@@ -85,6 +95,11 @@ pub fn sweep_tmp(now: SystemTime) -> io::Result<Sweep> {
 /// sweep: one locked scratch file (another live process is still writing its `run_command` log)
 /// must not stop the other hundred from being reclaimed. Only `dir` itself being unlistable is an
 /// error, because then nothing was swept and the caller has to be able to say so.
+///
+/// One Windows wrinkle, so it is not rediscovered as a bug: `file_type` reports a directory
+/// symlink as not-a-directory, so a stale one is passed to `remove_file`, which refuses to unlink
+/// a directory symlink there. The entry is warned about and kept - the classification is wrong,
+/// the outcome is safe, and the link's target is never touched either way.
 ///
 /// Every decision is biased towards keeping. An entry whose age cannot be established is kept; an
 /// entry dated in the future is kept (`duration_since` yields zero there, which reads as "brand
@@ -220,11 +235,11 @@ pub(crate) fn lease_done(root: &Path, kind: &str, now: SystemTime) -> io::Result
 /// `kind` is a compile-time constant at every call site, so a separator in it is a programming
 /// error rather than input - but `"../x"` would escape the state root entirely, and that is worth
 /// one cheap check rather than trusting that no future caller ever builds the string.
+///
+/// A plain runtime check, deliberately not a `debug_assert!` beside it: the two would be redundant,
+/// and the assert would make the behaviour differ between profiles, so the test covering it could
+/// only run in the profile nobody tests in.
 fn marker_path(root: &Path, kind: &str) -> Option<std::path::PathBuf> {
-    debug_assert!(
-        !kind.contains(std::path::is_separator) && !kind.contains(".."),
-        "housekeeping kind must be a bare name, got {kind:?}"
-    );
     if kind.is_empty() || kind.contains(std::path::is_separator) || kind.contains("..") {
         warn!("Housekeeping: refusing a lease for the invalid kind {kind:?}");
         return None;
@@ -413,10 +428,9 @@ mod tests {
         assert!(lease_due(root, "tmp", HOUR, now), "a future stamp is expired");
     }
 
-    /// A `kind` that would escape the state root is refused rather than joined onto it. The
-    /// `debug_assert` fires first in a debug build, so this pins the release behaviour.
+    /// A `kind` that would escape the state root is refused rather than joined onto it, in every
+    /// build profile.
     #[test]
-    #[cfg(not(debug_assertions))]
     fn an_escaping_kind_is_refused() {
         let scratch = tempfile::TempDir::new().expect("scratch dir");
         assert!(!lease_due(scratch.path(), "../escape", HOUR, SystemTime::now()));
