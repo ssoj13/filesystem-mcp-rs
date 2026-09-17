@@ -7661,7 +7661,12 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
             None => match core::paths::db_path("memory2.db") {
                 Ok(new) => {
                     let migrated = match core::paths::legacy_local_dir() {
-                        Some(legacy) => core::paths::migrate(&legacy.join("memory2.db"), &new),
+                        // `migrate_sqlite`, not `migrate`: the database's write-ahead log
+                        // normally holds committed transactions, and moving the two apart would
+                        // lose them without saying so.
+                        Some(legacy) => {
+                            core::paths::migrate_sqlite(&legacy.join("memory2.db"), &new)
+                        }
                         None => core::paths::Migrated::FreshStart,
                     };
                     match core::paths::memory_db_decision(migrated) {
