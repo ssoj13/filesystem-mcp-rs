@@ -15,3 +15,6 @@ pub mod paths_guard;
 pub mod run_command_args;
 pub mod schema;
 pub mod serde;
+/// Test-only guard: asserts the tool list stays within the budgets in `docs/TOOL_STYLE.md`.
+#[cfg(test)]
+pub mod tool_surface_guard;

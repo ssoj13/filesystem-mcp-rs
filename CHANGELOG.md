@@ -2,12 +2,18 @@
 
 ## [Unreleased]
 
-### A lighter `tools/list`
+### A lighter `tools/list`, and a guard that keeps it that way
 
+- **`src/core/tool_surface_guard.rs` enforces `docs/TOOL_STYLE.md` on every `cargo test`**, over the
+  real router `tools/list` serves: a description is at most 600 chars, description + schema at most
+  2,000, and no two tools may ship a costly byte-identical schema. Exceptions carry a ceiling and a
+  written reason, so "exempt" never means "unbounded", and an exception that stops being needed
+  fails the test by name instead of lingering. A budget nobody checks decays within two waves —
+  `paths_guard` exists for the same reason.
 - **The tool list is a prompt, not documentation**: every character of it is loaded before a session's
   first request. A real handshake measured 132 tools at 148,435 chars; the fifteen heaviest were 40%
   of that, while the median tool was already lean. The heavy ones are now trimmed to
-  **124,133 chars (-16.4%)** without losing a fact a caller cannot infer — units, precedence,
+  **121,058 chars (-18.4%)** without losing a fact a caller cannot infer — units, precedence,
   platform traps and "0 = unlimited" conventions all stayed. What went was prose restating the type
   system, worked examples re-spelling the schema, and facts said twice (once in the description and
   once in the property that owns them). `docs/TOOL_STYLE.md` is the resulting contract.
@@ -19,7 +25,9 @@
 - **`CapTarget`'s schema description was internal rustdoc** (a `PLAN2.md` reference, a note about
   untagged serde dedup, a `BUG.md` aside) shipped into every tool that takes a capture target. It now
   describes the wire shapes a caller needs; the rationale lives in `//` comments, which schemars does
-  not read. `wait`'s description also listed three `kind` values where the code accepts four.
+  not read. `wait`'s description also listed three `kind` values where the code accepts four, and
+  `search_processes` documented an `include_window_title` parameter that does not exist while
+  omitting that its matching is case-insensitive and that two patterns narrow rather than widen.
 
 ### `shell: "bash"` on Windows means git-bash, not WSL
 

@@ -49,9 +49,19 @@ These are limits, not targets: a 200-char description for a tool that needs 200 
 
 - Tool description: **≤ 600 chars**. Past that, the tool is either doing too much or explaining
   what it does not need to.
-- Description + schema per tool: **≤ 2,000 chars**. The five exceptions that genuinely earn more
-  (`run_command` foremost) are listed in `tool_surface_guard.rs` with the reason each one carries.
-- No two tools may ship byte-identical schemas. Share the type instead.
+- Description + schema per tool: **≤ 2,000 chars**. The exceptions are listed in
+  `src/core/tool_surface_guard.rs`, each with a ceiling and the reason it carries. There are
+  fifteen, not the five this document first guessed, and the difference is instructive: only ~28k
+  of the 101k schema payload is prose. The rest is JSON Schema *structure*, so most exceptions are
+  not tools that over-explain but tools whose **type** is large — `mem_update` is a 102-char
+  description beside 2,238 chars of schema carrying no descriptions at all. Bringing those under
+  budget means fewer parameters, which is a design decision, not a wording one.
+- No two tools may ship byte-identical schemas. Share the type instead — and where MCP forces the
+  repetition on the wire (it cannot `$ref` across tools), have the pinned variants take an open
+  object validated against the canonical type on arrival, as `ai_messages_*` does. The guard judges
+  this by what the copies cost, `schema_len × (tools - 1)` against the same 2,000: eight of this
+  server's tools take no parameters at all and a bare `{path}` is shared by eight more, where there
+  is nothing to factor out and the letter of the rule would only produce an allowlist that rots.
 
 ## Error messages
 
@@ -69,7 +79,16 @@ Never return a bare `io::Error` where the caller cannot tell which path failed: 
 
 ## Enforcement
 
-`tool_surface_guard.rs` checks the budgets and the duplicate-schema rule against a rendered
-`tools/list`, the same way `paths_are_centralized` checks where state may live. A rule this file
-states but the guard cannot see is a rule that will decay — so either make it checkable or accept
+`src/core/tool_surface_guard.rs` checks all three rules against the real router — the one
+`tools/list` serves, built by `FileSystemServer::build_tool_router` with schemas already
+normalized — the same way `paths_are_centralized` checks where state may live. A rule this file
+states but the guard cannot see is a rule that will decay, so either make it checkable or accept
 that it is advice and mark it as such.
+
+The error-message shape above is **advice**: it is a judgement about prose that no assertion can
+make. Every message touched since this document was written follows it.
+
+Every allowlist entry carries a ceiling, so "exempt" never means "unbounded", and an entry whose
+tool has come back under the ordinary budget fails the test by name rather than lingering. The
+guard was verified by padding a description past 600, adding an unneeded allowlist entry, and
+restoring one duplicated schema: each reddened with the offending tool and number named.
