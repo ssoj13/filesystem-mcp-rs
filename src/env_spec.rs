@@ -313,6 +313,12 @@ mod tests {
         }
 
         let level = all.iter().find(|v| v.key == "FS_MCP_LOG").expect("level key");
+        // Trivially true today, because the `EnvVar` holds the constant itself rather than a
+        // copy of its text. It is kept, not deleted: the moment someone re-inlines `"info"`
+        // here it becomes the same load-bearing drift guard as the tmp assertion below, firing
+        // when `LEVEL_DEFAULT` next changes. The property it cannot reach - that the advertised
+        // default is a level the filter actually applies - is asserted in `core::logging`'s
+        // `the_advertised_default_level_is_one_the_filter_applies`.
         assert_eq!(level.default, crate::core::logging::LEVEL_DEFAULT);
         assert!(
             level.help.contains("off"),
@@ -332,8 +338,10 @@ mod tests {
         ] {
             let v = all.iter().find(|v| v.key == key).expect(key);
             assert_eq!(v.default, default.to_string(), "{key}");
+            // `contains("0 =")`, not `contains('0')`: the latter is satisfied by the `0` in a
+            // number anywhere in the sentence, which is not the convention being pinned.
             assert!(
-                v.help.contains('0'),
+                v.help.contains("0 ="),
                 "a retention knob must document that 0 disables it: {}",
                 v.help
             );
