@@ -332,9 +332,9 @@ mod tests {
     /// Every rule here is a loop over the surface, so an empty surface satisfies all of them
     /// vacuously and the guard would go green over a `tools/list` that serves nothing. A floor,
     /// not the exact count (132 under the features `cargo test` builds), because the count moves
-    /// with the feature flags and an equality would have to be edited on every legitimate change
-    /// - which is how a number stops being read and starts being updated reflexively. This one
-    /// is below every supported feature combination and still nowhere near zero.
+    /// with the feature flags, and an equality would have to be edited on every legitimate
+    /// change, which is how a number stops being read and starts being updated reflexively. This
+    /// floor sits below every supported feature combination and still nowhere near zero.
     const MIN_TOOLS: usize = 100;
 
     /// The tool surface as `tools/list` serves it: name -> (description, compact schema).
