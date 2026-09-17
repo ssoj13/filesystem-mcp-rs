@@ -21,6 +21,15 @@
 //! The decision ([`target_for`]) is separate from carrying it out ([`init_logging`]): a process
 //! can install a global subscriber only once, so everything worth testing takes its inputs as
 //! arguments — including the log directory, which tests supply from a `TempDir`.
+//!
+//! **One exception, and it makes this module's suite order-dependent.** `DEGRADED` is a
+//! process-wide `OnceLock` keeping the *first* reason logging fell short, and
+//! `the_degradation_reason_is_kept` asserts that by writing it. Every test in a crate shares one
+//! process, so whichever test writes it first decides what every later reader sees: a second test
+//! calling [`note_degraded`] would not fail itself, it would make that one fail, from the other
+//! end of the file. There is exactly one writer today and it has to stay that way — anything
+//! else needing a degradation reason should take it as an argument, the way [`target_for_in`]
+//! takes the log directory.
 
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
@@ -643,8 +652,12 @@ mod tests {
         assert_eq!(sinks(&Plan::Disabled), (None, false));
     }
 
-    /// The reason a degraded run gives is kept and readable; under stdio it is the only record
-    /// that exists, since the channel that would have carried it is the one that failed.
+    /// The reason a degraded run gives is kept, and the first one wins — it is the failure that
+    /// shaped the plan.
+    ///
+    /// **The only writer of `DEGRADED` in the suite, and it has to stay that way.** The lock is
+    /// process-wide and set once, so a second test writing it would silently take this one's
+    /// answer away; see the module doc.
     #[test]
     fn the_degradation_reason_is_kept() {
         note_degraded("first".to_string());
