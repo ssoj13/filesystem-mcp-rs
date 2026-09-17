@@ -7542,17 +7542,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         return Ok(());
     }
 
-    // Computer-control bootstrap: DPI first (clicks/captures misalign without it),
-    // then the process-global arm gate.
+    // Computer-control bootstrap: DPI must be set before anything clicks or captures,
+    // otherwise coordinates misalign. The arm gate is built later, after logging exists.
     #[cfg(any(feature = "ctl-input", feature = "ctl-uia", feature = "ctl-ocr"))]
     if let Err(e) = crate::tools::computer::ensure_dpi_aware() {
         eprintln!("fatal: {e}");
         std::process::exit(1);
     }
-    #[cfg(any(feature = "ctl-input", feature = "ctl-uia"))]
-    crate::tools::computer::safety::init_gate(
-        crate::tools::computer::safety::resolve_ops_per_min(args.ctl_ops_per_min),
-    );
 
     // Handle --list-features
     if args.list_features {
@@ -7571,6 +7567,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // CRITICAL: stdio mode MUST NOT log to stderr by default!
     // Any stderr output during handshake causes "connection closed" in MCP clients
     init_logging(mode, args.log)?;
+
+    // The process-global arm gate, built only now: resolving its audit path can fail, and that
+    // warning has to reach a subscriber. Built before logging it was silent in every mode, so a
+    // disabled security audit trail looked exactly like a working one.
+    #[cfg(any(feature = "ctl-input", feature = "ctl-uia"))]
+    crate::tools::computer::safety::init_gate(
+        crate::tools::computer::safety::resolve_ops_per_min(args.ctl_ops_per_min),
+    );
 
     // Create server instance
     let allowed = AllowedDirs::new(args.allowed_dirs);

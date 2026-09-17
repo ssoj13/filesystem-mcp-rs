@@ -5,8 +5,9 @@
 //! spread over four roots (`data_local_dir`, `data_dir`, two different temp subdirs), two
 //! of which differ per OS and per Windows account, which made "where is it?" unanswerable.
 //!
-//! No other module may call `dirs::*` or `std::env::temp_dir()`; `paths_are_centralized`
-//! in `src/core/paths_guard.rs` enforces that mechanically.
+//! No other module may call `dirs::*` or `std::env::temp_dir()`. Task 5 adds
+//! `paths_are_centralized` in `src/core/paths_guard.rs` to enforce that mechanically; until
+//! it lands the rule holds by review only.
 
 use std::io;
 use std::path::{Path, PathBuf};

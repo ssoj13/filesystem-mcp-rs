@@ -154,7 +154,17 @@ pub struct SafetyGate {
 
 impl SafetyGate {
     /// `max_ops_per_min` bounds executed input actions in a sliding 60 s window.
+    /// The audit trail goes to [`default_audit_path`], which resolves the real state root.
     pub fn new(max_ops_per_min: u32) -> Self {
+        Self::with_audit(max_ops_per_min, default_audit_path())
+    }
+
+    /// A gate writing its audit trail to an explicit path, or nowhere with `None`.
+    ///
+    /// Exists so tests can build a gate without touching the operator's real state directory:
+    /// [`default_audit_path`] creates `<state>/safety/` and migrates the pre-2026-09 log, which
+    /// is correct at startup and destructive in a test run.
+    pub fn with_audit(max_ops_per_min: u32, audit_path: Option<PathBuf>) -> Self {
         Self {
             state: Mutex::new(GateState {
                 armed_until: None,
@@ -163,7 +173,7 @@ impl SafetyGate {
                 ops: VecDeque::new(),
             }),
             max_ops_per_min,
-            audit_path: default_audit_path(),
+            audit_path,
         }
     }
 
@@ -233,8 +243,12 @@ fn default_audit_path() -> Option<PathBuf> {
     let dir = match crate::core::paths::sub_dir(crate::core::paths::SubDir::Safety) {
         Ok(dir) => dir,
         Err(e) => {
+            // The path is resolved once per process, so this is not a transient miss that a
+            // later write retries: say so, and name what could not be created.
             tracing::warn!(
-                "computer-control auditing disabled: cannot resolve the state directory: {e}"
+                "computer-control auditing is DISABLED for the lifetime of this process: \
+                 cannot create the safety state directory under the state root: {e}. \
+                 Every input action will run unrecorded until the server is restarted."
             );
             return None;
         }
@@ -282,7 +296,7 @@ mod tests {
 
     #[test]
     fn arm_check_disarm_cycle() {
-        let gate = SafetyGate::new(60);
+        let gate = SafetyGate::with_audit(60, None);
         assert!(matches!(
             gate.check(),
             Err(CtlError::NotArmed { remaining_ms: 0 })
@@ -296,7 +310,7 @@ mod tests {
 
     #[test]
     fn ttl_expiry_refuses() {
-        let gate = SafetyGate::new(60);
+        let gate = SafetyGate::with_audit(60, None);
         gate.arm(Duration::from_millis(10));
         std::thread::sleep(Duration::from_millis(30));
         assert!(matches!(
@@ -305,11 +319,33 @@ mod tests {
         ));
     }
 
+    /// The cap trips on the third op, and the two that were allowed are on disk: the audit
+    /// trail must record exactly what executed, so it is asserted here against a per-test
+    /// directory rather than appended to the operator's real log.
     #[test]
-    fn op_cap_trips() {
-        let gate = SafetyGate::new(2);
-        gate.record("t", serde_json::json!({})).unwrap();
-        gate.record("t", serde_json::json!({})).unwrap();
+    fn op_cap_trips_and_records_only_executed_ops() {
+        let base = std::env::temp_dir().join(format!("fsmcp-audit-{}", uuid::Uuid::new_v4()));
+        let audit = base.join("safety/audit.jsonl");
+        let gate = SafetyGate::with_audit(2, Some(audit.clone()));
+
+        gate.record("t", serde_json::json!({})).expect("first op");
+        gate.record("t", serde_json::json!({})).expect("second op");
+        assert!(matches!(
+            gate.record("t", serde_json::json!({})),
+            Err(CtlError::OpCapExceeded { .. })
+        ));
+
+        let lines = std::fs::read_to_string(&audit).expect("audit log written");
+        assert_eq!(lines.lines().count(), 2, "only executed ops are audited");
+        std::fs::remove_dir_all(&base).ok();
+    }
+
+    /// A gate with no audit path still gates: auditing being off must never turn a permitted
+    /// action into an error, nor a refused one into a success.
+    #[test]
+    fn records_without_an_audit_path() {
+        let gate = SafetyGate::with_audit(1, None);
+        gate.record("t", serde_json::json!({})).expect("first op");
         assert!(matches!(
             gate.record("t", serde_json::json!({})),
             Err(CtlError::OpCapExceeded { .. })

@@ -29,7 +29,8 @@ fn canary_notepad() {
 
 fn canary_run() -> anyhow::Result<()> {
     super::ensure_dpi_aware()?;
-    let gate = SafetyGate::new(240);
+    // No audit path: a test must not create or migrate the operator's real safety state.
+    let gate = SafetyGate::with_audit(240, None);
     gate.arm(Duration::from_secs(60));
 
     // 1. Snapshot existing Notepad windows; ours is the diff.
@@ -140,7 +141,7 @@ fn paste_juggle_restores_clipboard() {
 
 fn juggle_run() -> anyhow::Result<()> {
     super::ensure_dpi_aware()?;
-    let gate = SafetyGate::new(600);
+    let gate = SafetyGate::with_audit(600, None);
     gate.arm(Duration::from_secs(60));
     let marker = "JUGGLE-MARKER-777";
     // 1. Put the marker on the clipboard (simulates the user's data).
@@ -225,7 +226,7 @@ const SCENARIOS: &[(&str, bool, u32)] = &[
 
 fn matrix_run() -> anyhow::Result<()> {
     super::ensure_dpi_aware()?;
-    let gate = SafetyGate::new(600);
+    let gate = SafetyGate::with_audit(600, None);
     gate.arm(Duration::from_secs(120));
     let q = WinQuery { exe: Some("notepad".into()), title: None };
     let text = "canary 123";
@@ -313,7 +314,7 @@ fn mixed_dpi_fields() {
 
 fn mixed_dpi_run() -> anyhow::Result<()> {
     super::ensure_dpi_aware()?;
-    let gate = SafetyGate::new(240);
+    let gate = SafetyGate::with_audit(240, None);
     gate.arm(Duration::from_secs(60));
 
     let mons = capture::monitors()?;

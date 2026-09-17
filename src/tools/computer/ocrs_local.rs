@@ -7,8 +7,9 @@
 //! MODELS: downloaded automatically on first use into
 //! `~/.filesystem-mcp-rs/ocrs` (override: `FS_MCP_CTL_OCRS_MODELS_DIR`).
 //! Models are re-downloadable, so anything left in the pre-2026-09
-//! `<data>/computer-mcp-rs/ocrs` is not migrated; delete it by hand. URLs are the upstream defaults from
-//! ocrs-cli (verbatim): ocrs-models.s3-accelerate.amazonaws.com/*.rten.
+//! `<data>/computer-mcp-rs/ocrs` is not migrated; delete it by hand.
+//! URLs are the upstream defaults from ocrs-cli (verbatim):
+//! ocrs-models.s3-accelerate.amazonaws.com/*.rten.
 //! Downloads go to `<name>.part` and are renamed only when complete, so a
 //! killed download can never leave a truncated model behind.
 //!
@@ -32,11 +33,10 @@ pub const ENV_OCRS_MODELS_DIR: &str = "FS_MCP_CTL_OCRS_MODELS_DIR";
 /// an unresolvable root is reported to the caller (OCR simply does not run) rather than
 /// silently redirected somewhere else.
 fn models_dir() -> anyhow::Result<PathBuf> {
-    if let Ok(dir) = std::env::var(ENV_OCRS_MODELS_DIR) {
-        let d = PathBuf::from(dir.trim());
-        if !d.as_os_str().is_empty() {
-            return Ok(d);
-        }
+    // `env_spec::get` is the one place that decides blank-means-unset; reading the variable
+    // directly here would be a second copy of that rule, free to drift from the first.
+    if let Some(dir) = crate::env_spec::get(ENV_OCRS_MODELS_DIR) {
+        return Ok(PathBuf::from(dir));
     }
     Ok(crate::core::paths::sub_dir(crate::core::paths::SubDir::Ocrs)?)
 }
