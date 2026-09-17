@@ -8,18 +8,22 @@
 //!
 //! A process that outlives midnight keeps the file it opened at startup. That is the cost of
 //! having exactly one writer path: reopening would mean a second one plus the rotation mechanism
-//! this design exists to avoid, and the file is still found by the day the process started.
+//! this design exists to avoid, and the file is still found by the day the process started. The
+//! retention sweep must therefore never delete a file whose process is still alive, however old
+//! the directory holding it looks.
 //!
 //! **stdio never writes to stderr.** Any stderr output during the handshake closes the connection
 //! in MCP clients, so under stdio the file is the only sink — and if it cannot be opened, this
 //! process runs without logs rather than breaking the transport. Only stream transport, whose
-//! stderr nobody is parsing, gets a console sink.
+//! stderr nobody is parsing, gets a console sink. That rule lives in [`sinks`], one pure function
+//! over a [`Plan`], so it can be asserted directly instead of being inferred from a variant name.
 //!
 //! The decision ([`target_for`]) is separate from carrying it out ([`init_logging`]): a process
-//! can install a global subscriber only once, so the part worth testing is the part that takes
-//! its inputs as arguments.
+//! can install a global subscriber only once, so everything worth testing takes its inputs as
+//! arguments — including the log directory, which tests supply from a `TempDir`.
 
 use std::path::{Path, PathBuf};
+use std::sync::OnceLock;
 
 use tracing_subscriber::{EnvFilter, fmt, layer::SubscriberExt, util::SubscriberInitExt};
 
@@ -48,7 +52,8 @@ pub enum Plan {
     /// Write to stderr only: stream transport whose file could not be opened at all. Never
     /// reachable under stdio, where stderr would close the connection.
     Stderr,
-    /// No subscriber at all: `FS_MCP_LOG=off`, or stdio with no usable file.
+    /// No subscriber at all: `FS_MCP_LOG=off`, or stdio with no usable file. When it is the
+    /// second, [`degraded_reason`] says which failure caused it.
     Disabled,
 }
 
@@ -63,22 +68,64 @@ impl std::fmt::Display for Plan {
     }
 }
 
+/// The sinks a plan asks for: the file to append to, if any, and whether stderr is written.
+///
+/// The handshake rule is expressed here, in one pure function, rather than spread over the arms
+/// of [`install`]: a plan reachable under stdio must never come back with `true`, and
+/// `stdio_never_writes_to_stderr` asserts exactly that. A rule that only existed inside the
+/// installer could not be checked at all — a process installs a subscriber once, so no test can
+/// run the installer twice — which is how a test can end up pinning a variant's *name* while the
+/// behaviour it is named for goes unguarded.
+fn sinks(plan: &Plan) -> (Option<&Path>, bool) {
+    match plan {
+        Plan::File(p) => (Some(p), false),
+        Plan::FileAndStderr(p) => (Some(p), true),
+        Plan::Stderr => (None, true),
+        Plan::Disabled => (None, false),
+    }
+}
+
 /// Decide the plan, then carry it out, returning what was actually done.
 ///
 /// Infallible on purpose: logging must never prevent the transport from starting, so there is no
 /// error for the caller to propagate. Every degradation — an unopenable file, an unusable state
 /// directory, a subscriber someone else already installed — is reported through the returned
-/// [`Plan`] instead. Called once, from `main`.
+/// [`Plan`] and [`degraded_reason`] instead. Called once, from `main`.
 pub fn init_logging(mode: TransportMode, log_file: Option<String>) -> Plan {
     let level = env_spec::get("FS_MCP_LOG");
-    install(target_for(mode, log_file, level.as_deref()), level.as_deref())
+    let plan = install(target_for(mode, log_file, level.as_deref()), level.as_deref());
+    // After the subscriber exists, so these reach the file in every mode that has one.
+    if let Some(complaint) = level.as_deref().and_then(level_complaint) {
+        tracing::warn!("{complaint}");
+    }
+    if let Some(reason) = degraded_reason() {
+        tracing::warn!("logging degraded: {reason}");
+    }
+    plan
 }
 
-/// Decide the plan. `level` is the raw `FS_MCP_LOG` value (already blank-filtered).
+/// Decide the plan against the real state directory.
 ///
-/// Takes its inputs as arguments rather than reading them, so the decision can be tested without
-/// touching the process environment.
+/// Resolves `<state>/logs` (creating it) and hands the rest to [`target_for_in`]; an unusable
+/// state directory arrives there as `None`. The directory is resolved even when `--log` names a
+/// file elsewhere, which costs one empty directory and keeps this wrapper to one behaviour.
 pub fn target_for(mode: TransportMode, log_file: Option<String>, level: Option<&str>) -> Plan {
+    let root = crate::core::paths::sub_dir(crate::core::paths::SubDir::Logs);
+    target_for_in(root.as_deref().ok(), mode, log_file, level)
+}
+
+/// Decide the plan. `root` is `<state>/logs`, or `None` when the state directory is unusable;
+/// `level` is the raw `FS_MCP_LOG` value (already blank-filtered).
+///
+/// Takes the log directory as an argument, like [`crate::core::paths`]'s own resolvers, so the
+/// decision can be tested against a `TempDir` instead of creating directories under the real
+/// state root on every `cargo test`.
+fn target_for_in(
+    root: Option<&Path>,
+    mode: TransportMode,
+    log_file: Option<String>,
+    level: Option<&str>,
+) -> Plan {
     if level.is_some_and(|v| v.eq_ignore_ascii_case("off")) {
         return Plan::Disabled;
     }
@@ -86,11 +133,12 @@ pub fn target_for(mode: TransportMode, log_file: Option<String>, level: Option<&
     // per-process file is only the default location, not a rule about where logs may go.
     let file = match log_file {
         Some(p) => PathBuf::from(p),
-        None => match log_path() {
-            Ok(p) => p,
-            // The state directory is unusable. stdio still must not touch stderr, so it runs
-            // without logs rather than breaking the handshake; stream can still say so.
-            Err(_) => {
+        None => match root.map(|r| log_path_in(r, &today())) {
+            Some(Ok(p)) => p,
+            // The state directory is unusable, or the dated directory under it cannot be made.
+            // stdio still must not touch stderr, so it runs without logs rather than breaking
+            // the handshake; stream can still say so.
+            Some(Err(_)) | None => {
                 return match mode {
                     TransportMode::Stdio => Plan::Disabled,
                     TransportMode::Stream => Plan::Stderr,
@@ -106,67 +154,111 @@ pub fn target_for(mode: TransportMode, log_file: Option<String>, level: Option<&
 
 /// Install the global subscriber for `plan`, returning the plan that is actually in force.
 ///
-/// A file that cannot be opened degrades rather than fails: to [`Plan::Disabled`] under stdio,
-/// whose only other channel is forbidden, and to [`Plan::Stderr`] under stream, which can still
-/// say what happened. A subscriber already installed by someone else leaves this process with
-/// nothing of its own, which is [`Plan::Disabled`] too — the plan describes what this call did.
+/// A file that cannot be opened degrades rather than fails: the process keeps the sinks it could
+/// build, which under stdio is none at all. A subscriber already installed by someone else leaves
+/// this process with nothing of its own, which is [`Plan::Disabled`] too — the returned plan
+/// describes what this call did, not what it wanted.
 fn install(plan: Plan, level: Option<&str>) -> Plan {
-    match plan {
-        Plan::Disabled => Plan::Disabled,
-        Plan::Stderr => stderr_only(level),
-        Plan::File(path) => match open(&path) {
-            Ok(file) => {
-                let done = tracing_subscriber::registry()
-                    .with(filter(level))
-                    .with(fmt::layer().with_writer(file).with_ansi(false))
-                    .try_init();
-                match done {
-                    Ok(()) => Plan::File(path),
-                    Err(_) => Plan::Disabled,
-                }
-            }
-            // stdio: there is no second channel to complain through. Serve without logs.
-            Err(_) => Plan::Disabled,
-        },
-        Plan::FileAndStderr(path) => match open(&path) {
-            Ok(file) => {
-                let done = tracing_subscriber::registry()
-                    .with(filter(level))
-                    .with(fmt::layer().with_writer(std::io::stderr))
-                    .with(fmt::layer().with_writer(file).with_ansi(false))
-                    .try_init();
-                match done {
-                    Ok(()) => Plan::FileAndStderr(path),
-                    Err(_) => Plan::Disabled,
-                }
-            }
+    let (path, to_stderr) = sinks(&plan);
+    let path = path.map(Path::to_path_buf);
+    let file = match &path {
+        Some(p) => match open(p) {
+            Ok(f) => Some(f),
             Err(e) => {
-                let plan = stderr_only(level);
-                tracing::warn!("cannot open the log file {}: {e}", path.display());
-                plan
+                note_degraded(format!("cannot open the log file {}: {e}", p.display()));
+                None
             }
         },
+        None => None,
+    };
+    let to_file = file.is_some();
+    if !to_file && !to_stderr {
+        return Plan::Disabled;
+    }
+    let installed = tracing_subscriber::registry()
+        .with(filter(level))
+        .with(to_stderr.then(|| fmt::layer().with_writer(std::io::stderr)))
+        .with(file.map(|f| fmt::layer().with_writer(f).with_ansi(false)))
+        .try_init()
+        .is_ok();
+    if !installed {
+        note_degraded("a global tracing subscriber was already installed".to_string());
+        return Plan::Disabled;
+    }
+    match (path, to_file, to_stderr) {
+        (Some(p), true, true) => Plan::FileAndStderr(p),
+        (Some(p), true, false) => Plan::File(p),
+        (_, false, true) => Plan::Stderr,
+        _ => Plan::Disabled,
     }
 }
 
-/// The stderr-only subscriber, used by stream transport when there is no usable file.
-fn stderr_only(level: Option<&str>) -> Plan {
-    let done = tracing_subscriber::registry()
-        .with(filter(level))
-        .with(fmt::layer().with_writer(std::io::stderr))
-        .try_init();
-    match done {
-        Ok(()) => Plan::Stderr,
-        Err(_) => Plan::Disabled,
+/// Why logging is weaker than it was asked to be, if it is.
+///
+/// Under stdio a [`Plan::Disabled`] caused by an unopenable file is otherwise indistinguishable
+/// from `FS_MCP_LOG=off`, and the `io::Error` explaining it — a read-only state directory, a full
+/// disk, a `--log` pointing at a directory — has nowhere to go: stderr is forbidden and the file
+/// is the thing that failed. It is kept here instead of being written to a second, bespoke
+/// channel, because wave 3's `health` section already reports where this process's log went and
+/// is the one place that should answer this question.
+///
+/// Set at most once: the first failure is the one that shaped the plan.
+pub fn degraded_reason() -> Option<&'static str> {
+    DEGRADED.get().map(String::as_str)
+}
+
+/// Record why logging degraded. See [`degraded_reason`].
+fn note_degraded(reason: String) {
+    // A later failure cannot change the plan already chosen, so the first reason is the answer;
+    // `set` returning the value back on a second call is exactly the behaviour wanted here.
+    if DEGRADED.set(reason).is_err() {
+        // Nothing to do and nowhere to say it: the channel this would use is the one that failed.
     }
+}
+
+static DEGRADED: OnceLock<String> = OnceLock::new();
+
+/// What is wrong with an `FS_MCP_LOG` value, if anything, phrased for the operator who set it.
+///
+/// Two ways to get nothing when you wanted `debug`, and neither announces itself:
+///
+/// - the value does not parse at all, so [`filter`] silently falls through to `RUST_LOG`/`info`;
+/// - the value parses, but as a *target* rather than a level. `EnvFilter` reads a bare word it
+///   does not recognise as "enable everything from the target named `bogus`", which switches the
+///   rest of the log off entirely — verified live: `FS_MCP_LOG=bogus-level` produced an empty
+///   log file and no complaint. A word carrying no `=` or `,` is meant as a level, so one that
+///   is not a level is a typo, not a target selector.
+///
+/// Pure, so both traps are covered by tests; installing the subscriber they would warn through
+/// is not testable in-process.
+fn level_complaint(raw: &str) -> Option<String> {
+    if EnvFilter::try_new(raw).is_err() {
+        return Some(format!(
+            "FS_MCP_LOG={raw} is not a filter this build understands; ignoring it"
+        ));
+    }
+    // `LevelFilter`, not `Level`: it is the one that also accepts `off`, which is a value this
+    // module answers earlier and must never report as a typo.
+    let looks_like_a_level = !raw.contains('=') && !raw.contains(',');
+    if looks_like_a_level && raw.parse::<tracing::level_filters::LevelFilter>().is_err() {
+        return Some(format!(
+            "FS_MCP_LOG={raw} is not a level; it reads as a target filter, which would switch \
+             the rest of the log off, so it is ignored. Use trace, debug, info, warn, error or off"
+        ));
+    }
+    None
 }
 
 /// The level filter: `FS_MCP_LOG` first, then `RUST_LOG`, then `info`.
 ///
-/// An unparseable `FS_MCP_LOG` falls through to the next source rather than stopping the server,
-/// for the same reason the rest of this module degrades instead of failing.
+/// A value [`level_complaint`] objects to is *not* used — it falls through to the next source,
+/// rather than stopping the server. That is not only politeness: honouring `FS_MCP_LOG=bogus`
+/// would build a filter that enables nothing but the target `bogus`, which would also swallow
+/// [`init_logging`]'s warning about it. Verified live: before this fallback the run produced a
+/// zero-byte log file and said nothing anywhere. The complaint now arrives at `info`.
 fn filter(level: Option<&str>) -> EnvFilter {
     if let Some(raw) = level
+        && level_complaint(raw).is_none()
         && let Ok(f) = EnvFilter::try_new(raw)
     {
         return f;
@@ -182,16 +274,17 @@ fn open(path: &Path) -> std::io::Result<std::fs::File> {
     {
         std::fs::create_dir_all(parent)?;
     }
-    std::fs::OpenOptions::new().create(true).append(true).open(path)
+    std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)
 }
 
-/// `<state>/logs/<YYYY-MM-DD>/fsmcp-<pid>-<instance>.log`, directory created.
-pub fn log_path() -> std::io::Result<PathBuf> {
-    let root = crate::core::paths::sub_dir(crate::core::paths::SubDir::Logs)?;
-    log_path_in(&root, &today())
-}
-
-/// The path arithmetic, split out so tests can supply a directory and a date.
+/// `<root>/<YYYY-MM-DD>/fsmcp-<pid>-<instance>.log`, directory created.
+///
+/// The dated directory is made here rather than at open time so that a root which cannot hold it
+/// is discovered while the plan is still being decided, instead of after the plan has promised a
+/// file it cannot place.
 fn log_path_in(root: &Path, day: &str) -> std::io::Result<PathBuf> {
     let dir = root.join(day);
     std::fs::create_dir_all(&dir)?;
@@ -217,17 +310,26 @@ fn today() -> String {
 mod tests {
     use super::*;
 
+    /// A log directory of our own, so no test resolves - or creates - anything under the real
+    /// state root. The same seam `core::paths` gives its own tests.
+    fn scratch() -> tempfile::TempDir {
+        tempfile::TempDir::new().expect("tempdir")
+    }
+
     /// The name carries both pid and instance id, and lives under a dated directory, so two
     /// concurrent servers — or one pid reused tomorrow — never share a file.
     #[test]
     fn file_name_is_unique_per_process_and_dated() {
-        let dir = tempfile::TempDir::new().expect("tempdir");
+        let dir = scratch();
         let p = log_path_in(dir.path(), "2026-09-17").expect("path");
         let parent = p.parent().expect("parent");
         assert_eq!(parent.file_name().expect("name"), "2026-09-17");
         let name = p.file_name().expect("name").to_string_lossy().into_owned();
         assert!(name.starts_with("fsmcp-"), "{name}");
-        assert!(name.contains(&crate::core::instance::pid().to_string()), "{name}");
+        assert!(
+            name.contains(&crate::core::instance::pid().to_string()),
+            "{name}"
+        );
         assert!(name.contains(crate::core::instance::id()), "{name}");
         assert!(name.ends_with(".log"), "{name}");
     }
@@ -235,34 +337,158 @@ mod tests {
     /// `FS_MCP_LOG=off` means no subscriber and no file — the only way to opt out.
     #[test]
     fn off_disables_everything() {
-        assert!(matches!(target_for(TransportMode::Stdio, None, Some("off")), Plan::Disabled));
-        assert!(matches!(target_for(TransportMode::Stream, None, Some("off")), Plan::Disabled));
+        let dir = scratch();
+        for mode in [TransportMode::Stdio, TransportMode::Stream] {
+            let plan = target_for_in(Some(dir.path()), mode, None, Some("off"));
+            assert!(matches!(plan, Plan::Disabled), "{plan:?}");
+            assert_eq!(sinks(&plan), (None, false));
+        }
+        // Not even an explicit `--log` reopens the door.
+        let plan = target_for_in(
+            Some(dir.path()),
+            TransportMode::Stream,
+            Some("x.log".into()),
+            Some("OFF"),
+        );
+        assert!(matches!(plan, Plan::Disabled), "{plan:?}");
     }
 
     /// stdio never gets a stderr sink, whatever else is configured — stderr during the handshake
     /// closes the connection in MCP clients.
+    ///
+    /// Asserted through [`sinks`], the function the installer actually consumes, so that adding a
+    /// stderr layer to any stdio path fails this test. Pinning the variant name alone would not:
+    /// `Plan::File` would still be `Plan::File` with a stderr layer bolted onto it.
     #[test]
     fn stdio_never_writes_to_stderr() {
-        assert!(matches!(target_for(TransportMode::Stdio, None, None), Plan::File(_)));
+        let dir = scratch();
+        let stdio = [
+            target_for_in(Some(dir.path()), TransportMode::Stdio, None, None),
+            target_for_in(
+                Some(dir.path()),
+                TransportMode::Stdio,
+                Some("x.log".into()),
+                None,
+            ),
+            target_for_in(Some(dir.path()), TransportMode::Stdio, None, Some("off")),
+            // The degraded branch: no usable state directory at all.
+            target_for_in(None, TransportMode::Stdio, None, None),
+        ];
+        for plan in &stdio {
+            assert!(!sinks(plan).1, "stdio must never write to stderr: {plan:?}");
+        }
+        assert!(matches!(stdio[0], Plan::File(_)), "{:?}", stdio[0]);
+        assert!(matches!(stdio[1], Plan::File(_)), "{:?}", stdio[1]);
+
+        // Stream is the only mode that may, and does.
+        let stream = target_for_in(Some(dir.path()), TransportMode::Stream, None, None);
+        assert!(matches!(stream, Plan::FileAndStderr(_)), "{stream:?}");
+        assert!(sinks(&stream).1);
+    }
+
+    /// With no usable state directory, stdio goes quiet and stream keeps the one channel it has.
+    /// Neither refuses to start, which is the whole point of the degradation.
+    #[test]
+    fn an_unusable_state_directory_degrades_per_transport() {
+        assert_eq!(
+            target_for_in(None, TransportMode::Stdio, None, None),
+            Plan::Disabled
+        );
+        assert_eq!(
+            target_for_in(None, TransportMode::Stream, None, None),
+            Plan::Stderr
+        );
+        // An explicit `--log` needs no state directory, so it survives one being unusable.
         assert!(matches!(
-            target_for(TransportMode::Stdio, Some("x.log".into()), None),
+            target_for_in(None, TransportMode::Stdio, Some("x.log".into()), None),
             Plan::File(_)
         ));
-        assert!(matches!(target_for(TransportMode::Stream, None, None), Plan::FileAndStderr(_)));
     }
 
     /// An explicit `--log` path wins over the per-process file, because an operator who names a
     /// file is asking for that file.
     #[test]
     fn explicit_path_overrides_the_default() {
-        match target_for(TransportMode::Stdio, Some("C:/tmp/explicit.log".into()), None) {
-            Plan::File(p) => assert!(p.ends_with("explicit.log"), "{}", p.display()),
+        let dir = scratch();
+        let named = dir.path().join("explicit.log");
+        match target_for_in(
+            Some(dir.path()),
+            TransportMode::Stdio,
+            Some(named.to_string_lossy().into_owned()),
+            None,
+        ) {
+            // `file_name`, not `Path::ends_with`: the latter compares whole components and would
+            // read differently for a path spelled with the other platform's separator.
+            Plan::File(p) => assert_eq!(p.file_name().expect("name"), "explicit.log"),
             other => panic!("expected File, got {other:?}"),
         }
     }
 
+    /// Every sink combination is reachable and reads back as itself, so [`install`] cannot
+    /// misinterpret a plan it was handed.
+    #[test]
+    fn sinks_describe_every_plan() {
+        let p = PathBuf::from("x.log");
+        assert_eq!(sinks(&Plan::File(p.clone())), (Some(p.as_path()), false));
+        assert_eq!(
+            sinks(&Plan::FileAndStderr(p.clone())),
+            (Some(p.as_path()), true)
+        );
+        assert_eq!(sinks(&Plan::Stderr), (None, true));
+        assert_eq!(sinks(&Plan::Disabled), (None, false));
+    }
+
+    /// The reason a degraded run gives is kept and readable; under stdio it is the only record
+    /// that exists, since the channel that would have carried it is the one that failed.
+    #[test]
+    fn the_degradation_reason_is_kept() {
+        note_degraded("first".to_string());
+        note_degraded("second".to_string());
+        assert_eq!(
+            degraded_reason(),
+            Some("first"),
+            "the first failure is the one that shaped the plan"
+        );
+    }
+
+    /// A typo'd level must be called out, because both of its failure modes are silent: one
+    /// falls back to `info`, the other switches logging off by reading as a target name.
+    #[test]
+    fn a_mistyped_level_is_complained_about() {
+        // Verified live before this test existed: this value produced an empty log file.
+        let bogus = level_complaint("bogus-level").expect("a bare non-level must complain");
+        assert!(bogus.contains("bogus-level"), "{bogus}");
+        assert!(bogus.contains("target filter"), "{bogus}");
+        assert!(
+            level_complaint("hyper=notalevel").is_some(),
+            "an unparseable filter must complain"
+        );
+
+        // Real values, left alone: the plain levels, and the env-filter syntax an operator who
+        // knows what they are doing is entitled to use.
+        for ok in ["trace", "DEBUG", "info", "warn", "error", "info,hyper=warn", "fsmcp=debug"] {
+            assert_eq!(level_complaint(ok), None, "{ok}");
+        }
+        // `off` never reaches here - it is answered by `target_for_in` - but it is a level, so it
+        // must not be reported as a typo either.
+        assert_eq!(level_complaint("off"), None);
+    }
+
+    /// A rejected value must not reach the filter, or the warning about it would be filtered out
+    /// by the very directive it is complaining about - which is what happened before this test.
+    #[test]
+    fn a_rejected_level_is_not_used_as_a_filter() {
+        let built = filter(Some("bogus-level")).to_string();
+        assert!(
+            !built.contains("bogus-level"),
+            "a typo must not become a target directive: {built}"
+        );
+        // A good value is still honoured.
+        assert!(filter(Some("warn")).to_string().contains("warn"));
+    }
+
     /// The dated directory is the one the rest of the design keys on, so its shape is pinned:
-    /// ten characters, `YYYY-MM-DD`, and the same value for two calls in a row.
+    /// ten characters, `YYYY-MM-DD`.
     #[test]
     fn today_is_an_iso_date() {
         let d = today();

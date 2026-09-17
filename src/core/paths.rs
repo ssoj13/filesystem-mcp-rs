@@ -28,8 +28,8 @@ use crate::env_spec;
 /// so the names exist once instead of being spelled at each call site.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SubDir {
-    /// Per-process log files (wave 2).
-    #[allow(dead_code)] // wired when logging lands in wave 2; delete this attribute there
+    /// Per-process log files, one per run under a dated directory
+    /// (see [`crate::core::logging`]).
     Logs,
     /// Downloaded OCR models.
     Ocrs,
