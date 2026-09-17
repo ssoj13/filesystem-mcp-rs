@@ -18,8 +18,10 @@
 //! invisible to it; `build.rs` is the concrete near-miss, since the crate has none today and one
 //! added later would be unguarded. That module's doc records the further spellings it cannot see.
 
+use std::collections::BTreeSet;
 use std::io;
 use std::path::{Path, PathBuf};
+use std::sync::Mutex;
 use tracing::{info, warn};
 
 use crate::env_spec;
@@ -136,15 +138,39 @@ fn resolve_sub(override_dir: Option<PathBuf>, kind: SubDir) -> io::Result<PathBu
     Ok(dir)
 }
 
-/// `create_dir_all` that names the directory it could not create.
+/// `create_dir_all` that names the directory it could not create, and does the syscall once.
 ///
 /// A bare `std::fs` error carries only the reason, so with `FS_MCP_STATE_DIR` unset the operator
 /// read `Cannot prepare the server state directory: Access is denied. (os error 5)` and had no
 /// way to tell which directory was refused - the one thing they need in order to fix it.
+///
+/// [`state_dir`] is on the path of every capture, every `run_command` and every blob write, and
+/// each of those used to reach the filesystem twice (root, then subdirectory) to be told what the
+/// previous call had already established. [`CREATED`] remembers what this process has made.
 fn mkdir(dir: &Path) -> io::Result<()> {
+    // A poisoned lock falls through to the syscall rather than failing: the memo is an
+    // optimisation, and losing it must not stop the server from resolving its own state.
+    if CREATED.lock().is_ok_and(|seen| seen.contains(dir)) {
+        return Ok(());
+    }
     std::fs::create_dir_all(dir)
-        .map_err(|e| io::Error::new(e.kind(), format!("Cannot create {}: {e}", dir.display())))
+        .map_err(|e| io::Error::new(e.kind(), format!("Cannot create {}: {e}", dir.display())))?;
+    if let Ok(mut seen) = CREATED.lock() {
+        seen.insert(dir.to_path_buf());
+    }
+    Ok(())
 }
+
+/// Directories [`mkdir`] has already created in this process.
+///
+/// Keyed by the full path, so changing `FS_MCP_STATE_DIR` mid-process resolves and creates the
+/// new root rather than being answered from the old one's entry.
+///
+/// The consequence, accepted deliberately: a state directory deleted out from under a running
+/// server is no longer silently recreated. A write then fails where it used to succeed against a
+/// freshly empty directory - which is the louder and more truthful of the two outcomes, since the
+/// data that was in there is gone either way.
+static CREATED: Mutex<BTreeSet<PathBuf>> = Mutex::new(BTreeSet::new());
 
 /// Pure path arithmetic: the override wins, otherwise `<home>/.filesystem-mcp-rs`.
 ///

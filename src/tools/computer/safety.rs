@@ -160,7 +160,7 @@ impl SafetyGate {
     /// trail goes to `audit_path`, or nowhere when that is `None`.
     ///
     /// The path is always passed in, never defaulted inside, so that no caller can reach
-    /// [`default_audit_path`] by accident: that function creates `<state>/safety/` and migrates
+    /// `default_audit_path` by accident: that function creates `<state>/safety/` and migrates
     /// the pre-2026-09 log, which is right exactly once at startup and destructive anywhere
     /// else. Production goes through [`init_gate`]; tests pass `None` or a temp path.
     pub fn with_audit(max_ops_per_min: u32, audit_path: Option<PathBuf>) -> Self {

@@ -66,8 +66,17 @@ pub fn sweep_tmp(now: SystemTime) -> io::Result<Sweep> {
         return Ok(Sweep::Disabled);
     }
     let root = paths::state_dir()?;
-    if !lease_due(&root, "tmp", SWEEP_INTERVAL, now) {
-        return Ok(Sweep::LeaseHeld);
+    match lease_due(&root, "tmp", SWEEP_INTERVAL, now) {
+        Lease::Due => {}
+        Lease::Held => return Ok(Sweep::LeaseHeld),
+        // Unreachable with the literal above, and loud on purpose if a later wave passes a name
+        // that cannot address a marker: silently never sweeping is how a disk fills up.
+        Lease::InvalidKind => {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "housekeeping: \"tmp\" was refused as a lease name",
+            ));
+        }
     }
     // `tmp_keep_hours` is clamped, so this cannot overflow; saturating anyway keeps the property
     // local instead of depending on a constant in another module staying small.
@@ -201,18 +210,34 @@ fn newest_mtime(path: &Path, depth: u32) -> io::Result<SystemTime> {
 /// Two processes can both find the work due - both read before either writes - and both sweep.
 /// That is deliberate: this guards against fifty simultaneous directory walks, not against a
 /// second one, and the loser merely finds the files the winner already removed.
-pub(crate) fn lease_due(root: &Path, kind: &str, every: Duration, now: SystemTime) -> bool {
+pub(crate) fn lease_due(root: &Path, kind: &str, every: Duration, now: SystemTime) -> Lease {
     let Some(marker) = marker_path(root, kind) else {
-        return false;
+        return Lease::InvalidKind;
     };
     let stamp = unix_secs(now);
     let Ok(text) = std::fs::read_to_string(&marker) else {
-        return true;
+        return Lease::Due;
     };
     match text.trim().parse::<u64>() {
-        Ok(last) if last <= stamp => stamp - last >= every.as_secs(),
-        _ => true,
+        Ok(last) if last <= stamp && stamp - last < every.as_secs() => Lease::Held,
+        _ => Lease::Due,
     }
+}
+
+/// Whether a lease lets the work run now.
+///
+/// Three outcomes rather than a bool, because "that is not a usable lease name" is a programming
+/// error while "somebody else is doing it" is the ordinary case, and the two call for opposite
+/// responses. As a bool the first collapsed into the second: a caller passing a bad `kind` was
+/// told the work was already in hand and skipped it forever, silently.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Lease {
+    /// The interval has elapsed, or there is no usable marker to say otherwise: do the work.
+    Due,
+    /// A run completed within the interval: skip.
+    Held,
+    /// `kind` is not a bare name, so no marker file can be addressed for it.
+    InvalidKind,
 }
 
 /// Record that `kind` of housekeeping completed in `root` at `now`, starting the next interval.
@@ -227,7 +252,29 @@ pub(crate) fn lease_done(root: &Path, kind: &str, now: SystemTime) -> io::Result
             format!("housekeeping kind must be a bare name, got {kind:?}"),
         )
     })?;
-    std::fs::write(&marker, unix_secs(now).to_string())
+    // Written to a private name and renamed into place, never truncated where a reader can see
+    // it: `fs::write` opens with truncate, so a concurrent `lease_due` could read the marker in
+    // the instant it is empty and take that as "no usable marker", i.e. sweep again immediately.
+    // The rename is atomic on both platforms, so every reader sees either the old stamp or the
+    // new one. Wave 3's compaction needs that same guarantee from this file.
+    let pending = sidecar_name(&marker, std::process::id());
+    std::fs::write(&pending, unix_secs(now).to_string())?;
+    std::fs::rename(&pending, &marker).inspect_err(|_| {
+        // The stamp never landed, so the next process simply sweeps again. The scratch file is
+        // the only lasting trace and it sits in the state root, which nothing sweeps by age.
+        if let Err(e) = std::fs::remove_file(&pending) {
+            warn!("Housekeeping: left {} behind: {e}", pending.display());
+        }
+    })
+}
+
+/// `marker` with `.<pid>.tmp` appended: the private name [`lease_done`] writes before renaming.
+/// The pid keeps two processes stamping the same lease at once from sharing a scratch file, which
+/// would put one's partial write under the other's rename.
+fn sidecar_name(marker: &Path, pid: u32) -> std::path::PathBuf {
+    let mut name = marker.as_os_str().to_os_string();
+    name.push(format!(".{pid}.tmp"));
+    std::path::PathBuf::from(name)
 }
 
 /// The marker file for `kind`, or `None` when `kind` is not a bare name.
@@ -371,11 +418,12 @@ mod tests {
         let root = scratch.path();
         let now = SystemTime::now();
 
-        assert!(lease_due(root, "tmp", HOUR, now), "first");
+        assert_eq!(lease_due(root, "tmp", HOUR, now), Lease::Due, "first");
         lease_done(root, "tmp", now).expect("stamp");
-        assert!(!lease_due(root, "tmp", HOUR, now), "second");
-        assert!(
+        assert_eq!(lease_due(root, "tmp", HOUR, now), Lease::Held, "second");
+        assert_eq!(
             lease_due(root, "tmp", HOUR, now + Duration::from_secs(3601)),
+            Lease::Due,
             "later"
         );
     }
@@ -388,9 +436,13 @@ mod tests {
         let root = scratch.path();
         let now = SystemTime::now();
 
-        assert!(lease_due(root, "tmp", HOUR, now));
+        assert_eq!(lease_due(root, "tmp", HOUR, now), Lease::Due);
         // ... the sweep failed here, so `lease_done` was never reached.
-        assert!(lease_due(root, "tmp", HOUR, now), "must still be due");
+        assert_eq!(
+            lease_due(root, "tmp", HOUR, now),
+            Lease::Due,
+            "must still be due"
+        );
     }
 
     /// Each kind of housekeeping holds its own lease, so wave 2's log retention is not silenced
@@ -402,8 +454,12 @@ mod tests {
         let now = SystemTime::now();
 
         lease_done(root, "tmp", now).expect("stamp tmp");
-        assert!(!lease_due(root, "tmp", HOUR, now));
-        assert!(lease_due(root, "logs", HOUR, now), "logs is a separate lease");
+        assert_eq!(lease_due(root, "tmp", HOUR, now), Lease::Held);
+        assert_eq!(
+            lease_due(root, "logs", HOUR, now),
+            Lease::Due,
+            "logs is a separate lease"
+        );
     }
 
     /// A corrupted marker must not wedge housekeeping off forever: it reads as expired.
@@ -413,7 +469,7 @@ mod tests {
         let root = scratch.path();
         std::fs::write(root.join(".housekeeping-tmp"), b"not a timestamp").expect("write");
 
-        assert!(lease_due(root, "tmp", HOUR, SystemTime::now()));
+        assert_eq!(lease_due(root, "tmp", HOUR, SystemTime::now()), Lease::Due);
     }
 
     /// Nor may a marker from the future, which one VM snapshot restore or one backwards NTP step
@@ -425,16 +481,46 @@ mod tests {
         let now = SystemTime::now();
         lease_done(root, "tmp", now + Duration::from_secs(365 * 24 * 3600)).expect("stamp");
 
-        assert!(lease_due(root, "tmp", HOUR, now), "a future stamp is expired");
+        assert_eq!(
+            lease_due(root, "tmp", HOUR, now),
+            Lease::Due,
+            "a future stamp is expired"
+        );
     }
 
     /// A `kind` that would escape the state root is refused rather than joined onto it, in every
-    /// build profile.
+    /// build profile - and is reported as its own outcome, not as `Held`. Read as "somebody else
+    /// is sweeping", a bad name would switch the work off silently and forever.
     #[test]
     fn an_escaping_kind_is_refused() {
         let scratch = tempfile::TempDir::new().expect("scratch dir");
-        assert!(!lease_due(scratch.path(), "../escape", HOUR, SystemTime::now()));
+        assert_eq!(
+            lease_due(scratch.path(), "../escape", HOUR, SystemTime::now()),
+            Lease::InvalidKind
+        );
         assert!(lease_done(scratch.path(), "../escape", SystemTime::now()).is_err());
+    }
+
+    /// A reader must never catch the marker mid-write. `fs::write` truncates in place, so a
+    /// concurrent `lease_due` could read it empty and take that as "no usable marker" - i.e.
+    /// sweep again immediately, which is the thing the lease exists to prevent.
+    #[test]
+    fn stamping_a_lease_leaves_no_scratch_file_behind() {
+        let scratch = tempfile::TempDir::new().expect("scratch dir");
+        let root = scratch.path();
+        let now = SystemTime::now();
+
+        lease_done(root, "tmp", now).expect("stamp");
+        lease_done(root, "tmp", now).expect("stamp again over the existing marker");
+
+        let left: Vec<String> = std::fs::read_dir(root)
+            .expect("list")
+            .flatten()
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .filter(|n| n != ".housekeeping-tmp")
+            .collect();
+        assert!(left.is_empty(), "the rename must leave nothing over: {left:?}");
+        assert_eq!(lease_due(root, "tmp", HOUR, now), Lease::Held);
     }
 
     /// The recorded mtime of a file just written, which is what the sweep will compare against.

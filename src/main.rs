@@ -7898,11 +7898,15 @@ async fn prepare_stream_paths(args: &RunCommandArgs) -> Result<(String, String),
         .await
         .map_err(internal_err("Failed to create stream output directory"))?;
 
+    // The timestamp orders the files for whoever goes looking; the uuid is what makes the name
+    // unique. `<state>/tmp` is shared by every server on the machine, so a millisecond is nowhere
+    // near enough resolution - two processes starting together, or two concurrent calls inside
+    // one, would land on the same name and each would read the other's output.
     let ts = SystemTime::now()
         .duration_since(SystemTime::UNIX_EPOCH)
         .map(|d| d.as_millis())
         .unwrap_or(0);
-    let base = format!("run_command_{ts}");
+    let base = format!("run_command_{ts}_{}", uuid::Uuid::new_v4());
     let stdout = dir.join(format!("{base}_stdout.log"));
     let stderr = dir.join(format!("{base}_stderr.log"));
 
