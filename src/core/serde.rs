@@ -118,8 +118,10 @@ pub enum ShellKind {
     Cmd,
     /// POSIX `sh -c`.
     Sh,
-    /// `bash -c` (git bash on Windows). The cross-platform unix dialect:
-    /// enables `;`, pipes, and tools like tail/grep/sed on every OS.
+    /// `bash -c`. The cross-platform unix dialect: enables `;`, pipes, and
+    /// tools like tail/grep/sed on every OS. On Windows this resolves to
+    /// git-bash; the `System32` WSL launcher is refused rather than used (it
+    /// would expand variables on the Linux side and drop the `env` map).
     Bash,
     /// PowerShell 7+ `pwsh -NoProfile -Command`.
     Pwsh,

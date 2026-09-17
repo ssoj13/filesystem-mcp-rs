@@ -477,10 +477,11 @@ struct ShellSpawn {
 /// `command` and `args` are joined into a single command line passed as the
 /// final argument (`/C`, `-c`, or `-Command`). `Default` resolves to the
 /// platform shell: `cmd.exe` on Windows, `sh` on Unix. `bash`/`pwsh` work on
-/// every platform provided the binary is on `PATH` (git bash / PowerShell 7) —
-/// this is what lets unix-style pipelines (`a | b ; c`, `tail`, `grep`) run on
-/// Windows, where `cmd.exe` understands neither `;` nor those tools. See
-/// `fsmcp_bug.md` #1.
+/// every platform — this is what lets unix-style pipelines (`a | b ; c`,
+/// `tail`, `grep`) run on Windows, where `cmd.exe` understands neither `;` nor
+/// those tools. The program names recorded here are resolved to a concrete
+/// binary later by [`resolve_shell_program`]: on Windows `bash` deliberately
+/// means git-bash, never the `System32` WSL launcher. See `fsmcp_bug.md` #1.
 fn shell_wrap(kind: ShellKind, command: &str, args: &[&str]) -> Option<ShellSpawn> {
     // Resolve the platform default to a concrete shell first, so `args` can be
     // quoted with that shell's rules before being joined onto the command line.
@@ -691,7 +692,20 @@ fn find_on_path(name: &str) -> Option<std::path::PathBuf> {
     None
 }
 
+/// Resolve a shell name to a concrete program to spawn.
+///
+/// Most shells are handed to the OS `PATH` search unchanged. Two are resolved
+/// deliberately because `PATH` order cannot be trusted for them:
+/// - `pwsh`/`powershell`: GUI hosts often start the server with a short `PATH`.
+/// - `bash` **on Windows**: `C:\Windows\System32\bash.exe` is the WSL launcher
+///   and normally precedes git-bash on `PATH`. See [`pick_bash`].
 fn resolve_shell_program(program: &str) -> Result<String> {
+    #[cfg(windows)]
+    if program == "bash" {
+        return Ok(pick_bash(&bash_candidates())?
+            .to_string_lossy()
+            .into_owned());
+    }
     if program != "pwsh" && program != "powershell" {
         return Ok(program.to_string());
     }
@@ -717,6 +731,142 @@ fn resolve_shell_program(program: &str) -> Result<String> {
         );
     }
     bail!("powershell.exe not found on PATH")
+}
+
+// ---------------------------------------------------------------------------
+// Windows bash resolution (git-bash vs the WSL launcher)
+// ---------------------------------------------------------------------------
+
+/// True when `path` is the Windows-shipped `bash.exe` — the WSL launcher, not a
+/// Win32 bash.
+///
+/// Spawning it crosses the Win32→WSL boundary, and the damage is invisible at
+/// the call site: `$var`, loops and locals are expanded on the Linux side and
+/// come back empty, the `env` map never reaches the command, and Windows paths
+/// mean nothing inside the Linux filesystem view. It is identified by location
+/// (`System32`/`SysWOW64`, or the Store alias directory `WindowsApps`) because
+/// the file name is plain `bash.exe` either way.
+#[cfg(windows)]
+fn is_wsl_bash(path: &Path) -> bool {
+    path.components().any(|c| {
+        let seg = c.as_os_str().to_string_lossy().to_ascii_lowercase();
+        seg == "system32" || seg == "syswow64" || seg == "windowsapps"
+    })
+}
+
+/// Choose which bash to spawn from `candidates` (existing paths, best first).
+///
+/// Pure — no filesystem or environment access — so the policy is unit-testable
+/// without a bash on the machine. The first non-WSL candidate wins. A list that
+/// holds nothing but WSL launchers is an **error**, not a fallback: a
+/// wrong-but-plausible shell surfaces much later as empty variables, which is
+/// far harder to diagnose than a refusal here.
+#[cfg(windows)]
+fn pick_bash(candidates: &[std::path::PathBuf]) -> Result<std::path::PathBuf> {
+    if let Some(p) = candidates.iter().find(|p| !is_wsl_bash(p)) {
+        return Ok(p.clone());
+    }
+    match candidates.first() {
+        Some(wsl) => bail!(
+            "shell:\"bash\" found only the WSL launcher ({}), not a Win32 bash. \
+             Through it, variables and loops expand on the Linux side (they come \
+             back empty), the `env` map is dropped, and Windows paths do not \
+             resolve. Use shell:\"pwsh\", or install git-bash \
+             (https://git-scm.com/download/win).",
+            wsl.display()
+        ),
+        None => bail!(
+            "shell:\"bash\" found no bash on this host. Use shell:\"pwsh\", or \
+             install git-bash (https://git-scm.com/download/win)."
+        ),
+    }
+}
+
+/// Push `p` onto `out` if it exists and is not already listed.
+#[cfg(windows)]
+fn push_bash_candidate(out: &mut Vec<std::path::PathBuf>, p: std::path::PathBuf) {
+    if p.is_file() && !out.contains(&p) {
+        out.push(p);
+    }
+}
+
+/// Ask the installed git where it lives and derive `<install>\bin\bash.exe`.
+///
+/// `git --exec-path` prints e.g. `C:/Program Files/Git/mingw64/libexec/git-core`
+/// and points at the real installation even when `git` itself is a shim, which
+/// is why it is the first candidate. The answer is cached: the install does not
+/// move while the server runs, and spawning git per command would be wasteful.
+#[cfg(windows)]
+fn git_bash_from_exec_path() -> Option<std::path::PathBuf> {
+    use std::sync::OnceLock;
+    static CACHED: OnceLock<Option<std::path::PathBuf>> = OnceLock::new();
+    CACHED
+        .get_or_init(|| {
+            use std::os::windows::process::CommandExt;
+            /// CREATE_NO_WINDOW — keep the probe from flashing a console window.
+            const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+            let out = std::process::Command::new("git")
+                .arg("--exec-path")
+                .creation_flags(CREATE_NO_WINDOW)
+                .output()
+                .ok()?;
+            if !out.status.success() {
+                return None;
+            }
+            let raw = String::from_utf8_lossy(&out.stdout).trim().to_string();
+            if raw.is_empty() {
+                return None;
+            }
+            bash_near(Path::new(&raw.replace('/', "\\")))
+        })
+        .clone()
+}
+
+/// Walk up from a git-owned directory looking for `<ancestor>\bin\bash.exe`.
+///
+/// The depth differs between layouts (`<install>\mingw64\libexec\git-core` for
+/// modern Git for Windows, `<install>\libexec\git-core` for older/msys ones),
+/// so the ancestors are scanned instead of a fixed number of `..`.
+#[cfg(windows)]
+fn bash_near(start: &Path) -> Option<std::path::PathBuf> {
+    start.ancestors().take(5).find_map(|anc| {
+        let candidate = anc.join("bin").join("bash.exe");
+        candidate.is_file().then_some(candidate)
+    })
+}
+
+/// Windows bash candidates, best first: git-bash derived from the installed
+/// git, then the usual install locations, and only then whatever `PATH` offers
+/// — which is very often the WSL launcher, so it is [`pick_bash`] that decides
+/// whether the `PATH` hit is usable.
+#[cfg(windows)]
+fn bash_candidates() -> Vec<std::path::PathBuf> {
+    let mut out: Vec<std::path::PathBuf> = Vec::new();
+
+    if let Some(p) = git_bash_from_exec_path() {
+        push_bash_candidate(&mut out, p);
+    }
+    // `git.exe` sits in `<install>\cmd` or `<install>\bin`; either way the
+    // ancestor walk finds `<install>\bin\bash.exe`.
+    if let Some(git) = find_on_path("git")
+        && let Some(p) = bash_near(&git)
+    {
+        push_bash_candidate(&mut out, p);
+    }
+    for root in [
+        std::env::var_os("ProgramFiles").map(std::path::PathBuf::from),
+        std::env::var_os("ProgramFiles(x86)").map(std::path::PathBuf::from),
+        std::env::var_os("LOCALAPPDATA").map(|d| std::path::PathBuf::from(d).join("Programs")),
+    ]
+    .into_iter()
+    .flatten()
+    {
+        push_bash_candidate(&mut out, root.join("Git").join("bin").join("bash.exe"));
+    }
+    if let Some(p) = find_on_path("bash") {
+        push_bash_candidate(&mut out, p);
+    }
+    out
 }
 
 // ---------------------------------------------------------------------------
@@ -1653,6 +1803,74 @@ pub fn search_processes(
 mod tests {
     use super::*;
     use tempfile::tempdir;
+
+    // -----------------------------------------------------------------------
+    // Windows bash resolution. `pick_bash` is pure, so the policy is tested
+    // over synthetic candidate lists — no bash (or WSL) needs to exist here.
+    // -----------------------------------------------------------------------
+
+    #[cfg(windows)]
+    #[test]
+    fn test_is_wsl_bash_by_location() {
+        for wsl in [
+            r"C:\Windows\System32\bash.exe",
+            r"C:\WINDOWS\SYSTEM32\bash.exe",
+            r"C:\Windows\SysWOW64\bash.exe",
+            r"C:\Users\me\AppData\Local\Microsoft\WindowsApps\bash.exe",
+        ] {
+            assert!(is_wsl_bash(Path::new(wsl)), "{wsl} should be seen as WSL");
+        }
+        for real in [
+            r"C:\Program Files\Git\bin\bash.exe",
+            r"C:\Users\me\AppData\Local\Programs\Git\bin\bash.exe",
+            r"D:\msys64\usr\bin\bash.exe",
+        ] {
+            assert!(!is_wsl_bash(Path::new(real)), "{real} is a Win32 bash");
+        }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn test_pick_bash_prefers_git_bash_over_wsl() {
+        // PATH order is irrelevant: even listed last, git-bash wins.
+        let candidates = vec![
+            std::path::PathBuf::from(r"C:\Windows\System32\bash.exe"),
+            std::path::PathBuf::from(r"C:\Program Files\Git\bin\bash.exe"),
+        ];
+        assert_eq!(
+            pick_bash(&candidates).unwrap(),
+            std::path::PathBuf::from(r"C:\Program Files\Git\bin\bash.exe")
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn test_pick_bash_refuses_wsl_only_host() {
+        let candidates = vec![std::path::PathBuf::from(r"C:\Windows\System32\bash.exe")];
+        let err = pick_bash(&candidates).unwrap_err().to_string();
+        // The error must name what was found and point at the way out.
+        assert!(err.contains(r"C:\Windows\System32\bash.exe"), "{err}");
+        assert!(err.contains("WSL"), "{err}");
+        assert!(err.contains("pwsh"), "{err}");
+        assert!(err.contains("git-bash"), "{err}");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn test_pick_bash_no_candidates_is_an_error() {
+        let err = pick_bash(&[]).unwrap_err().to_string();
+        assert!(err.contains("no bash"), "{err}");
+        assert!(err.contains("pwsh"), "{err}");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn test_pick_bash_keeps_candidate_order() {
+        let first = std::path::PathBuf::from(r"C:\Program Files\Git\bin\bash.exe");
+        let second = std::path::PathBuf::from(r"D:\msys64\usr\bin\bash.exe");
+        let candidates = vec![first.clone(), second];
+        assert_eq!(pick_bash(&candidates).unwrap(), first);
+    }
 
     #[tokio::test]
     async fn test_run_simple_command() {

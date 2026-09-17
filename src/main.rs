@@ -6116,7 +6116,7 @@ USE CASES: Patch executables, fix binary data, search-replace in non-text files.
             **Output filter example:**\n\
             {outputFilter: {include: [\"error\", \"warning\"], exclude: [\"note:\"], context: 3, maxLines: 50}}\n\n\
             **Key features:**\n\
-            - shell: false(default)=no shell (command auto-split into program+args); true=platform shell (cmd /C Win, sh -c Unix); 'bash'=bash -c (git bash on Win); 'pwsh'=PowerShell; 'cmd'/'sh'=force one.\n\
+            - shell: false(default)=no shell (command auto-split into program+args); true=platform shell (cmd /C Win, sh -c Unix); 'bash'=bash -c ('bash' on Windows resolves to git-bash; the System32 WSL launcher is refused, not used); 'pwsh'=PowerShell; 'cmd'/'sh'=force one.\n\
             - Unix-style pipelines on Windows: cmd does NOT support ';' and lacks tail/grep/sed — use shell:'bash' for those command lines.\n\
             - Multi-line cmd (newline-separated, shell:'cmd' or true/default on Windows) runs ALL lines via a temp .bat = BATCH semantics: %%i (not %i) in for, exit code = LAST line, a failing middle line does NOT stop the rest (use && for fail-fast).\n\
             - WINDOWS PATHS in `command`: JSON eats single backslashes (`\\r`/`\\t` become control chars). Double them (`\"C:\\\\dir\\\\file\"`) or use forward slashes; in shell mode the decoded line reaches cmd.exe verbatim.\n\

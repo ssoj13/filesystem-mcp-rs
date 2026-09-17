@@ -77,6 +77,11 @@ crate is behind `#[cfg(windows)]` and a Linux-only pass never sees the driver.
    since 0.2.1, but canonical form is ContentRef object).
 
 ## Session notes (FIFO, prune when stale)
+- 2026-09-17: `shell:"bash"` on Windows no longer trusts PATH. `resolve_shell_program` →
+  `bash_candidates()` (git `--exec-path` cached in a OnceLock → `git.exe` location → install roots
+  → PATH) → `pick_bash()` (pure, unit-tested) which REFUSES a System32/SysWOW64/WindowsApps
+  bash.exe (the WSL launcher: eats `$var`, drops the `env` map, Windows paths invalid). Live-probed:
+  `/proc/version` reports `MINGW64_NT`, cwd is the real path, `env` arrives.
 - 2026-09-14: bug5 `run_command` — reject leftover `$NAME` in command/args; failFast default true;
   `pwsh` vs `powershell.exe`; `install` snapshots process PATH into every client env (no registry).
   Workaround remains: script file + `-File` if the host already stripped `$`. 492 tests green.

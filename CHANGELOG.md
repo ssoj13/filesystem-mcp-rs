@@ -2,6 +2,24 @@
 
 ## [Unreleased]
 
+### `shell: "bash"` on Windows means git-bash, not WSL
+
+- **`shell: "bash"` used to spawn a bare `bash` from `PATH`**, while the docs promised git-bash. On a
+  normal Windows box `C:\Windows\System32\bash.exe` is the WSL launcher and comes first on `PATH`,
+  so the command crossed the Win32→WSL boundary: `$var`, loops and locals expanded on the Linux side
+  and came back empty, the `env` map never reached the command, and Windows paths meant nothing
+  inside the Linux filesystem view. The tool appeared to work "every other time" for reasons the
+  caller could not see.
+- **bash is now resolved deliberately on Windows**: git-bash derived from the installed git
+  (`git --exec-path`, cached, then `git.exe`'s own location), then the usual install roots
+  (both Program Files roots and the per-user `Programs\Git`), and only then `PATH`.
+- **A WSL-only host is an error, not a fallback.** If the sole candidate lives in `System32`,
+  `SysWOW64` or `WindowsApps`, the call fails with a message naming the path found and pointing at
+  `shell: "pwsh"` or a git-bash install — a wrong-but-plausible shell surfaces much later as empty
+  variables, which is far harder to diagnose than a refusal. Unix is untouched (its `PATH` already
+  resolves the right binary). The choice is a pure function over a candidate list, so the policy is
+  unit-tested without a bash on the machine.
+
 ### One log file per process, on by default
 
 - **Every run now writes its own log**, `~/.filesystem-mcp-rs/logs/<YYYY-MM-DD>/fsmcp-<pid>-<instance>.log`,

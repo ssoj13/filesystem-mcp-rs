@@ -5,6 +5,7 @@
 #### `run_command` — shells, fail-fast, PATH, variables
 
 - `shell`: `false` (default), `true` (cmd/sh), `bash`, `pwsh` (PowerShell 7), `powershell` (Windows PowerShell 5). `pwsh` is not an alias for `powershell`.
+- On Windows, `bash` means **git-bash**, resolved from the installed git rather than from `PATH` order. `C:\Windows\System32\bash.exe` is the WSL launcher and usually comes first on `PATH`; through it variables and loops expand on the Linux side (empty results), the `env` map is dropped and Windows paths do not resolve, so it is **refused with an error** naming what was found. No git-bash → use `shell: "pwsh"`.
 - `failFast` defaults true (stop after a failing simple line). `failFast: false` = old batch “run all lines”.
 - Do not put shell `$NAME` tokens in `command`/`args` — the host may delete them; leftovers are rejected. Use stdin ContentRef or a script file.
 - GUI Cursor PATH is often short. `install` snapshots the installing process PATH into every client `env.PATH`. Run install from a terminal that can run `git`, or edit `env.PATH`.
