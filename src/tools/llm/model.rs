@@ -2,6 +2,30 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+/// Open-object stand-in for a request whose canonical schema another tool
+/// already publishes.
+///
+/// The provider-pinned `ai_messages_*` / `ai_count_tokens_*` tools take exactly
+/// the body their unpinned sibling takes, but MCP has no way to share one schema
+/// between tools: declaring the real type on all four ships the same ~2.4 KB of
+/// JSON Schema four times in every `tools/list`, which every session pays for
+/// before its first request. The pinned variants therefore publish an open
+/// object and are validated against the real type on arrival — the shape is
+/// described once and still enforced everywhere.
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct PinnedRequest(pub serde_json::Map<String, Value>);
+
+impl PinnedRequest {
+    /// Validate the body against the canonical request type. `canonical` names
+    /// the sibling tool whose schema documents the shape, so a rejected call
+    /// says where to look.
+    pub fn parse<T: serde::de::DeserializeOwned>(self, canonical: &str) -> Result<T, String> {
+        serde_json::from_value(Value::Object(self.0)).map_err(|e| {
+            format!("{e} — this tool takes the same request body as `{canonical}`, whose schema describes it")
+        })
+    }
+}
+
 #[derive(Debug, Deserialize, Serialize, Clone, JsonSchema)]
 #[serde(tag = "type")]
 pub enum ContentBlock {

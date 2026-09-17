@@ -748,8 +748,10 @@ struct EditOperation {
         alias = "replacement"
     )]
     new_text: TextOrRef,
+    /// Treat `oldText` as a regex; `newText` may then use `$1` capture groups.
     #[serde(default, rename = "isRegex", alias = "is_regex")]
     is_regex: FlexBool,
+    /// Replace every occurrence instead of only the first.
     #[serde(default, rename = "replaceAll", alias = "replace_all")]
     replace_all: FlexBool,
 }
@@ -1060,7 +1062,8 @@ struct GrepFilesArgs {
     /// Output mode: "content" (default), "count", "files_with_matches", "files_without_match"
     #[serde(default)]
     output_mode: Option<String>,
-    /// Enable multi-line mode: pattern can contain `\n` and span lines (like `rg --multiline -U`).
+    /// Allow `\n` in `pattern` and match across line breaks (`rg -U`). REQUIRED
+    /// for any pattern spanning lines; without it such a pattern finds nothing.
     #[serde(default)]
     multiline: FlexBool,
     /// Treat `pattern` as a fixed literal (no regex parsing). Like `rg -F`.
@@ -1812,7 +1815,8 @@ struct BulkEditsArgs {
     /// Dry run mode - return diffs without applying changes
     #[serde(default, alias = "dry_run")]
     dry_run: FlexBool,
-    /// Fail when any edit has no match in a file
+    /// Error out on a file where any edit matched nothing (default false); all
+    /// no-match edits are aggregated into one message.
     #[serde(default, alias = "fail_on_no_match")]
     fail_on_no_match: FlexBool,
     /// Regex engine for `isRegex` edits: "regex" (default, linear time) or
@@ -1961,9 +1965,9 @@ enum RunModeArg {
     /// Wait for completion, send heartbeat every ~30s (default)
     #[default]
     Sync,
-    /// Wait for completion, send progress with output snippets every ~10s
+    /// Wait for completion; progress carries output snippets every ~10s
     Managed,
-    /// Run in background, return immediately with PID
+    /// Return a pid immediately; read the output with tail_file on the log files
     Detached,
 }
 
@@ -2144,25 +2148,21 @@ mod cmdline_tests {
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 struct RunCommandArgs {
-    /// Command to execute (e.g., "python", "node", "cargo"). A full command
-    /// line (e.g. "cargo test -p foo") also works: when `args` is empty and
-    /// `shell` is false, it is auto-split into program + arguments (quote-aware;
-    /// backslashes preserved). Pass `args` or `shell: true` to bypass.
+    /// Program to run, or a whole command line: when `args` is empty and no
+    /// shell is requested it is split into program + arguments (quote-aware).
     ///
-    /// WINDOWS PATHS: a backslash in a JSON string is an escape char, so a
-    /// single-backslash path is consumed before it reaches this server
-    /// (`\r`/`\t` become control chars; other `\x` is invalid JSON). Safe
-    /// default: double every backslash — `"type \"C:\\dir\\file\""`. Forward
-    /// slashes also work for most programs, but cmd.exe built-ins (`if exist`,
-    /// `copy`, `dir`) can read a leading `/` as a switch, so prefer doubled
-    /// backslashes in shell mode. Once the JSON is correct the path reaches the
-    /// shell verbatim (no further mangling by this server).
+    /// WINDOWS PATHS: JSON eats a single backslash before this server sees it
+    /// (`\r`/`\t` become control chars, other `\x` is invalid JSON), so double
+    /// every backslash — `"type \"C:\\dir\\file\""`. Forward slashes work for
+    /// most programs, but cmd.exe built-ins read a leading `/` as a switch.
     command: String,
     /// Command arguments
     #[serde(default, deserialize_with = "vec_or_string")]
     args: Vec<String>,
-    /// Working directory (optional). Absolute path with forward slashes, e.g. `C:/repo`. Pass as a plain JSON string — do NOT embed quote characters inside the value.
-    /// Aliases also accepted (a typo here is a common trap): `working_directory`, `workingDir`, `working_dir`, `workdir`, `dir`.
+    /// Working directory. Absolute, forward slashes, as a plain JSON string
+    /// with no quote characters inside the value: "C:/projects/repo". Aliases
+    /// accepted: `working_directory`, `workingDir`, `working_dir`, `workdir`,
+    /// `dir`.
     #[serde(
         alias = "working_directory",
         alias = "workingDir",
@@ -2177,24 +2177,25 @@ struct RunCommandArgs {
     /// Clear existing environment before adding env vars
     #[serde(default, alias = "clear_env")]
     clear_env: FlexBool,
-    /// Prepend to existing env vars (e.g. {"PATH": "C:/new/bin;"} prepends to current PATH)
+    /// Prepend to existing env vars; include the separator yourself, e.g.
+    /// {"PATH": "C:/new/bin;"}
     #[serde(
         default,
         deserialize_with = "option_object_or_json_string",
         alias = "env_prepend"
     )]
     env_prepend: Option<std::collections::HashMap<String, String>>,
-    /// Append to existing env vars (e.g. {"PATH": ";C:/extra/bin"} appends to current PATH)
+    /// Append to existing env vars; include the separator yourself
     #[serde(
         default,
         deserialize_with = "option_object_or_json_string",
         alias = "env_append"
     )]
     env_append: Option<std::collections::HashMap<String, String>>,
-    /// Timeout in milliseconds (command will be killed after this time)
+    /// Kill the command after N milliseconds (0/unset = no timeout)
     #[serde(default, alias = "timeout_ms")]
     timeout_ms: FlexU64,
-    /// Optional watchdog delay in milliseconds added on top of timeout_ms
+    /// Watchdog delay in milliseconds, added on top of timeoutMs
     #[serde(default, alias = "kill_after_ms")]
     kill_after_ms: FlexU64,
     /// Redirect stdout to this file
@@ -2203,7 +2204,7 @@ struct RunCommandArgs {
     /// Redirect stderr to this file
     #[serde(alias = "stderr_file")]
     stderr_file: Option<String>,
-    /// Stdin via Content Plane (inline/base64/path/blob). Large scripts: write file then exec.
+    /// Stdin as a ContentRef (inline/base64/path/blob), never a bare string.
     stdin: Option<ContentRef>,
     /// Return first N lines of stdout
     #[serde(default, alias = "stdout_head")]
@@ -2217,52 +2218,36 @@ struct RunCommandArgs {
     /// Return only last N lines of stderr
     #[serde(default, alias = "stderr_tail")]
     stderr_tail: FlexUsize,
-    /// Grep-like output filter (applies to inline results only, full output goes to log files)
+    /// Grep-like filter over the inline output only.
     #[serde(
         default,
         deserialize_with = "option_object_or_json_string",
         alias = "output_filter"
     )]
     output_filter: Option<OutputFilterArgs>,
-    /// Execution mode: "sync" (default), "managed", or "detached"
     #[serde(default)]
     mode: RunModeArg,
-    /// Shell to wrap the command in. Accepts a bool or a shell name:
-    /// - `false` (default): no shell — `command` is the program and `args` its
-    ///   arguments (a full command line in `command` is auto-split, quote-aware).
-    /// - `true`: platform default — `cmd /C` on Windows, `sh -c` on Unix.
-    /// - `"bash"`: `bash -c` (git bash on Windows). USE THIS for unix-style
-    ///   pipelines on any OS — `;` separators, pipes, and tools like
-    ///   `tail`/`grep`/`sed`. Windows `cmd` does NOT understand `;` and lacks
-    ///   those tools, so prefer `"bash"` for such command lines.
-    /// - `"pwsh"`: PowerShell 7 (`pwsh -NoProfile -Command`). Errors if pwsh.exe is missing.
-    /// - `"powershell"` / `"ps"`: Windows PowerShell 5 (`powershell.exe`).
-    /// - `"cmd"` / `"sh"`: force that specific shell.
+    /// Bool or shell name: `false` (default) = no shell; `true` = `cmd /C` on
+    /// Windows, `sh -c` on Unix; `"bash"`, `"pwsh"` (PowerShell 7, NOT an alias
+    /// for `"powershell"` = Windows PowerShell 5), `"cmd"`, `"sh"`.
     ///
-    /// Named shells must be on `PATH` (or a well-known install path). With `cmd` the line reaches cmd.exe
-    /// verbatim (via `raw_arg`), so backslash Windows paths survive intact —
-    /// write them as at the prompt, e.g. `type "C:\dir\file"`.
-    /// A MULTI-LINE command under `cmd` (newline-separated lines) runs EVERY
-    /// line via a temp `.bat`. Default `failFast` (true) stops after a failing
-    /// simple line (`|| exit /b 1`); `if`/`for` blocks are left alone — use `&&`
-    /// there. PowerShell gets ErrorAction Stop. Pass `failFast: false` for old
-    /// batch “run every line” semantics.
+    /// On Windows `"bash"` means git-bash, resolved from the installed git; the
+    /// `System32` WSL launcher is refused, because through it variables expand
+    /// on the Linux side and the `env` map never arrives. Under `"cmd"` the line
+    /// reaches cmd.exe verbatim, so backslash paths survive as typed.
     #[serde(default)]
     shell: ShellArg,
-    /// Stop after a failing line (default true). See `shell` docs.
+    /// Stop after a failing line (default true): `|| exit /b 1` under cmd,
+    /// ErrorAction Stop under PowerShell. `if`/`for` blocks are left alone —
+    /// chain those with `&&`. False = batch "run every line".
     #[serde(default = "default_flex_true", alias = "fail_fast")]
     fail_fast: FlexBool,
-    /// Stream output to log files (auto-creates them if not provided). Default
-    /// true. Streaming and the inline result are INDEPENDENT: stdout/stderr are
-    /// always captured and returned inline too. Inline is the full output unless
-    /// `stdoutHead`/`stdoutTail`/`outputFilter` trim it; with none of those it is
-    /// capped to the last ~200 lines / 16 KB while the complete output stays in
-    /// the log file. `stdoutTotalLines` always reports the true length.
+    /// Stream output to log files, auto-created when not given (default true).
+    /// Independent of the inline result, which is returned either way.
     #[serde(default = "default_flex_true", alias = "stream_output")]
     stream_output: FlexBool,
-    /// Directory for streamed output files (optional). Defaults to the server's
-    /// own scratch dir (`~/.filesystem-mcp-rs/tmp/`) so auto-created logs never
-    /// litter the cwd and are swept by the same retention as other scratch files.
+    /// Directory for auto-created log files. Default: the server's own scratch
+    /// dir (`~/.filesystem-mcp-rs/tmp/`), swept by the usual retention.
     #[serde(alias = "stream_dir")]
     stream_dir: Option<String>,
     /// DEPRECATED: use mode="detached" instead. Kept for backward compat.
@@ -3464,34 +3449,10 @@ impl FileSystemServer {
 
     #[tool(
         name = "grep_files",
-        description = "Search file CONTENTS by regex. Powered by ripgrep's library (grep-regex + grep-searcher + ignore). Use instead of shell grep or built-in Grep.\n\n\
-            TWO DISTINCT FIELDS — do not confuse them:\n\
-            - `pattern`     : regex matched against file CONTENTS (required)\n\
-            - `filePattern` : glob matched against file NAMES/PATHS (optional, e.g. \"*.rs\")\n\n\
-            Examples:\n\
-            {\"path\": \"src\", \"pattern\": \"catch_unwind\"}\n\
-            {\"path\": \"src\", \"pattern\": \"catch_unwind\", \"filePattern\": \"*.rs\"}\n\
-            {\"path\": \"src\", \"pattern\": \"TODO\", \"contextBefore\": 2, \"contextAfter\": 2}\n\
-            {\"path\": \"src\", \"pattern\": \"foo,\\n\\s*bar\", \"multiline\": true}\n\n\
-            Pass `pattern` as a regular JSON string value — do not embed extra quote characters inside the value. \
-            Search for the identifier itself, not with surrounding source delimiters \
-            (e.g. `spawn_worker`, not `\"spawn_worker\"` or `spawn_worker;`).\n\n\
-            Common options:\n\
-            - `multiline` (bool): allow `\\n` in pattern and span multiple lines. REQUIRED when matching across line breaks.\n\
-            - `fixedStrings` (bool): treat `pattern` as a literal string (no regex parsing). Like `rg -F`.\n\
-            - `wholeWord` (bool): require word boundaries on both sides. Like `rg -w`.\n\
-            - `caseInsensitive` (bool), `invertMatch` (bool).\n\
-            - `contextBefore`/`contextAfter` (int): like `rg -B`/`-A`.\n\
-            - `maxMatches` (int, default 100).\n\
-            - `maxDepth` (int): cap recursion (0 = unlimited).\n\
-            - `maxFilesize` (int bytes): skip huge blobs (0 = no limit).\n\
-            - `excludePatterns` (array, e.g. [\"target/**\"]).\n\
-            - `outputMode`: `content` (default) | `files_with_matches` | `files_without_match` | `count`.\n\n\
-            **Engines:**\n\
-            - Default `engine: \"regex\"` uses ripgrep's regex crate — linear time, NO look-around / backreferences. SIMD-accelerated.\n\
-            - `engine: \"fancy\"` switches to `fancy_regex` — supports `(?=...)`, `(?!...)`, `(?<=...)`, `(?<!...)`, `\\1` backrefs. Backtracking; slower; can ReDoS on pathological patterns.\n\
-            - `encoding`: force a file encoding (e.g. `utf-16`, `windows-1251`); default auto-detects.\n\
-            - `heapLimitMb`: cap searcher RAM (multi-line mode safeguard against gigantic single-line files)."
+        description = "Search file CONTENTS by regex (ripgrep's library). Use instead of shell grep.\n\
+            `pattern` is matched against file contents; `filePattern` is a glob matched against file names — the two are easy to swap by accident.\n\
+            Pass `pattern` as a plain JSON string with no extra quote characters, and search for the identifier itself rather than its surrounding source delimiters (`spawn_worker`, not `\"spawn_worker\"` or `spawn_worker;`).\n\
+            Honours .gitignore and skips binary files, so a file that exists can still be absent from the results."
     )]
     async fn grep_files(
         &self,
@@ -3635,19 +3596,10 @@ impl FileSystemServer {
 
     #[tool(
         name = "grep_context",
-        description = "Context-aware grep. Find a pattern only when nearby words/phrases appear within a window.\\n\\n\\
-            Use this to reduce noise by requiring context terms near the match.\\n\\n\\
-            **Features:**\\n\\
-            - Nearby patterns matched by words or characters\\n\\
-            - Direction control: before/after/both\\n\\
-            - Match mode: any/all\\n\\
-            - Same include/exclude, context lines, and output modes as grep_files\\n\\
-            - Same `fixedStrings`, `wholeWord`, `maxDepth`, `maxFilesize`, `engine` flags as grep_files (multi-line patterns work natively without a flag here — the matcher reads each file whole).\\n\\n\\
-            **Example:**\\n\\
-            {\\\"path\\\": \\\".\\\", \\\"pattern\\\": \\\"error\\\", \\\"nearbyPatterns\\\": [\\\"timeout\\\", \\\"retry\\\"], \\\"nearbyWindowWords\\\": 6, \\\"nearbyDirection\\\": \\\"before\\\"}\\n\\n\\
-            **Pattern tips:** Do NOT include surrounding quotes, semicolons, or other syntax \\
-            delimiters from source code in your pattern. Search for the identifier itself \\
-            (e.g. `ext_computation`, not `ext_computation\\\"`)."
+        description = "Grep that reports a match only when the nearby terms also appear within a window — the noise filter grep_files cannot express.\n\
+            `nearbyPatterns` and at least one of `nearbyWindowWords`/`nearbyWindowChars` are required, although the schema cannot mark them so.\n\
+            Unlike grep_files, a multi-line `pattern` needs no flag here: each file is read whole.\n\
+            Search for the identifier itself, not its surrounding source delimiters."
     )]
     async fn grep_context(
         &self,
@@ -4859,13 +4811,10 @@ impl FileSystemServer {
 
     #[tool(
         name = "bulk_edits",
-        description = "Apply the SAME set of edits to MANY files at once (mass search/replace). Select files by glob (e.g. `**/*.rs`), then apply ordered edits to each.\n\n\
-Return shape (compact by design — designed for codebase-wide migrations of thousands of files):\n  - `scannedFiles`: total files visited.\n  - `modified`: count of files that changed.\n  - `errors`: count of files that errored.\n  - `modifiedFiles`: array of paths that changed (fast for follow-up tooling).\n  - `results`: per-file entries ONLY for modified files (each with truncated diff).\n  - `errorResults`: per-file entries ONLY for errored files.\n  - `diffsTruncated`: true if any diff or trailing diff was clipped (logs still contain everything).\n  Unchanged files DO NOT appear in `results` — they are reflected in `scannedFiles - modified - errors`.\n\n\
-Each edit supports:\n  - `oldText`, `newText` (strings).\n  - `isRegex` (bool): use regex (supports `$1`/`$2` capture groups).\n  - `replaceAll` (bool): replace all occurrences instead of just the first.\n\n\
-Semantics: all edits in a single call are evaluated against a FROZEN SNAPSHOT of each file. Overlapping match spans from different edits are resolved by `longest span wins; on a tie the earlier edit wins`. This prevents cascading duplicates when one `oldText` is a substring of another (the classic indent-overlap trap).\n\n\
-Bulk options:\n  - `dryRun` (bool): preview only.\n  - `failOnNoMatch` (bool): if true, files where any edit has zero matches error out; default false. Aggregates ALL no-match edits into a single error message.\n  - `engine` (string): `regex` (default, linear-time, no look-around) | `fancy` (supports `(?=...)`, `(?!...)`, `(?<=...)`, `(?<!...)`, backreferences; backtracking, may be slower).\n\n\
-Migration-safety output:\n  - Top-level `editsSummary[]` reports per-edit totals across ALL scanned files (`totalMatches`, `totalApplied`, `filesWithMatches`). Spot silent no-op edits in batches of thousands of files.\n  - Each `results[]` entry also includes `matchesPerEdit[]` and `appliedPerEdit[]` for that file.\n\n\
-EXAMPLES:\n  1. Literal replace all occurrences:\n     {\"oldText\": \"use crate::foo\", \"newText\": \"use crate::bar::foo\", \"replaceAll\": true}\n  2. Regex with capture groups (rename imports):\n     {\"oldText\": \"use crate::(cache_man|event_bus|workers)\", \"newText\": \"use crate::core::$1\", \"isRegex\": true, \"replaceAll\": true}\n  3. Rename function across codebase:\n     {\"oldText\": \"old_function_name\", \"newText\": \"new_function_name\", \"replaceAll\": true}"
+        description = "Apply the SAME ordered edits to every file matching a glob (mass search/replace), writing in place.\n\
+All edits in one call are matched against a FROZEN SNAPSHOT of each file, and overlapping spans from different edits resolve as: longest span wins, ties go to the earlier edit. Without that rule an `oldText` that is a substring of another cascades into duplicates.\n\
+The result is deliberately compact for runs over thousands of files: `results`/`errorResults` carry only the files that changed or errored, so unchanged files are `scannedFiles - modified - errors`; `modifiedFiles` lists the changed paths; `diffsTruncated` means a diff was clipped, never that an edit was.\n\
+`editsSummary[]` totals every edit across ALL scanned files (totalMatches/totalApplied/filesWithMatches) — that is how a silently no-op edit is caught in a large migration; `matchesPerEdit[]`/`appliedPerEdit[]` report the same per file."
     )]
     async fn bulk_edits(
         &self,
@@ -6097,46 +6046,11 @@ USE CASES: Patch executables, fix binary data, search-replace in non-text files.
 
     #[tool(
         name = "run_command",
-        description = "Execute a command with full process lifecycle control.\n\n\
-            CROSS-PLATFORM: Windows, macOS, Linux. Handles long-running builds, background servers, \n\
-            and quick commands. Sends progress heartbeat to prevent MCP client timeouts.\n\n\
-            **Execution modes (mode):**\n\
-            - sync (default): Wait for completion. Heartbeat every ~30s prevents timeout.\n\
-            - managed: Wait for completion. Progress includes output snippets every ~10s.\n\
-            - detached: Return immediately with PID. Use tail_file on log files for output.\n\n\
-            **Output control:**\n\
-            - streamOutput=true (default): full output goes to log files AND is returned inline.\n\
-            - Default inline = last ~200 lines / 16 KB; full output stays in the file; stdoutTotalLines = true count.\n\
-            - stdoutHead/stderrHead: Return first N lines inline.\n\
-            - stdoutTail/stderrTail: Return last N lines inline.\n\
-            - outputFilter: Grep-like filtering (include/exclude regex, context lines).\n\
-            - Head+filter+tail can combine: first 5 lines + errors from middle + last 5 lines.\n\
-            - Full output always goes to log files regardless of inline filtering.\n\
-            - captureTruncated=true -> inline output is incomplete (a child kept the pipe open); read the log file.\n\n\
-            **Output filter example:**\n\
-            {outputFilter: {include: [\"error\", \"warning\"], exclude: [\"note:\"], context: 3, maxLines: 50}}\n\n\
-            **Key features:**\n\
-            - shell: false(default)=no shell (command auto-split into program+args); true=platform shell (cmd /C Win, sh -c Unix); 'bash'=bash -c ('bash' on Windows resolves to git-bash; the System32 WSL launcher is refused, not used); 'pwsh'=PowerShell; 'cmd'/'sh'=force one.\n\
-            - Unix-style pipelines on Windows: cmd does NOT support ';' and lacks tail/grep/sed — use shell:'bash' for those command lines.\n\
-            - Multi-line cmd (newline-separated, shell:'cmd' or true/default on Windows) runs ALL lines via a temp .bat = BATCH semantics: %%i (not %i) in for, exit code = LAST line, a failing middle line does NOT stop the rest (use && for fail-fast).\n\
-            - WINDOWS PATHS in `command`: JSON eats single backslashes (`\\r`/`\\t` become control chars). Double them (`\"C:\\\\dir\\\\file\"`) or use forward slashes; in shell mode the decoded line reaches cmd.exe verbatim.\n\
-            - env/envPrepend/envAppend: Set, prepend, or append env vars.\n\
-            - stdin: ContentRef for command stdin (inline/base64/path/blob).\n\
-            - $VAR GOTCHA: if `command`/`args` still contain `$NAME` tokens, the call is REJECTED (the MCP host may otherwise DELETE them before spawn). Pass scripts via stdin ContentRef or a file. If the host already stripped the tokens, we cannot see them — use a file.\n\
-            - cwd: optional working directory. Pass an absolute path with forward slashes as a plain JSON string value (e.g. `\"cwd\": \"C:/projects/repo\"`). Do NOT embed extra quote characters inside the path value itself.\n\
-            - timeoutMs: Kill command (and all children) after N ms.\n\
-            - Process tree kill: On timeout/cancel, kills all child processes too.\n\
-            - MCP cancellation: If client cancels, process tree is killed immediately.\n\n\
-            **Examples:**\n\
-            - Quick: {command: 'git', args: ['status']}\n\
-            - Long build: {command: 'cargo', args: ['build', '--release'], timeoutMs: 1200000}\n\
-            - With filter: {command: 'cargo', args: ['build'], outputFilter: {include: ['error\\[', 'warning\\['], context: 2}}\n\
-            - Shell pipes (unix dialect, any OS): {command: 'cat file.txt | grep error | head -20', shell: 'bash'}\n\
-            - Background server: {command: 'npm', args: ['start'], mode: 'detached'}\n\
-            - Managed build: {command: 'cargo', args: ['build'], mode: 'managed', timeoutMs: 600000}\n\
-            - Stdin pipe: {command: 'python', args: ['script.py'], stdin: {kind:'inline', text:'input data'}}\n\n\
-            **Output tips:** Prefer machine-readable formats: cargo build --message-format=json, \n\
-            cargo test -- --format=terse, npm --json, pylint --output-format=json."
+        description = "Execute a command with full process lifecycle control (Windows/macOS/Linux).\n\
+            Output: the full output always goes to the log files. The inline copy is the last ~200 lines / 16 KB unless stdoutHead/stdoutTail/outputFilter narrow it (they combine: head + matches + tail); stdoutTotalLines is the true length. captureTruncated=true means a surviving child still held the pipe — read the log file.\n\
+            A timeout, an MCP cancellation or kill_process kills the whole process tree, not just the direct child.\n\
+            Windows: cmd.exe understands neither ';' nor tail/grep/sed — pass shell:'bash' for a unix pipeline. A multi-line command under cmd runs as a temp .bat, i.e. BATCH semantics: %%i (not %i) in for, the exit code is the LAST line's, and only failFast stops a failing middle line.\n\
+            A leftover $NAME token in command/args is REJECTED: the MCP host may delete such tokens before the call arrives, which would silently run a different command. Pass the script via stdin or a file."
     )]
     async fn run_command(
         &self,
@@ -6737,34 +6651,9 @@ USE CASES: Patch executables, fix binary data, search-replace in non-text files.
 
     #[tool(
         name = "seq_think",
-        description = "Sequential thinking for structured problem-solving. USE WITH SCOPED MEMORY TOOLS.\n\n\
-            Helps analyze problems through a flexible thinking process that can adapt and evolve.\n\
-            Each thought can build on, question, or revise previous insights.\n\n\
-            RECOMMENDED WORKFLOW:\n\
-            1. Use seq_think to break down task into numbered steps\n\
-            2. Recall context with mem_get_summary (default workspace level), then focused mem_search if needed\n\
-            3. Load exact records with mem_get by item UUID\n\
-            4. Save or revise the plan with mem_put or mem_update using explicit scope + actor context\n\
-            5. Connect related records with mem_link when useful\n\n\
-            When to use:\n\
-            - Breaking down complex problems into steps\n\
-            - Planning and design with room for revision\n\
-            - Analysis that might need course correction\n\
-            - Multi-step solutions requiring context\n\n\
-            EXAMPLE:\n\
-            seq_think({thought: 'Step 1: Read config files', thoughtNumber: 1, totalThoughts: 5, nextThoughtNeeded: true})\n\
-            seq_think({thought: 'Step 2: Parse schema', thoughtNumber: 2, ...})\n\
-            Then save with mem_put: workspaceId, actorId, item{ itemType: task, content: ... }.\n\n\
-            Parameters:\n\
-            - thought: Current thinking step content\n\
-            - nextThoughtNeeded: Whether another step is needed\n\
-            - thoughtNumber: Current number (1-based)\n\
-            - totalThoughts: Estimated total (adjustable)\n\
-            - isRevision: If revising previous thinking\n\
-            - revisesThought: Which thought being reconsidered\n\
-            - branchFromThought: Branching point number\n\
-            - branchId: Branch identifier\n\
-            - needsMoreThoughts: If more needed beyond estimate"
+        description = "Record one step of a structured, revisable train of thought; the server keeps the sequence and returns the running state.\n\
+            `totalThoughts` is an estimate, not a limit — raise it, or set `needsMoreThoughts`, rather than stopping there. A step may revise an earlier one (isRevision + revisesThought) or open an alternative line (branchFromThought + branchId), so the sequence is a tree rather than a list.\n\
+            Pairs with the mem_* tools: reason here, persist the outcome with mem_put."
     )]
     async fn seq_think(
         &self,
@@ -6786,12 +6675,7 @@ USE CASES: Patch executables, fix binary data, search-replace in non-text files.
 
     #[tool(
         name = "mem_put",
-        description = "Create a scoped memory item.\n\n\
-            Required: workspaceId, actorId, item (object).\n\
-            item.itemType: fact | episode | task | decision | artifact | summary.\n\
-            item.content: plain string (facts) or JSON object/array.\n\
-            Optional: tenantId, appId (default \"default\"), topicId, sessionId, runId, actorType (default agent).\n\n\
-            Example: {\"workspaceId\":\"vfx-rs\",\"actorId\":\"cursor\",\"item\":{\"itemType\":\"task\",\"content\":{\"status\":\"open\"}}}"
+        description = "Create a scoped memory item. Scope is workspaceId + actorId; tenantId/appId default to \"default\" and actorType to agent. `item.content` takes a plain string for a fact, or a JSON object/array for anything structured."
     )]
     async fn mem_put(
         &self,
@@ -6997,45 +6881,54 @@ USE CASES: Patch executables, fix binary data, search-replace in non-text files.
 
     #[tool(
         name = "ai_messages_gemini",
-        description = "Claude Messages API-compatible conversation tool backed by Gemini."
+        description = "ai_messages pinned to Gemini; same request body."
     )]
     async fn ai_messages_gemini(
         &self,
-        Parameters(request): Parameters<tools::llm::model::MessagesRequest>,
+        Parameters(request): Parameters<tools::llm::model::PinnedRequest>,
         meta: RequestMetaObject,
         client: Peer<RoleServer>,
     ) -> Result<CallToolResult, McpError> {
         let llm = self.require_llm()?;
+        let request = request
+            .parse("ai_messages")
+            .map_err(|e| McpError::invalid_params(e, None))?;
         llm.messages_for_provider("gemini", request, meta, client)
             .await
     }
 
     #[tool(
         name = "ai_messages_openai",
-        description = "Claude Messages API-compatible conversation tool backed by OpenAI."
+        description = "ai_messages pinned to OpenAI; same request body."
     )]
     async fn ai_messages_openai(
         &self,
-        Parameters(request): Parameters<tools::llm::model::MessagesRequest>,
+        Parameters(request): Parameters<tools::llm::model::PinnedRequest>,
         meta: RequestMetaObject,
         client: Peer<RoleServer>,
     ) -> Result<CallToolResult, McpError> {
         let llm = self.require_llm()?;
+        let request = request
+            .parse("ai_messages")
+            .map_err(|e| McpError::invalid_params(e, None))?;
         llm.messages_for_provider("openai", request, meta, client)
             .await
     }
 
     #[tool(
         name = "ai_messages_cerebras",
-        description = "Claude Messages API-compatible conversation tool backed by Cerebras."
+        description = "ai_messages pinned to Cerebras; same request body."
     )]
     async fn ai_messages_cerebras(
         &self,
-        Parameters(request): Parameters<tools::llm::model::MessagesRequest>,
+        Parameters(request): Parameters<tools::llm::model::PinnedRequest>,
         meta: RequestMetaObject,
         client: Peer<RoleServer>,
     ) -> Result<CallToolResult, McpError> {
         let llm = self.require_llm()?;
+        let request = request
+            .parse("ai_messages")
+            .map_err(|e| McpError::invalid_params(e, None))?;
         llm.messages_for_provider("cerebras", request, meta, client)
             .await
     }
@@ -7056,37 +6949,46 @@ USE CASES: Patch executables, fix binary data, search-replace in non-text files.
 
     #[tool(
         name = "ai_count_tokens_gemini",
-        description = "Token counting backed by Gemini."
+        description = "ai_count_tokens pinned to Gemini; same request body."
     )]
     async fn ai_count_tokens_gemini(
         &self,
-        Parameters(request): Parameters<tools::llm::model::TokenCountRequest>,
+        Parameters(request): Parameters<tools::llm::model::PinnedRequest>,
     ) -> Result<CallToolResult, McpError> {
         let llm = self.require_llm()?;
+        let request = request
+            .parse("ai_count_tokens")
+            .map_err(|e| McpError::invalid_params(e, None))?;
         llm.count_tokens_for_provider("gemini", request).await
     }
 
     #[tool(
         name = "ai_count_tokens_openai",
-        description = "Token counting backed by OpenAI."
+        description = "ai_count_tokens pinned to OpenAI; same request body."
     )]
     async fn ai_count_tokens_openai(
         &self,
-        Parameters(request): Parameters<tools::llm::model::TokenCountRequest>,
+        Parameters(request): Parameters<tools::llm::model::PinnedRequest>,
     ) -> Result<CallToolResult, McpError> {
         let llm = self.require_llm()?;
+        let request = request
+            .parse("ai_count_tokens")
+            .map_err(|e| McpError::invalid_params(e, None))?;
         llm.count_tokens_for_provider("openai", request).await
     }
 
     #[tool(
         name = "ai_count_tokens_cerebras",
-        description = "Token counting backed by Cerebras."
+        description = "ai_count_tokens pinned to Cerebras; same request body."
     )]
     async fn ai_count_tokens_cerebras(
         &self,
-        Parameters(request): Parameters<tools::llm::model::TokenCountRequest>,
+        Parameters(request): Parameters<tools::llm::model::PinnedRequest>,
     ) -> Result<CallToolResult, McpError> {
         let llm = self.require_llm()?;
+        let request = request
+            .parse("ai_count_tokens")
+            .map_err(|e| McpError::invalid_params(e, None))?;
         llm.count_tokens_for_provider("cerebras", request).await
     }
 

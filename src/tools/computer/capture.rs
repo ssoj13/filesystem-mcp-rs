@@ -25,42 +25,31 @@ pub struct MonInfo {
     pub scale: f32,
 }
 
-/// Capture target (PLAN2.md §3 `capture`). `Cursor` is a square of `size` px
-/// centered on the cursor — the "look where I am" probe. Untagged serde type:
-/// the MCP layer, macro steps and wait all reuse it directly (dedup).
-///
-/// Wire shapes accepted (hosts wrap values inconsistently — BUG.md quirks —
-/// and untagged enums fail closed, so every loose form is explicit):
+/// Capture target: `{monitor:N}` | `{win:ID}` | `{x,y,w,h}` | `{rect:{x,y,w,h}}`
+/// | `{cursor:N}` or `{cursor:{size:N}}` (a square of N px centred on the
+/// pointer). Coordinates are virtual-screen physical pixels; negative origins
+/// are valid across monitors.
+// Untagged serde type (PLAN2.md §3 `capture`), reused directly by the MCP layer,
+// macro steps and wait. Every loose wire form is its own variant because hosts
+// wrap values inconsistently (BUG.md quirks) and an untagged enum fails closed.
+// The doc comment above is caller-facing: it ships in every schema that takes a
+// CapTarget, so rationale stays in `//` comments like these.
 #[derive(Debug, Clone, serde::Deserialize, schemars::JsonSchema)]
 #[serde(untagged)]
 pub enum CapTarget {
-    Monitor {
-        monitor: u32,
-    },
-    Win {
-        win: u32,
-    },
-    Rect {
-        x: i32,
-        y: i32,
-        w: u32,
-        h: u32,
-    },
-    /// {"size": N} — cursor square by side.
-    Cursor {
-        size: u32,
-    },
-    /// Nested rect: {"rect": {x, y, w, h}}.
-    RectNested {
-        rect: RectArgs,
-    },
-    /// {"cursor": ...} — value is an object {size:N} or a bare number.
-    CursorKey {
-        cursor: CursorSize,
-    },
+    Monitor { monitor: u32 },
+    Win { win: u32 },
+    Rect { x: i32, y: i32, w: u32, h: u32 },
+    // {"size": N} — cursor square by side.
+    Cursor { size: u32 },
+    // Nested rect: {"rect": {x, y, w, h}}.
+    RectNested { rect: RectArgs },
+    // {"cursor": ...} — value is an object {size:N} or a bare number.
+    CursorKey { cursor: CursorSize },
 }
 
-/// Value of the `cursor` key: object or bare number.
+// Value of the `cursor` key: object or bare number. Documented by CapTarget's
+// own description, so no `///` here — it would ship twice in every schema.
 #[derive(Debug, Clone, serde::Deserialize, schemars::JsonSchema)]
 #[serde(untagged)]
 pub enum CursorSize {
@@ -68,7 +57,7 @@ pub enum CursorSize {
     Bare(u32),
 }
 
-/// Nested rect for the `rect` key.
+// Nested rect for the `rect` key (see CapTarget's description).
 #[derive(Debug, Clone, serde::Deserialize, schemars::JsonSchema)]
 pub struct RectArgs {
     pub x: i32,

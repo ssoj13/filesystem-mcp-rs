@@ -21,9 +21,7 @@ use crate::FileSystemServer;
 impl FileSystemServer {
     #[tool(
         name = "ocr",
-        description = "OCR a screen region, 100% local (no LLM tokens).\n\
-            engine: \"media\" (default; Windows.Media.Ocr, Cyrillic OK) | \"ocrs\" (better Latin, models auto-download ~12 MB on first use).\n\
-            target = capture target; find (case-insensitive) switches on bbox matches — click-by-text ladder."
+        description = "OCR a screen region, entirely local (no LLM tokens). With `find`, the result becomes bbox matches — the click-by-text ladder."
     )]
     async fn ctl_ocr(
         &self,
@@ -60,7 +58,8 @@ pub struct OcrArgs {
     pub target: Option<CapTarget>,
     /// Case-insensitive substring to match lines (returns bbox matches).
     pub find: Option<String>,
-    /// \"media\" (default, Cyrillic-capable) | \"ocrs\" (better Latin).
+    /// \"media\" (default, Windows.Media.Ocr, Cyrillic-capable) | \"ocrs\"
+    /// (better Latin; downloads ~12 MB of models on first use).
     pub engine: Option<String>,
 }
 

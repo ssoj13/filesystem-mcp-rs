@@ -240,33 +240,47 @@ async fn list_tool_descriptions(srv: &ServerHandle) -> serde_json::Map<String, s
         .collect()
 }
 
-/// Regression: cwd example must show plain quotes, not backslash-escaped quotes.
-/// Before the fix the description contained `\"C:/projects/repo\"` which confused
-/// LLMs into generating `"cwd": C:/path` (unquoted, invalid JSON).
+/// Regression: the cwd example must show plain quotes, not backslash-escaped
+/// ones. The old form `\"C:/projects/repo\"` confused LLMs into generating
+/// `"cwd": C:/path` (unquoted, invalid JSON).
+///
+/// The example now lives in the `cwd` property's own description rather than in
+/// the tool description — a parameter's facts belong in the schema, said once
+/// (`docs/TOOL_STYLE.md`) — so the guard reads it from there.
 #[tokio::test]
 async fn run_command_cwd_description_uses_plain_quotes() -> Result<()> {
     let tmp = TempDir::new()?;
     let srv = start_server(tmp.path()).await?;
-    let tools = list_tool_descriptions(&srv).await;
-    let desc = tools["run_command"].as_str().unwrap_or("");
+    let schema = tool_input_schema(&srv, "run_command").await;
+    let desc = schema["properties"]["cwd"]["description"]
+        .as_str()
+        .unwrap_or("");
 
     // Must have a clean example — plain quotes, no leading backslash
     assert!(
         desc.contains("\"C:/projects/repo\""),
-        "run_command cwd example must use plain quotes; got desc snippet: {:?}",
-        desc[desc.find("cwd").unwrap_or(0)..]
-            .chars()
-            .take(120)
-            .collect::<String>()
+        "cwd example must use plain quotes; got: {desc:?}"
     );
     // Must NOT have backslash before the C: path (the old broken form)
     assert!(
         !desc.contains("\\\"C:/"),
-        "run_command cwd example must not contain backslash-quote before Windows path"
+        "cwd example must not contain backslash-quote before the Windows path"
     );
 
     srv.kill().await;
     Ok(())
+}
+
+/// Helper: one tool's `inputSchema` from a real `tools/list`.
+async fn tool_input_schema(srv: &ServerHandle, name: &str) -> serde_json::Value {
+    let resp = srv.request("tools/list", json!({})).await.unwrap();
+    resp["result"]["tools"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|t| t["name"] == name)
+        .unwrap_or_else(|| panic!("{name} missing from tools/list"))["inputSchema"]
+        .clone()
 }
 
 /// Regression: grep_files description must clearly separate `pattern` (content regex)
@@ -292,10 +306,13 @@ async fn grep_files_description_separates_pattern_from_file_pattern() -> Result<
         desc.contains("quoted") || desc.contains("JSON string"),
         "grep_files desc must warn that pattern is a quoted string"
     );
-    // Must contain a concrete usage example
+    // The worked examples that used to live here were removed: they only
+    // re-spelled the schema, and the tool list is a prompt every session pays
+    // for (`docs/TOOL_STYLE.md`). What the guard protects is the fact a caller
+    // cannot infer — which field takes the regex and which takes the glob.
     assert!(
-        desc.contains("catch_unwind") || (desc.contains("pattern") && desc.contains("\":")),
-        "grep_files desc must contain a usage example"
+        desc.contains("contents") && desc.contains("names"),
+        "grep_files desc must say which field matches contents and which matches file names"
     );
 
     srv.kill().await;

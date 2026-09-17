@@ -2,6 +2,25 @@
 
 ## [Unreleased]
 
+### A lighter `tools/list`
+
+- **The tool list is a prompt, not documentation**: every character of it is loaded before a session's
+  first request. A real handshake measured 132 tools at 148,435 chars; the fifteen heaviest were 40%
+  of that, while the median tool was already lean. The heavy ones are now trimmed to
+  **124,133 chars (-16.4%)** without losing a fact a caller cannot infer — units, precedence,
+  platform traps and "0 = unlimited" conventions all stayed. What went was prose restating the type
+  system, worked examples re-spelling the schema, and facts said twice (once in the description and
+  once in the property that owns them). `docs/TOOL_STYLE.md` is the resulting contract.
+- **`ai_messages_gemini` / `_openai` / `_cerebras` and the three `ai_count_tokens_*` variants each
+  shipped a byte-identical copy of their sibling's schema** — 13.5k chars of pure duplication. They
+  already share the Rust type, and MCP cannot share a schema between tools, so the pinned variants
+  now take an open object (`PinnedRequest`) validated against the real request type on arrival: the
+  shape is published once, by the unpinned tool, and a bad body is refused with a message naming it.
+- **`CapTarget`'s schema description was internal rustdoc** (a `PLAN2.md` reference, a note about
+  untagged serde dedup, a `BUG.md` aside) shipped into every tool that takes a capture target. It now
+  describes the wire shapes a caller needs; the rationale lives in `//` comments, which schemars does
+  not read. `wait`'s description also listed three `kind` values where the code accepts four.
+
 ### `shell: "bash"` on Windows means git-bash, not WSL
 
 - **`shell: "bash"` used to spawn a bare `bash` from `PATH`**, while the docs promised git-bash. On a

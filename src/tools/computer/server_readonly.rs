@@ -78,10 +78,8 @@ impl FileSystemServer {
 
     #[tool(
         name = "find_image",
-        description = "Find a template image inside a screen capture (UIA -> OCR -> template -> pixels ladder).\n\
-            template: PNG path (capture a small unique element first), target: where to search.\n\
-            threshold: 0.5..=1.0 (default 0.85). Returns {found, matches:[{x,y,w,h,score}]} —\n\
-            screen-space coords ready for mouse_click. Fixed-scale (same-DPI) matching."
+        description = "Find a template PNG inside a screen capture. Returns {found, matches:[{x,y,w,h,score}]} in screen coordinates, ready for mouse_click.\n\
+            Matching is fixed-scale: the template must come from a capture at the same DPI. Use a small, unique element as the template."
     )]
     async fn find_image(
         &self,
@@ -129,14 +127,9 @@ impl FileSystemServer {
 
     #[tool(
         name = "annotate",
-        description = "Draw boxes/markers/labels onto a screenshot and save a new PNG.\n\
-            Verification tool: ui/find_image/ocr return rects, this shows WHERE they landed\n\
-            before you click. Source: src (existing PNG) OR target (capture first, default\n\
-            primary monitor) — not both.\n\
-            shapes: [{x,y,w?,h?,label?,color?}] — rect when w+h given, else a crosshair.\n\
-            origin: image top-left in the shapes' coordinate space; defaults to the capture\n\
-            rect origin (so screen coords work as-is) or {0,0} for a supplied src.\n\
-            Returns {path, w, h, drawn, outside:[idx]} — shapes off the image are reported."
+        description = "Draw boxes, crosshairs and labels onto a screenshot and save a new PNG — how to see WHERE the rects from ui/find_image/ocr actually landed, before clicking.\n\
+            Give `src` or `target`, never both. `origin` defaults to the capture rect's origin, so screen coordinates work unchanged (and to {0,0} for a supplied `src`).\n\
+            Returns {path, w, h, drawn, outside:[idx]}: a shape that falls off the image is reported, not clamped."
     )]
     async fn ctl_annotate(
         &self,

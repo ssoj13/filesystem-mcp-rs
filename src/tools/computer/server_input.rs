@@ -349,8 +349,8 @@ impl FileSystemServer {
     #[tool(
         name = "wait",
         description = "Poll for a condition instead of sleep-polling in the agent loop.\n\
-            kind: screen_change (target: capture target; since: previous dhash) | window (query) | clipboard.\n\
-            Returns {ok, hash?|wins?}; ok=false on timeout (not an error)."
+            kind: screen_change | window | clipboard | color — each reads its own field below.\n\
+            A timeout returns ok=false; it is not an error."
     )]
     async fn ctl_wait(
         &self,
