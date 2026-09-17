@@ -27,6 +27,7 @@ pub struct EnvVar {
 /// which keeps the gating at the group boundary instead of on every element.
 pub fn vars() -> Vec<EnvVar> {
     let mut v = paths_vars();
+    v.extend(log_vars());
     v.extend(net_vars());
     v.extend(memory_vars());
     v.extend(ctl_vars());
@@ -45,14 +46,35 @@ fn paths_vars() -> Vec<EnvVar> {
             help: "State directory for every file this server owns; must be absolute. Blank = ~/.filesystem-mcp-rs.",
         },
         EnvVar {
-            key: "FS_MCP_LOG",
-            default: "info",
-            help: "Log level: trace | debug | info | warn | error, or `off` to log nothing at all.",
-        },
-        EnvVar {
             key: "FS_MCP_TMP_KEEP_HOURS",
             default: "24",
             help: "Delete scratch under <state>/tmp older than this many hours. 0 = never sweep.",
+        },
+    ]
+}
+
+/// What this server writes about itself, and how long those logs stay.
+///
+/// Immediately after [`paths_vars`] because all three are resolved beneath the state root it
+/// describes: one file per process under `<state>/logs/<YYYY-MM-DD>/`. Each default is owned by
+/// a constant in [`crate::core::logging`], which
+/// `logging_keys_are_registered_and_agree_with_the_code` asserts these strings match.
+fn log_vars() -> Vec<EnvVar> {
+    vec![
+        EnvVar {
+            key: "FS_MCP_LOG",
+            default: crate::core::logging::LEVEL_DEFAULT,
+            help: "Level for this server's log under <state>/logs: trace|debug|info|warn|error, or `off`. Bare words are levels; a target filter needs `=` or `,` (info,hyper=warn).",
+        },
+        EnvVar {
+            key: "FS_MCP_LOG_KEEP_DAYS",
+            default: "14",
+            help: "Delete dated log directories under <state>/logs older than this many days. 0 = never sweep.",
+        },
+        EnvVar {
+            key: "FS_MCP_LOG_MAX_MB",
+            default: "512",
+            help: "Total size budget (MiB) for <state>/logs; oldest files are deleted first once it is exceeded. 0 = no budget.",
         },
     ]
 }
@@ -274,6 +296,48 @@ mod tests {
             crate::core::paths::TMP_KEEP_HOURS_DEFAULT.to_string(),
             "advertised default disagrees with core::paths::tmp_keep_hours"
         );
+    }
+
+    /// Each logging key is registered once, its help names the state root where a path is
+    /// implied, documents the only opt-out and the `0 = never sweep` convention, and every
+    /// advertised default is the one the code actually applies.
+    ///
+    /// The same drift guard as the tmp key above, for the three knobs wave 2 adds: a table that
+    /// promises `warn` while the code logs at `info` sends an operator hunting for a record that
+    /// is there all along.
+    #[test]
+    fn logging_keys_are_registered_and_agree_with_the_code() {
+        let all = vars();
+        for key in ["FS_MCP_LOG", "FS_MCP_LOG_KEEP_DAYS", "FS_MCP_LOG_MAX_MB"] {
+            assert_eq!(all.iter().filter(|v| v.key == key).count(), 1, "{key}");
+        }
+
+        let level = all.iter().find(|v| v.key == "FS_MCP_LOG").expect("level key");
+        assert_eq!(level.default, crate::core::logging::LEVEL_DEFAULT);
+        assert!(
+            level.help.contains("off"),
+            "the only way to opt out must be documented: {}",
+            level.help
+        );
+        // The trap an operator finds the hard way: a bare word is read as a LEVEL, so a
+        // RUST_LOG-style target needs `=` or `,` to be taken as one.
+        assert!(level.help.contains('='), "{}", level.help);
+
+        for (key, default) in [
+            (
+                "FS_MCP_LOG_KEEP_DAYS",
+                crate::core::logging::KEEP_DAYS_DEFAULT,
+            ),
+            ("FS_MCP_LOG_MAX_MB", crate::core::logging::MAX_MB_DEFAULT),
+        ] {
+            let v = all.iter().find(|v| v.key == key).expect(key);
+            assert_eq!(v.default, default.to_string(), "{key}");
+            assert!(
+                v.help.contains('0'),
+                "a retention knob must document that 0 disables it: {}",
+                v.help
+            );
+        }
     }
 
     #[test]

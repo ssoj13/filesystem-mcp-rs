@@ -92,7 +92,7 @@ fn sinks(plan: &Plan) -> (Option<&Path>, bool) {
 /// directory, a subscriber someone else already installed — is reported through the returned
 /// [`Plan`] and [`degraded_reason`] instead. Called once, from `main`.
 pub fn init_logging(mode: TransportMode, log_file: Option<String>) -> Plan {
-    let level = env_spec::get("FS_MCP_LOG");
+    let level = level();
     let plan = install(target_for(mode, log_file, level.as_deref()), level.as_deref());
     // After the subscriber exists, so these reach the file in every mode that has one.
     if let Some(complaint) = level.as_deref().and_then(level_complaint) {
@@ -218,6 +218,89 @@ fn note_degraded(reason: String) {
 
 static DEGRADED: OnceLock<String> = OnceLock::new();
 
+/// The level applied when neither `FS_MCP_LOG` nor `RUST_LOG` says otherwise.
+///
+/// `info`, not `warn`: every event this module exists to make visible — "Migrated X -> Y",
+/// "memory tools disabled", "removed N stale scratch files" — is logged at `info`, so a
+/// warn-only default would hide exactly the record an operator goes looking for when something
+/// seems wrong. [`crate::env_spec`] advertises this string as the key's default and
+/// `logging_keys_are_registered_and_agree_with_the_code` asserts the two agree.
+pub const LEVEL_DEFAULT: &str = "info";
+
+/// How many days of dated log directories the housekeeping sweep keeps.
+///
+/// Two weeks is long enough to cover "it started misbehaving some time last week" and short
+/// enough that the directory stays browsable. **Zero switches the sweep off**, following
+/// [`crate::core::paths::TMP_KEEP_HOURS_DEFAULT`]'s convention: a retention knob whose zero
+/// destroys data is a foot-gun, and with dozens of processes it would fire on every start.
+pub const KEEP_DAYS_DEFAULT: u64 = 14;
+
+/// The longest log retention accepted, ten years.
+///
+/// Clamped for the same reason as [`crate::core::paths::TMP_KEEP_HOURS_MAX`]: the sweep turns
+/// this into a `Duration`, and an absurd value from the environment must not overflow that —
+/// in debug an overflow panics, and a panic in housekeeping would keep the transport from ever
+/// starting. [`MAX_MB_DEFAULT`] needs no such bound: it is only ever compared against a sum of
+/// file sizes, where an absurd budget simply means "never sweep".
+pub const KEEP_DAYS_MAX: u64 = 365 * 10;
+
+/// Total size budget for `<state>/logs`, in MiB, beyond which the sweep deletes oldest first.
+///
+/// A second bound because age alone does not cap a directory: one chatty process at `trace` can
+/// fill a disk well inside [`KEEP_DAYS_DEFAULT`]. **Zero switches the budget off**, as above.
+pub const MAX_MB_DEFAULT: u64 = 512;
+
+/// The configured `FS_MCP_LOG` value, or `None` when it is unset or blank.
+///
+/// The one reader of the key, so no second caller can disagree about what blank means. It
+/// returns an `Option` rather than falling back to [`LEVEL_DEFAULT`] because unset is not the
+/// same as `info` here: [`filter`] consults `RUST_LOG` in between, and a reader that defaulted
+/// eagerly would quietly take that step away.
+pub fn level() -> Option<String> {
+    env_spec::get("FS_MCP_LOG")
+}
+
+/// How many days of dated log directories to keep; `0` means never sweep by age.
+///
+/// Lives beside the module that owns the logs, the way [`crate::core::paths::tmp_keep_hours`]
+/// lives beside the directory it governs, and is read by the housekeeping sweep.
+///
+/// The sweep that consumes it is wave 2's next task; until it lands, the key is registered and
+/// documented but nothing in the binary calls this, hence the marker. Remove it with the sweep.
+#[allow(dead_code)]
+pub fn keep_days() -> u64 {
+    let days = whole_number("FS_MCP_LOG_KEEP_DAYS", KEEP_DAYS_DEFAULT);
+    if days > KEEP_DAYS_MAX {
+        tracing::warn!(
+            "FS_MCP_LOG_KEEP_DAYS={days} exceeds the {KEEP_DAYS_MAX}-day maximum; using that instead"
+        );
+        return KEEP_DAYS_MAX;
+    }
+    days
+}
+
+/// The total MiB budget for `<state>/logs`; `0` means no budget. See [`MAX_MB_DEFAULT`].
+///
+/// Unused until the sweep lands, like [`keep_days`].
+#[allow(dead_code)]
+pub fn max_mb() -> u64 {
+    whole_number("FS_MCP_LOG_MAX_MB", MAX_MB_DEFAULT)
+}
+
+/// Read a numeric `FS_MCP_*` key, complaining about a malformed value and carrying on.
+///
+/// Refusing to start over a mistyped retention interval would be a worse outcome than applying
+/// the standard one — and the complaint reaches the log file, which by this point exists.
+fn whole_number(key: &str, default: u64) -> u64 {
+    match env_spec::get(key) {
+        None => default,
+        Some(raw) => raw.parse().unwrap_or_else(|_| {
+            tracing::warn!("{key} is not a whole number ({raw}); using {default}");
+            default
+        }),
+    }
+}
+
 /// What is wrong with an `FS_MCP_LOG` value, if anything, phrased for the operator who set it.
 ///
 /// Two ways to get nothing when you wanted `debug`, and neither announces itself:
@@ -249,7 +332,7 @@ fn level_complaint(raw: &str) -> Option<String> {
     None
 }
 
-/// The level filter: `FS_MCP_LOG` first, then `RUST_LOG`, then `info`.
+/// The level filter: `FS_MCP_LOG` first, then `RUST_LOG`, then [`LEVEL_DEFAULT`].
 ///
 /// A value [`level_complaint`] objects to is *not* used — it falls through to the next source,
 /// rather than stopping the server. That is not only politeness: honouring `FS_MCP_LOG=bogus`
@@ -263,7 +346,7 @@ fn filter(level: Option<&str>) -> EnvFilter {
     {
         return f;
     }
-    EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"))
+    EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new(LEVEL_DEFAULT))
 }
 
 /// Open a log file for appending, creating its parent directory if the caller named one that
@@ -485,6 +568,42 @@ mod tests {
         );
         // A good value is still honoured.
         assert!(filter(Some("warn")).to_string().contains("warn"));
+    }
+
+    /// A retention knob reads as a whole number, keeps `0` — which means "never sweep", not
+    /// "delete everything now" — and survives a typo by applying the default instead of
+    /// refusing to start.
+    ///
+    /// Exercised through a probe key rather than the real ones so it cannot collide with a
+    /// value the developer running the suite happens to have exported.
+    #[test]
+    fn a_retention_knob_parses_or_falls_back() {
+        let key = "FS_MCP_LOGGING_NUMBER_PROBE";
+        assert_eq!(whole_number(key, 7), 7, "unset means the default");
+        // SAFETY: single-threaded test over a variable private to it.
+        for (raw, want) in [("3", 3), ("0", 0), ("  5  ", 5), ("", 7), ("soon", 7), ("-1", 7)] {
+            unsafe { std::env::set_var(key, raw) };
+            assert_eq!(whole_number(key, 7), want, "{raw:?}");
+        }
+        unsafe { std::env::remove_var(key) };
+    }
+
+    /// An absurd age is clamped rather than handed to a `Duration` conversion that would
+    /// overflow, and `0` switches the sweep off rather than arming it on every start.
+    #[test]
+    fn keep_days_is_bounded_and_max_mb_defaults() {
+        let key = "FS_MCP_LOG_KEEP_DAYS";
+        // SAFETY: single-threaded test; no other test reads these keys.
+        unsafe { std::env::remove_var(key) };
+        assert_eq!(keep_days(), KEEP_DAYS_DEFAULT);
+        unsafe { std::env::set_var(key, (KEEP_DAYS_MAX + 1).to_string()) };
+        assert_eq!(keep_days(), KEEP_DAYS_MAX);
+        unsafe { std::env::set_var(key, "0") };
+        assert_eq!(keep_days(), 0, "0 must switch the sweep off, not empty the directory");
+        unsafe { std::env::remove_var(key) };
+
+        unsafe { std::env::remove_var("FS_MCP_LOG_MAX_MB") };
+        assert_eq!(max_mb(), MAX_MB_DEFAULT);
     }
 
     /// The dated directory is the one the rest of the design keys on, so its shape is pinned:

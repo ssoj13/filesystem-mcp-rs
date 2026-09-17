@@ -149,9 +149,14 @@ No renames, no interleaved partial lines, no per-process rotation timers fightin
 **stderr** — any stderr output during handshake breaks MCP clients (`logging.rs:27-28`) — and it
 stays. A file sink is safe, and without it every `warn!` in the default deployment is lost
 (`logging.rs:32`). `--log` keeps overriding the path; `FS_MCP_LOG` sets the level, `off` disables.
+The level defaults to **`info`**, not the `warn` this section first drafted: "Migrated X -> Y",
+"memory tools disabled" and "removed N stale scratch files" are all `info!`, so a warn-only
+default would hide exactly the record this wave exists to put in front of an operator.
 
 **Retention.** The housekeeping sweep deletes log directories older than `FS_MCP_LOG_KEEP_DAYS`
-(default 14) and, within the current day, files over `FS_MCP_LOG_MAX_MB` total, oldest first. The
+(default 14) and, within the current day, files over `FS_MCP_LOG_MAX_MB` total, oldest first.
+Either knob set to `0` switches that half of the sweep **off**, following `FS_MCP_TMP_KEEP_HOURS`:
+a retention knob whose zero destroys data would fire on every one of dozens of starts. The
 lease is a **marker file per kind**, `<state>/.housekeeping-<kind>`, holding the Unix timestamp of
 the last completed run: one process per interval does the work, the rest skip.
 
@@ -290,7 +295,7 @@ Reads use a separate `SQLITE_OPEN_READ_ONLY` connection so a query can never tak
 New `stats_vars()` in `src/env_spec.rs`, extended into `vars()` — the only registration point:
 `FS_MCP_STATS` (`on`), `FS_MCP_STATS_DB` (blank = `~/.filesystem-mcp-rs/stats.db`),
 `FS_MCP_STATS_FLUSH_SEC` (`5`), `FS_MCP_STATS_DETAIL_DAYS` (`14`), `FS_MCP_STATS_LABEL` (blank).
-Waves 1-2 add `FS_MCP_TMP_KEEP_HOURS` (`24`), `FS_MCP_LOG` (`warn`), `FS_MCP_LOG_KEEP_DAYS`
+Waves 1-2 add `FS_MCP_TMP_KEEP_HOURS` (`24`), `FS_MCP_LOG` (`info`, see §5), `FS_MCP_LOG_KEEP_DAYS`
 (`14`), `FS_MCP_LOG_MAX_MB` (`512`). Feature `stats-tools`, added to `default`; the only new
 dependency surface is `rusqlite`, already unconditional, so no cross-platform build risk.
 
