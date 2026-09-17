@@ -36,9 +36,16 @@ fn sha256_hex(bytes: &[u8]) -> String {
 }
 
 /// Spawn the filesystem MCP server binary with given args.
+///
+/// The child gets its own `FS_MCP_STATE_DIR`, so a test run never writes logs, databases or
+/// leases into the developer's real `~/.filesystem-mcp-rs/`. The override must be absolute
+/// (`core::paths::resolve_root` rejects a relative one at startup), which `TempDir` always is.
+/// The directory is owned by the returned handle so it outlives the process that is using it.
 async fn spawn_server(args: &[&str]) -> Result<ServerHandle> {
+    let state = TempDir::new()?;
     let mut cmd = Command::new(assert_cmd());
     cmd.args(args)
+        .env("FS_MCP_STATE_DIR", state.path())
         .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::inherit());
@@ -82,6 +89,7 @@ async fn spawn_server(args: &[&str]) -> Result<ServerHandle> {
         child,
         tx_out,
         pending,
+        _state: state,
     })
 }
 
@@ -91,6 +99,9 @@ struct ServerHandle {
     child: Child,
     tx_out: mpsc::Sender<serde_json::Value>,
     pending: PendingMap,
+    /// The child's private state root. Held only to keep it on disk for the server's lifetime;
+    /// dropping it early would delete the directory out from under a running process.
+    _state: TempDir,
 }
 
 impl ServerHandle {

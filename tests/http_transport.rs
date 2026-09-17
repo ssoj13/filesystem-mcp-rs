@@ -3,9 +3,16 @@
 use serial_test::serial;
 use std::path::PathBuf;
 use std::time::Duration;
+use tempfile::TempDir;
 
-/// Drop guard to ensure child process is killed even on panic
-struct ChildGuard(tokio::process::Child);
+/// Drop guard to ensure child process is killed even on panic.
+///
+/// It also owns the child's private state root: that directory has to outlive the process
+/// writing into it, and must not outlive the test.
+struct ChildGuard {
+    child: tokio::process::Child,
+    _state: TempDir,
+}
 
 impl Drop for ChildGuard {
     fn drop(&mut self) {
@@ -13,7 +20,7 @@ impl Drop for ChildGuard {
         #[cfg(windows)]
         {
             use std::os::windows::process::CommandExt;
-            let pid = self.0.id();
+            let pid = self.child.id();
             if let Some(pid) = pid {
                 let _ = std::process::Command::new("taskkill")
                     .args(["/F", "/T", "/PID", &pid.to_string()])
@@ -23,8 +30,28 @@ impl Drop for ChildGuard {
         }
         #[cfg(not(windows))]
         {
-            let _ = self.0.start_kill();
+            let _ = self.child.start_kill();
         }
+    }
+}
+
+/// Spawn the server binary with a state root of its own.
+///
+/// Without the override the child resolves the real `~/.filesystem-mcp-rs/` and every test run
+/// leaves per-process log files there. `FS_MCP_STATE_DIR` must be absolute — the resolver
+/// rejects a relative value at startup — which a `TempDir` path always is.
+fn spawn_server(args: &[&str]) -> ChildGuard {
+    let state = TempDir::new().expect("Failed to create state dir");
+    let child = tokio::process::Command::new(get_binary_path())
+        .args(args)
+        .env("FS_MCP_STATE_DIR", state.path())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .expect("Failed to start server");
+    ChildGuard {
+        child,
+        _state: state,
     }
 }
 
@@ -92,15 +119,7 @@ async fn test_http_server_health_check() {
     let port = find_available_port().await;
     let bind = "127.0.0.1";
 
-    let binary = get_binary_path();
-    let _guard = ChildGuard(
-        tokio::process::Command::new(&binary)
-            .args(["-s", "-b", bind, "-p", &port.to_string()])
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .spawn()
-            .expect("Failed to start server"),
-    );
+    let _guard = spawn_server(&["-s", "-b", bind, "-p", &port.to_string()]);
 
     // Wait for server to be ready (poll up to 20 times = 10 seconds)
     wait_for_server(bind, port, 20)
@@ -129,15 +148,7 @@ async fn test_mcp_endpoint_accessible() {
     let port = find_available_port().await;
     let bind = "127.0.0.1";
 
-    let binary = get_binary_path();
-    let _guard = ChildGuard(
-        tokio::process::Command::new(&binary)
-            .args(["-s", "-b", bind, "-p", &port.to_string()])
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .spawn()
-            .expect("Failed to start server"),
-    );
+    let _guard = spawn_server(&["-s", "-b", bind, "-p", &port.to_string()]);
 
     // Wait for server to be ready
     wait_for_server(bind, port, 20)
@@ -166,15 +177,7 @@ async fn test_custom_port_and_bind() {
     let port = find_available_port().await;
     let bind = "127.0.0.1";
 
-    let binary = get_binary_path();
-    let _guard = ChildGuard(
-        tokio::process::Command::new(&binary)
-            .args(["-s", "-b", bind, "-p", &port.to_string()])
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .spawn()
-            .expect("Failed to start server"),
-    );
+    let _guard = spawn_server(&["-s", "-b", bind, "-p", &port.to_string()]);
 
     // Wait for server to be ready
     wait_for_server(bind, port, 20)
@@ -202,15 +205,7 @@ async fn test_server_with_logging() {
     let bind = "127.0.0.1";
     let log_file = format!("test-http-{}.log", port);
 
-    let binary = get_binary_path();
-    let _guard = ChildGuard(
-        tokio::process::Command::new(&binary)
-            .args(["-s", "-b", bind, "-p", &port.to_string(), "-l", &log_file])
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .spawn()
-            .expect("Failed to start server"),
-    );
+    let _guard = spawn_server(&["-s", "-b", bind, "-p", &port.to_string(), "-l", &log_file]);
 
     // Wait for server to be ready
     wait_for_server(bind, port, 20)
