@@ -137,7 +137,9 @@ pub fn sweep_tmp(now: SystemTime) -> io::Result<Sweep> {
 /// **Both knobs switch off at zero**, following `FS_MCP_TMP_KEEP_HOURS`: a retention setting
 /// whose zero empties the directory is a foot-gun, and with dozens of processes it would fire on
 /// every start. They switch off independently - only with both at zero is there nothing at all
-/// to do, which is the one case that reports [`Sweep::Disabled`].
+/// to do, which is the one case that reports [`Sweep::Disabled`]. So `FS_MCP_LOG_KEEP_DAYS=0`
+/// means "never sweep by date", not "never sweep": the budget goes on deleting, and it reaches
+/// into today.
 ///
 /// **The size budget is a soft limit.** It stops at the first file it may not delete, because a
 /// log a running server is appending to is worth more than the megabytes it occupies: on Windows

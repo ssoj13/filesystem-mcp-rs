@@ -83,7 +83,7 @@ keys below are listed first because the locations named further down resolve rel
 |----------|---------|-------------|
 | `FS_MCP_STATE_DIR` | *(unset)* | State directory for every file this server owns; must be absolute. Unset = `~/.filesystem-mcp-rs` |
 | `FS_MCP_LOG` | `info` | Level for this server's log under `<state>/logs`: `trace`\|`debug`\|`info`\|`warn`\|`error`, or `off`. Bare words are levels; a target filter needs `=` or `,` (`info,hyper=warn`) |
-| `FS_MCP_LOG_KEEP_DAYS` | `14` | Delete dated log directories under `<state>/logs` older than this many days. `0` = never sweep |
+| `FS_MCP_LOG_KEEP_DAYS` | `14` | Delete dated log directories under `<state>/logs` older than this many days. `0` = never sweep **by date** — the two rules switch off independently, so `FS_MCP_LOG_MAX_MB` still deletes, today's files included |
 | `FS_MCP_LOG_MAX_MB` | `512` | Total size budget (MiB) for `<state>/logs`; oldest files are deleted first once it is exceeded. `0` = no budget |
 | `FS_MCP_TMP_KEEP_HOURS` | `24` | Delete scratch under `<state>/tmp` older than this many hours. `0` = never sweep |
 

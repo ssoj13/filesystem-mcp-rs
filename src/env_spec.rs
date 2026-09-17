@@ -69,7 +69,7 @@ fn log_vars() -> Vec<EnvVar> {
         EnvVar {
             key: "FS_MCP_LOG_KEEP_DAYS",
             default: "14",
-            help: "Delete dated log directories under <state>/logs older than this many days. 0 = never sweep.",
+            help: "Delete dated log directories under <state>/logs older than this many days. 0 = never sweep by date; FS_MCP_LOG_MAX_MB still applies.",
         },
         EnvVar {
             key: "FS_MCP_LOG_MAX_MB",
