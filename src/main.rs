@@ -7473,8 +7473,14 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
     // CRITICAL: stdio mode MUST NOT log to stderr, ever - any stderr output during the handshake
     // causes "connection closed" in MCP clients. Never fails: a plan that could not be carried
     // out comes back describing what it degraded to, because logging must not stop the server.
-    let log_plan = init_logging(mode, args.log);
-    info!("logging to {log_plan}");
+    let logging = init_logging(mode, args.log);
+    info!("logging to {}", logging.plan);
+    // The one report a degraded logger can make that no client can be hurt by: stream's stderr is
+    // nobody's protocol. Under stdio a single byte here closes the handshake, so the marker
+    // `init_logging` leaves in the state root is the only copy there can be.
+    if let (Some(reason), TransportMode::Stream) = (logging.degraded, mode) {
+        eprintln!("filesystem-mcp-rs: logging degraded: {reason}");
+    }
 
     // The process-global arm gate, built only now: resolving its audit path can fail, and that
     // warning has to reach a subscriber. Built before `init_logging` it could not reach one at

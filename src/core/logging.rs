@@ -85,13 +85,29 @@ fn sinks(plan: &Plan) -> (Option<&Path>, bool) {
     }
 }
 
+/// What [`init_logging`] did, and why it is less than the process asked for if it is.
+///
+/// Both halves are returned together rather than left for the caller to fetch out of
+/// [`degraded_reason`], because a degradation that only that static can answer has no reader that
+/// works: the `tracing::warn!` reporting it goes through the subscriber that has just failed to
+/// come up, and under stdio with [`Plan::Disabled`] there is no subscriber at all. `main` reads
+/// `degraded` and prints it on stderr under stream transport, where stderr is allowed; under
+/// stdio the marker [`note_marker`] leaves in the state root is the only copy there can be.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Logging {
+    /// The plan actually in force.
+    pub plan: Plan,
+    /// The first failure that shaped it, if any. See [`degraded_reason`].
+    pub degraded: Option<&'static str>,
+}
+
 /// Decide the plan, then carry it out, returning what was actually done.
 ///
 /// Infallible on purpose: logging must never prevent the transport from starting, so there is no
 /// error for the caller to propagate. Every degradation — an unopenable file, an unusable state
 /// directory, a subscriber someone else already installed — is reported through the returned
-/// [`Plan`] and [`degraded_reason`] instead. Called once, from `main`.
-pub fn init_logging(mode: TransportMode, log_file: Option<String>) -> Plan {
+/// [`Logging`] instead. Called once, from `main`.
+pub fn init_logging(mode: TransportMode, log_file: Option<String>) -> Logging {
     let level = level();
     let plan = install(
         target_for(mode, log_file, level.as_deref()),
@@ -101,10 +117,57 @@ pub fn init_logging(mode: TransportMode, log_file: Option<String>) -> Plan {
     if let Some(complaint) = level.as_deref().and_then(level_complaint) {
         tracing::warn!("{complaint}");
     }
-    if let Some(reason) = degraded_reason() {
+    let degraded = degraded_reason();
+    if let Some(reason) = degraded {
+        // Still logged, because a partially working plan (stream that kept stderr, a `--log` file
+        // that opened while the default one did not) has somewhere to put it. It is simply no
+        // longer the only reader.
         tracing::warn!("logging degraded: {reason}");
+        note_marker(reason);
     }
-    plan
+    Logging { plan, degraded }
+}
+
+/// The marker file, directly in the state root beside `panic.log`.
+///
+/// The state root and not `<state>/logs`: a stray file under `logs/` is something the retention
+/// sweep walks past and warns about on every pass, and this marker exists precisely when `logs/`
+/// may be what is broken. `panic.log` already sets the precedent for an out-of-band record left
+/// by a process that could not report through its usual channel.
+///
+/// One fixed name, overwritten by whichever process degraded last. The question it answers is
+/// "why is this machine's server logging nothing", which is not per process, and a per-process
+/// file would accumulate in a directory nothing sweeps by age.
+pub const DEGRADED_MARKER: &str = "logging-degraded.log";
+
+/// Leave `reason` where an operator can find it when the log cannot carry it.
+///
+/// Best effort by nature: this *is* the fallback, and the channel it would use to complain is the
+/// one that failed. Under stream transport `main` also prints the reason on stderr.
+fn note_marker(reason: &str) {
+    // No usable state root means there is no "beside the log" to write beside. `main` validates
+    // the root before logging is initialised, so reaching this means it went away since.
+    let Ok(path) = crate::core::paths::db_path(DEGRADED_MARKER) else {
+        return;
+    };
+    if std::fs::write(&path, degraded_line(reason)).is_err() {
+        // Nowhere to say so, and nothing left to try.
+    }
+}
+
+/// The marker's single line: the day, who this process is, and why.
+///
+/// The instant is the file's own mtime, so the line carries only what the filesystem does not:
+/// the day the log directory would have been named for, and the pid and instance that name the
+/// log file that is missing. Pure, so the format is asserted directly rather than by writing a
+/// file and reading it back.
+fn degraded_line(reason: &str) -> String {
+    format!(
+        "{} pid {} instance {}: {reason}\n",
+        today(),
+        crate::core::instance::pid(),
+        crate::core::instance::id()
+    )
 }
 
 /// Decide the plan against the real state directory.
@@ -219,9 +282,9 @@ fn outcome(path: Option<PathBuf>, to_file: bool, to_stderr: bool) -> Plan {
 /// Under stdio a [`Plan::Disabled`] caused by an unopenable file is otherwise indistinguishable
 /// from `FS_MCP_LOG=off`, and the `io::Error` explaining it — a read-only state directory, a full
 /// disk, a `--log` pointing at a directory — has nowhere to go: stderr is forbidden and the file
-/// is the thing that failed. It is kept here instead of being written to a second, bespoke
-/// channel, because wave 3's `health` section already reports where this process's log went and
-/// is the one place that should answer this question.
+/// is the thing that failed. It is surfaced by [`init_logging`], which returns it in
+/// [`Logging`] and writes it to [`DEGRADED_MARKER`]; this accessor exists for [`install`]'s own
+/// use and for the tests, and is not a channel an operator has to know about.
 ///
 /// Set at most once: the first failure is the one that shaped the plan.
 pub fn degraded_reason() -> Option<&'static str> {
@@ -760,6 +823,24 @@ mod tests {
 
     /// The dated directory is the one the rest of the design keys on, so its shape is pinned:
     /// ten characters, `YYYY-MM-DD`.
+    /// The marker line carries the three things the filesystem does not: the day, the pid and
+    /// the instance, which together name the log file that is missing.
+    #[test]
+    fn the_degraded_marker_line_names_the_missing_log() {
+        let line = degraded_line("cannot open the log file X: Access is denied");
+        assert!(line.ends_with('\n'), "{line}");
+        assert!(line.starts_with(&today()), "{line}");
+        assert!(
+            line.contains(&format!("pid {}", crate::core::instance::pid())),
+            "{line}"
+        );
+        assert!(
+            line.contains(&format!("instance {}", crate::core::instance::id())),
+            "{line}"
+        );
+        assert!(line.contains("Access is denied"), "{line}");
+    }
+
     #[test]
     fn today_is_an_iso_date() {
         let d = today();

@@ -94,6 +94,11 @@ servers on one machine never contend for a shared file and there is no rotation 
 new day is a new directory; a process that outlives midnight keeps the file it opened. `--log
 <FILE>` writes to that path instead, and `FS_MCP_LOG=off` is the way out: no subscriber, no file.
 
+If the log cannot be opened at all — a read-only state directory, a full disk, a `--log` pointing
+at a directory — the server still starts, and says why in `<state>/logging-degraded.log`. That
+file is the only place it can say it under stdio, where a byte on stderr would close the
+handshake; stream transport also prints the reason on stderr.
+
 Under stdio the file is the *only* sink — anything on stderr during the MCP handshake closes the
 connection — so a log file that cannot be opened leaves that run silent rather than breaking the
 transport. Stream mode also writes to stderr, which nobody is parsing.
