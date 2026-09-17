@@ -71,15 +71,25 @@ pub fn sub_dir(kind: SubDir) -> io::Result<PathBuf> {
 /// be a worse outcome than keeping scratch files for the standard day.
 #[allow(dead_code)] // wired when the tmp sweep lands (task 7); delete this attribute there
 pub fn tmp_keep_hours() -> u64 {
-    const DEFAULT: u64 = 24; // keep in sync with the default in `env_spec::paths_vars`
     match env_spec::get("FS_MCP_TMP_KEEP_HOURS") {
-        None => DEFAULT,
+        None => TMP_KEEP_HOURS_DEFAULT,
         Some(raw) => raw.parse().unwrap_or_else(|_| {
-            warn!("FS_MCP_TMP_KEEP_HOURS is not a whole number of hours ({raw}); using {DEFAULT}");
-            DEFAULT
+            warn!(
+                "FS_MCP_TMP_KEEP_HOURS is not a whole number of hours ({raw}); using {TMP_KEEP_HOURS_DEFAULT}"
+            );
+            TMP_KEEP_HOURS_DEFAULT
         }),
     }
 }
+
+/// The retention applied when `FS_MCP_TMP_KEEP_HOURS` is unset.
+///
+/// The registry in [`crate::env_spec`] advertises this same number to the user as the key's
+/// default, and the two must not drift: a table that promises 24 while the code keeps 72 is
+/// worse than no table. `EnvVar::default` is a `&'static str`, so the values cannot be one
+/// declaration; `env_spec`'s `state_keys_are_registered_once_and_described_correctly` asserts
+/// they agree instead.
+pub const TMP_KEEP_HOURS_DEFAULT: u64 = 24;
 
 /// Resolve and create the root. Split from [`state_dir`] so tests can inject an override
 /// without mutating the process environment.

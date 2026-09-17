@@ -178,32 +178,97 @@ mod tests {
         }
     }
 
-    /// Every key is registered exactly once, and any key naming a path describes where that
-    /// path actually is now. The stale-text assertion is a regression guard: the memory and
-    /// ocrs help strings survived the move to `~/.filesystem-mcp-rs` by a full wave, pointing
-    /// operators at directories the server no longer touches.
+    /// The two spellings that correctly anchor a location to the current state root: the
+    /// literal path, and the `<state>` placeholder used when the text names something beneath
+    /// it. Anything else describes a directory this server no longer writes to.
+    const STATE_ANCHORS: [&str; 2] = ["~/.filesystem-mcp-rs", "<state>"];
+
+    /// Does this help text describe *where something lives*?
+    ///
+    /// Deliberately a positive test for location-shaped text rather than a denylist of the
+    /// spellings that happened to be wrong once: a denylist only catches what someone already
+    /// thought of, so a future `%LOCALAPPDATA%` or `~/Library/Application Support/...` would
+    /// sail straight through one. Over-matching is the safe direction here - a false positive
+    /// costs an author one reworded sentence, a false negative ships an operator to the wrong
+    /// directory.
+    fn names_a_location(help: &str) -> bool {
+        let lower = help.to_ascii_lowercase();
+        lower.contains('/')
+            || lower.contains('\\')
+            || lower.contains('%')
+            || [".db", ".log", ".jsonl"].iter().any(|e| lower.contains(e))
+            || lower
+                .split(|c: char| !c.is_ascii_alphabetic())
+                .any(|w| matches!(w, "dir" | "dirs" | "directory" | "folder"))
+    }
+
+    /// Every key is registered exactly once, any key naming a location anchors it to the state
+    /// root, and the advertised tmp retention matches the one the code actually applies.
+    ///
+    /// The memory and ocrs help strings survived the move to `~/.filesystem-mcp-rs` by a full
+    /// wave, pointing operators at directories the server had stopped touching. The invariant
+    /// below is what stops the next one.
     #[test]
     fn state_keys_are_registered_once_and_described_correctly() {
         let all = vars();
         for key in ["FS_MCP_STATE_DIR", "FS_MCP_TMP_KEEP_HOURS"] {
             assert_eq!(all.iter().filter(|v| v.key == key).count(), 1, "{key}");
         }
+
+        // A detector that returned false for everything would make the loop below vacuous, so
+        // pin both directions on it first, including the exact strings this wave had to fix.
+        for stale in [
+            "SQLite file for the memory tools. Blank = <local data>/filesystem-mcp-rs/memory2.db.",
+            "Cache dir for the downloaded ocrs models. Blank = <data>/computer-mcp-rs/ocrs.",
+            "Blank = %LOCALAPPDATA%\\filesystem-mcp-rs.",
+            "Blank = ~/Library/Application Support/filesystem-mcp-rs.",
+        ] {
+            assert!(names_a_location(stale), "not detected as a location: {stale}");
+            assert!(
+                !STATE_ANCHORS.iter().any(|a| stale.contains(a)),
+                "wrongly accepted as anchored: {stale}"
+            );
+        }
+        assert!(
+            !names_a_location(
+                "Memory visibility: allow_all | enforce_private_only | enforce_visibility."
+            ),
+            "a mode list is not a location"
+        );
+
+        for v in &all {
+            if names_a_location(v.help) {
+                assert!(
+                    STATE_ANCHORS.iter().any(|a| v.help.contains(a)),
+                    "{} describes a location without anchoring it to the state root: {}",
+                    v.key,
+                    v.help
+                );
+            }
+        }
+
+        // The invariant above has one loophole: deleting the location from a help string also
+        // satisfies it. Pin the key this wave came to fix so silence cannot pass for a fix.
         let mem = all
             .iter()
             .find(|v| v.key == "FS_MCP_MEMORY_DB")
             .expect("memory db key");
         assert!(
-            mem.help.contains("~/.filesystem-mcp-rs"),
+            mem.help.contains("~/.filesystem-mcp-rs/memory2.db"),
             "stale help: {}",
             mem.help
         );
-        // Both spellings of the old per-OS root, so no variant of the stale text can return.
-        for stale in ["<data>", "<local data>", "computer-mcp-rs"] {
-            assert!(
-                !all.iter().any(|v| v.help.contains(stale)),
-                "stale {stale} help text remains"
-            );
-        }
+
+        // Two values that must agree, made to prove it rather than asked to.
+        let tmp = all
+            .iter()
+            .find(|v| v.key == "FS_MCP_TMP_KEEP_HOURS")
+            .expect("tmp keep hours key");
+        assert_eq!(
+            tmp.default,
+            crate::core::paths::TMP_KEEP_HOURS_DEFAULT.to_string(),
+            "advertised default disagrees with core::paths::tmp_keep_hours"
+        );
     }
 
     #[test]

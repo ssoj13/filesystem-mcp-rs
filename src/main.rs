@@ -181,7 +181,8 @@ struct ServerArgs {
     #[arg(long = "list-env", action = clap::ArgAction::SetTrue)]
     list_env: bool,
 
-    /// Memory database path (default: system data dir/filesystem-mcp-rs/memory2.db)
+    /// Memory database path (default: ~/.filesystem-mcp-rs/memory2.db).
+    /// Precedence: this flag > FS_MCP_MEMORY_DB env > the state root.
     #[arg(long = "memory-db", value_name = "PATH")]
     memory_db: Option<PathBuf>,
 
