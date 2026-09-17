@@ -6,6 +6,7 @@ pub mod format;
 pub mod glob;
 pub mod logging;
 pub mod path;
+pub mod paths;
 pub mod run_command_args;
 pub mod schema;
 pub mod serde;
