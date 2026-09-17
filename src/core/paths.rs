@@ -18,10 +18,8 @@
 //! invisible to it; `build.rs` is the concrete near-miss, since the crate has none today and one
 //! added later would be unguarded. That module's doc records the further spellings it cannot see.
 
-use std::collections::BTreeSet;
 use std::io;
 use std::path::{Path, PathBuf};
-use std::sync::Mutex;
 use tracing::{info, warn};
 
 use crate::env_spec;
@@ -138,39 +136,22 @@ fn resolve_sub(override_dir: Option<PathBuf>, kind: SubDir) -> io::Result<PathBu
     Ok(dir)
 }
 
-/// `create_dir_all` that names the directory it could not create, and does the syscall once.
+/// `create_dir_all` that names the directory it could not create.
 ///
 /// A bare `std::fs` error carries only the reason, so with `FS_MCP_STATE_DIR` unset the operator
 /// read `Cannot prepare the server state directory: Access is denied. (os error 5)` and had no
 /// way to tell which directory was refused - the one thing they need in order to fix it.
 ///
-/// [`state_dir`] is on the path of every capture, every `run_command` and every blob write, and
-/// each of those used to reach the filesystem twice (root, then subdirectory) to be told what the
-/// previous call had already established. [`CREATED`] remembers what this process has made.
+/// The syscall runs on every call, deliberately. Remembering "this process already created it"
+/// would save one `stat` on operations that go on to write a file anyway, and in exchange a state
+/// directory removed under a running server would never be recreated - every capture, every
+/// `run_command` and every blob write failing until restart. A process-local flag cannot assert a
+/// fact about a filesystem other processes and people also touch. If this ever measures, cache
+/// the resolved [`PathBuf`], which this process does own, not the directory's existence.
 fn mkdir(dir: &Path) -> io::Result<()> {
-    // A poisoned lock falls through to the syscall rather than failing: the memo is an
-    // optimisation, and losing it must not stop the server from resolving its own state.
-    if CREATED.lock().is_ok_and(|seen| seen.contains(dir)) {
-        return Ok(());
-    }
     std::fs::create_dir_all(dir)
-        .map_err(|e| io::Error::new(e.kind(), format!("Cannot create {}: {e}", dir.display())))?;
-    if let Ok(mut seen) = CREATED.lock() {
-        seen.insert(dir.to_path_buf());
-    }
-    Ok(())
+        .map_err(|e| io::Error::new(e.kind(), format!("Cannot create {}: {e}", dir.display())))
 }
-
-/// Directories [`mkdir`] has already created in this process.
-///
-/// Keyed by the full path, so changing `FS_MCP_STATE_DIR` mid-process resolves and creates the
-/// new root rather than being answered from the old one's entry.
-///
-/// The consequence, accepted deliberately: a state directory deleted out from under a running
-/// server is no longer silently recreated. A write then fails where it used to succeed against a
-/// freshly empty directory - which is the louder and more truthful of the two outcomes, since the
-/// data that was in there is gone either way.
-static CREATED: Mutex<BTreeSet<PathBuf>> = Mutex::new(BTreeSet::new());
 
 /// Pure path arithmetic: the override wins, otherwise `<home>/.filesystem-mcp-rs`.
 ///
@@ -263,24 +244,50 @@ pub enum Cause {
 /// `new` are the same either way. Refusing it would need link-and-unlink semantics that std does
 /// not offer portably, for no difference in outcome.
 ///
-/// Coverage note, precisely: the cross-volume `copy` fallback is never entered on a single-volume
-/// test machine, so the copy step itself is verified by inspection only. The cleanup that removes
-/// a leftover `new` is reached on Windows by `migrate_removes_the_leftover_when_the_original_cannot_be_unlinked`;
-/// on Unix that arm is verified by reading. The parent-creation failure returns before any of
-/// this and is covered separately. Both race outcomes are covered on every platform through
-/// [`migrate_with`].
+/// Coverage note, precisely. The cross-volume `copy` fallback is never entered *by that route* on
+/// a single-volume test machine, so the copy step itself is verified by inspection only; on
+/// Windows a handle that denies DELETE makes `rename` fail and drives the same fallback, which is
+/// how the two arms below are reached. The cleanup that removes a leftover `new` is covered by
+/// `migrate_removes_the_leftover_when_the_original_cannot_be_unlinked`, and the `!old.exists()`
+/// guard that skips it by `migrate_loser_that_already_created_the_destination_leaves_it_alone`;
+/// both are `#[cfg(windows)]`, and on Unix those two arms are verified by reading. The
+/// `Occupied` race outcome is covered on every platform through [`Hooks::before_move`], and the
+/// parent-creation failure returns before any of this and is covered separately.
 pub fn migrate(old: &Path, new: &Path) -> Migrated {
-    migrate_with(old, new, &|| {})
+    migrate_with(old, new, Hooks::NONE)
 }
 
-/// [`migrate`], with a hook that runs between the decision and the move.
+/// Test seams for [`migrate_with`]: the two points at which another process's move can land
+/// inside this one.
 ///
-/// The hook exists so that the losing side of a two-server race can be driven deterministically:
-/// a test puts the winner's `rename` exactly in the window this call has already passed. A real
-/// race is the same code path arrived at by timing, and reproducing it by timing would give a
-/// test that fails once in a thousand runs - no gate at all. Production passes a no-op, which the
-/// optimiser removes.
-fn migrate_with(old: &Path, new: &Path, before_move: &dyn Fn()) -> Migrated {
+/// They exist so that the losing side of a two-server race can be driven deterministically - a
+/// test puts the winner's `rename` exactly in a window this call has already passed. A real race
+/// is the same code path arrived at by timing, and reproducing it by timing would give a test
+/// that fails once in a thousand runs: no gate at all. Production passes [`Hooks::NONE`], whose
+/// no-ops the optimiser removes.
+///
+/// Two points rather than one because the two race outcomes are reached from different places. A
+/// winner that finishes before the `rename` leaves the loser's copy refused as `Occupied`; one
+/// that finishes after the loser has already created the destination leaves it failing on the
+/// *source*, which is the only way into the `Io` arm's `!old.exists()` guard.
+#[derive(Clone, Copy)]
+struct Hooks<'a> {
+    /// Runs after the decision to move and before the `rename` is attempted.
+    before_move: &'a dyn Fn(),
+    /// Runs after the copy fallback has created the destination and before it opens the source.
+    after_create: &'a dyn Fn(),
+}
+
+impl Hooks<'_> {
+    /// What production passes: both points do nothing.
+    const NONE: Self = Self {
+        before_move: &|| {},
+        after_create: &|| {},
+    };
+}
+
+/// [`migrate`], with hooks at the points another process's move can interleave.
+fn migrate_with(old: &Path, new: &Path, hooks: Hooks<'_>) -> Migrated {
     let ambiguous = |cause: Cause| Migrated::Ambiguous {
         old: old.to_path_buf(),
         new: new.to_path_buf(),
@@ -308,12 +315,12 @@ fn migrate_with(old: &Path, new: &Path, before_move: &dyn Fn()) -> Migrated {
                     parent.display()
                 )));
             }
-            before_move();
+            (hooks.before_move)();
             if std::fs::rename(old, new).is_ok() {
                 info!("Migrated {} -> {}", old.display(), new.display());
                 return Migrated::Moved;
             }
-            match copy_into_a_new_file(old, new) {
+            match copy_into_a_new_file(old, new, hooks.after_create) {
                 Ok(()) => {
                     info!("Migrated (copied) {} -> {}", old.display(), new.display());
                     Migrated::Moved
@@ -392,12 +399,17 @@ enum CopyFailed {
 ///
 /// The contents are flushed with `sync_all` before `old` is removed, so a crash between the two
 /// cannot leave a destination whose bytes are still only in the page cache.
-fn copy_into_a_new_file(old: &Path, new: &Path) -> Result<(), CopyFailed> {
+fn copy_into_a_new_file(
+    old: &Path,
+    new: &Path,
+    after_create: &dyn Fn(),
+) -> Result<(), CopyFailed> {
     let mut dst = match std::fs::File::options().write(true).create_new(true).open(new) {
         Ok(dst) => dst,
         Err(e) if e.kind() == io::ErrorKind::AlreadyExists => return Err(CopyFailed::Occupied),
         Err(e) => return Err(CopyFailed::Io(e)),
     };
+    after_create();
     let mut src = std::fs::File::open(old).map_err(CopyFailed::Io)?;
     io::copy(&mut src, &mut dst).map_err(CopyFailed::Io)?;
     dst.sync_all().map_err(CopyFailed::Io)?;
@@ -475,9 +487,20 @@ pub fn migrate_sqlite(old: &Path, new: &Path) -> Migrated {
 /// first column - so a plain `Ok` proves nothing and both have to be checked. The size of any
 /// surviving `-wal` is checked afterwards as well: `TRUNCATE` leaves it at zero bytes, and a
 /// non-empty one would mean transactions are still only in the log whatever the pragma said.
+///
+/// **The database is opened without `SQLITE_OPEN_CREATE`, and that is load-bearing.** The caller
+/// checks `old.exists()` and then calls this, so a racing winner can rename the file away in
+/// between; `Connection::open` would then *create* an empty database at the legacy path. The
+/// checkpoint of that empty file succeeds, [`migrate`] is handed `(old = true, new = true)` and
+/// reports [`Cause::BothExist`] - the memory tools disabled over a zero-byte file this process
+/// invented, repeated at every start until a human deletes it. A missing file must be an error,
+/// not a creation. Dropping `SQLITE_OPEN_URI` along with it is a small bonus: a legacy path is a
+/// path, and nothing should read `?` in it as a parameter list.
 fn checkpoint(db: &Path) -> Result<(), String> {
     let held = |e| format!("{}: {e}", db.display());
-    let conn = rusqlite::Connection::open(db)
+    let flags =
+        rusqlite::OpenFlags::SQLITE_OPEN_READ_WRITE | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX;
+    let conn = rusqlite::Connection::open_with_flags(db, flags)
         .map_err(|e| format!("cannot open it as a sqlite database: {}", held(e)))?;
     // Ride out a lock another instance is holding for a moment rather than refusing at once.
     conn.execute_batch("PRAGMA busy_timeout = 2000;")
@@ -487,9 +510,7 @@ fn checkpoint(db: &Path) -> Result<(), String> {
         .map_err(|e| format!("cannot checkpoint its write-ahead log: {}", held(e)))?;
     drop(conn);
     if busy != 0 {
-        return Err("its write-ahead log could not be checkpointed because the database is in \
-                    use by another process"
-            .to_string());
+        return Err(IN_USE.to_string());
     }
     match std::fs::metadata(sidecar(db, "-wal")) {
         Ok(meta) if meta.len() > 0 => Err(format!(
@@ -500,6 +521,15 @@ fn checkpoint(db: &Path) -> Result<(), String> {
         _ => Ok(()),
     }
 }
+
+/// What [`checkpoint`] reports when sqlite says the log could not be folded in because another
+/// process holds the database.
+///
+/// A named constant so the test pinning that refusal can assert on the *reason* and not merely on
+/// the outcome: on Windows a held database also fails the move through file sharing, which
+/// produces the same `Cause::Failed` shape for an entirely different reason.
+const IN_USE: &str = "its write-ahead log could not be checkpointed because the database is in \
+                      use by another process";
 
 /// Delete a file that is known to hold nothing of value, reporting a failure without acting on
 /// it. A leftover sidecar is harmless beside the database it belongs to; the caller's reason for
@@ -796,15 +826,85 @@ mod tests {
         std::fs::write(&old, b"the user's memories").expect("write");
 
         // The winner completes its move in the window this call has already passed.
-        let outcome = migrate_with(&old, &new, &|| {
-            std::fs::create_dir_all(new.parent().expect("parent")).expect("mkdir");
-            std::fs::rename(&old, &new).expect("the winner's move");
-        });
+        let outcome = migrate_with(
+            &old,
+            &new,
+            Hooks {
+                before_move: &|| {
+                    std::fs::create_dir_all(new.parent().expect("parent")).expect("mkdir");
+                    std::fs::rename(&old, &new).expect("the winner's move");
+                },
+                ..Hooks::NONE
+            },
+        );
 
         assert_eq!(outcome, Migrated::FreshStart, "the move is already done");
         assert_eq!(
             std::fs::read(&new).expect("the winner's file must survive"),
             b"the user's memories"
+        );
+    }
+
+    /// The same race resolved one step later, which is the only way into the `Io` arm's
+    /// `!old.exists()` guard - the branch that actually performs a delete.
+    ///
+    /// Here the loser gets as far as *creating* the destination before the winner's move lands on
+    /// top of it. The loser then fails opening the source, which is gone, and must read that as
+    /// "another instance finished the move" and leave the file alone. Removing it by existence
+    /// alone - which the pre-fix code did - deletes the winner's database while the winner is
+    /// already writing to it.
+    ///
+    /// Windows-only, and for the same reason as
+    /// `migrate_removes_the_leftover_when_the_original_cannot_be_unlinked`: the copy fallback is
+    /// only entered when `rename` fails, and on a single-volume machine the sole way to make it
+    /// fail is a handle opened with `share_mode(FILE_SHARE_READ)`, which denies the DELETE access
+    /// `rename` needs. Unix reaches this arm only across volumes, which no test here can set up,
+    /// so there it stays verified by reading.
+    #[test]
+    #[cfg(windows)]
+    fn migrate_loser_that_already_created_the_destination_leaves_it_alone() {
+        use std::os::windows::fs::OpenOptionsExt;
+        const FILE_SHARE_READ: u32 = 0x0000_0001;
+
+        let scratch = tempfile::TempDir::new().expect("scratch dir");
+        let base = scratch.path().join("mig");
+        let old = base.join("old/memory2.db");
+        let new = base.join("new/memory2.db");
+        std::fs::create_dir_all(old.parent().expect("parent")).expect("mkdir");
+        std::fs::create_dir_all(new.parent().expect("parent")).expect("mkdir");
+        std::fs::write(&old, b"the user's memories").expect("write");
+
+        // Holding `old` this way is what makes the loser's `rename` fail and so drives it into
+        // the copy fallback. The winner cannot move the file until the handle goes, so the hook
+        // releases it: that instant IS the winner completing its move.
+        let handle = std::cell::RefCell::new(Some(
+            std::fs::OpenOptions::new()
+                .read(true)
+                .share_mode(FILE_SHARE_READ)
+                .open(&old)
+                .expect("hold the original open"),
+        ));
+
+        let outcome = migrate_with(
+            &old,
+            &new,
+            Hooks {
+                // The loser has created `new` and is about to read `old`. The winner's rename
+                // replaces the loser's empty file and takes the source with it.
+                after_create: &|| {
+                    drop(handle.borrow_mut().take());
+                    std::fs::rename(&old, &new).expect("the winner's move");
+                },
+                ..Hooks::NONE
+            },
+        );
+
+        assert_eq!(outcome, Migrated::FreshStart, "the move is already done");
+        assert!(!old.exists(), "the winner took the original with it");
+        assert_eq!(
+            std::fs::read(&new).expect("the winner's file must survive"),
+            b"the user's memories",
+            "the loser must not delete what the winner just migrated"
         );
     }
 
@@ -819,7 +919,7 @@ mod tests {
         std::fs::write(&old, b"ours").expect("write");
         std::fs::write(&new, b"another instance's data").expect("write");
 
-        match copy_into_a_new_file(&old, &new) {
+        match copy_into_a_new_file(&old, &new, &|| {}) {
             Err(CopyFailed::Occupied) => {}
             Err(CopyFailed::Io(e)) => panic!("expected Occupied, got {e}"),
             Ok(()) => panic!("a copy must refuse an existing destination"),
@@ -952,7 +1052,19 @@ mod tests {
             .execute_batch("BEGIN; SELECT * FROM note;")
             .expect("read txn");
 
-        assert_failed_migration(migrate_sqlite(&old, &new), &old, &new);
+        let outcome = migrate_sqlite(&old, &new);
+        assert_failed_migration(outcome.clone(), &old, &new);
+        // Pinned on the REASON, not just the shape. On Windows a held database also fails the
+        // move through file sharing - `remove_file` cannot unlink an open file - which produces
+        // the same `Cause::Failed` for an entirely different reason and would let this test pass
+        // while the checkpoint refusal it names had rotted away.
+        match outcome {
+            Migrated::Ambiguous {
+                cause: Cause::Failed(why),
+                ..
+            } => assert_eq!(why, IN_USE, "the checkpoint must be what refused the move"),
+            other => panic!("expected Ambiguous/Failed, got {other:?}"),
+        }
         assert!(old.exists(), "the database must stay where it is");
         assert!(!new.exists(), "and nothing may appear at the destination");
         assert!(
@@ -961,6 +1073,50 @@ mod tests {
         );
         drop(reader);
         assert_eq!(read_note(&old).as_deref(), Some("in use"));
+    }
+
+    /// Checkpointing a path that is not there must not bring it into being.
+    ///
+    /// `Connection::open` carries `SQLITE_OPEN_CREATE`. Between `migrate_sqlite`'s `old.exists()`
+    /// check and this call a racing winner can rename the file away, and the loser would then
+    /// create an empty database at the legacy path: the checkpoint of it succeeds, `migrate` sees
+    /// a file at both paths and reports `BothExist`, and the memory tools stay disabled over a
+    /// zero-byte file this process invented - at every start, until a human deletes it.
+    #[test]
+    fn checkpointing_a_missing_database_does_not_create_one() {
+        let scratch = tempfile::TempDir::new().expect("scratch dir");
+        let absent = scratch.path().join("memory2.db");
+
+        checkpoint(&absent).expect_err("a missing database must be an error");
+        assert!(!absent.exists(), "and must not have been created");
+        for suffix in SQLITE_SIDECARS {
+            assert!(!sidecar(&absent, suffix).exists(), "nor any {suffix}");
+        }
+    }
+
+    /// The same thing through the public entry point: the loser of a race whose winner renames the
+    /// database away in the window before the checkpoint must report "already migrated", not
+    /// conjure a conflict out of a file it created itself.
+    #[test]
+    fn migrate_sqlite_loser_does_not_invent_a_conflict() {
+        let scratch = tempfile::TempDir::new().expect("scratch dir");
+        let old = scratch.path().join("old/memory2.db");
+        let new = scratch.path().join("new/memory2.db");
+        std::fs::create_dir_all(old.parent().expect("parent")).expect("mkdir");
+        std::fs::create_dir_all(new.parent().expect("parent")).expect("mkdir");
+        write_db_with_an_uncheckpointed_wal(&old, "ours");
+        // The winner completes the whole move first; this process then runs with a stale view.
+        for suffix in SQLITE_SIDECARS {
+            let side = sidecar(&old, suffix);
+            if side.exists() {
+                std::fs::rename(&side, sidecar(&new, suffix)).expect("move the sidecar too");
+            }
+        }
+        std::fs::rename(&old, &new).expect("the winner's move");
+
+        assert_eq!(migrate_sqlite(&old, &new), Migrated::FreshStart);
+        assert!(!old.exists(), "nothing may be created at the legacy path");
+        assert_eq!(read_note(&new).as_deref(), Some("ours"));
     }
 
     /// A directory is refused outright: `fs::copy` cannot copy one and `fs::remove_file` cannot

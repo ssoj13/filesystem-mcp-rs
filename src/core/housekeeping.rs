@@ -257,7 +257,7 @@ pub(crate) fn lease_done(root: &Path, kind: &str, now: SystemTime) -> io::Result
     // the instant it is empty and take that as "no usable marker", i.e. sweep again immediately.
     // The rename is atomic on both platforms, so every reader sees either the old stamp or the
     // new one. Wave 3's compaction needs that same guarantee from this file.
-    let pending = sidecar_name(&marker, std::process::id());
+    let pending = sidecar_name(&marker);
     std::fs::write(&pending, unix_secs(now).to_string())?;
     std::fs::rename(&pending, &marker).inspect_err(|_| {
         // The stamp never landed, so the next process simply sweeps again. The scratch file is
@@ -268,12 +268,16 @@ pub(crate) fn lease_done(root: &Path, kind: &str, now: SystemTime) -> io::Result
     })
 }
 
-/// `marker` with `.<pid>.tmp` appended: the private name [`lease_done`] writes before renaming.
-/// The pid keeps two processes stamping the same lease at once from sharing a scratch file, which
-/// would put one's partial write under the other's rename.
-fn sidecar_name(marker: &Path, pid: u32) -> std::path::PathBuf {
+/// `marker` with `.<uuid>.tmp` appended: the private name [`lease_done`] writes before renaming.
+///
+/// A uuid rather than the pid, for the same reason `run_command`'s stream logs carry one: a pid
+/// separates two processes but not two concurrent calls inside one, which would then share the
+/// scratch file and put one's partial write under the other's rename. The damage would be a
+/// spurious `Err` rather than a corrupt marker, but the name is cheap and the rule is the same
+/// one everywhere: a file two writers can reach must not be named by something they share.
+fn sidecar_name(marker: &Path) -> std::path::PathBuf {
     let mut name = marker.as_os_str().to_os_string();
-    name.push(format!(".{pid}.tmp"));
+    name.push(format!(".{}.tmp", uuid::Uuid::new_v4()));
     std::path::PathBuf::from(name)
 }
 
