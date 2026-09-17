@@ -6,7 +6,9 @@
 use std::path::{Path, PathBuf};
 
 use crate::mcp_setup::error::Result;
-use crate::mcp_setup::types::{ApplyReport, InstallPlan, RemoveReport, Scope, SetupContext, StatusReport};
+use crate::mcp_setup::types::{
+    ApplyReport, InstallPlan, RemoveReport, Scope, SetupContext, StatusReport,
+};
 
 /// Where an agent auto-loads its Markdown rules from (`CLAUDE.md`, `AGENTS.md`, `GEMINI.md`, …).
 /// `None` for a scope means that agent has no context file there, so hints are skipped.

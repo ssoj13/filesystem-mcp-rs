@@ -3,23 +3,21 @@
 //! Enumeration runs top-to-bottom in z-order (EnumWindows order), which becomes
 //! our `z` field. `id` is the HWND (xcap parity: `Window::id() == hwnd`).
 
-use windows::core::BOOL;
 use windows::Win32::Foundation::{CloseHandle, HWND, LPARAM, RECT, WPARAM};
-use windows::Win32::Graphics::Dwm::{DwmGetWindowAttribute, DWMWA_CLOAKED};
+use windows::Win32::Graphics::Dwm::{DWMWA_CLOAKED, DwmGetWindowAttribute};
 use windows::Win32::System::Threading::{
-    OpenProcess, QueryFullProcessImageNameW, PROCESS_NAME_WIN32,
-    PROCESS_QUERY_LIMITED_INFORMATION,
+    OpenProcess, PROCESS_NAME_WIN32, PROCESS_QUERY_LIMITED_INFORMATION, QueryFullProcessImageNameW,
 };
 use windows::Win32::UI::Input::KeyboardAndMouse::{
     INPUT, INPUT_0, INPUT_KEYBOARD, KEYBDINPUT, KEYEVENTF_KEYUP, SendInput, VK_MENU,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
     EnumWindows, GetForegroundWindow, GetSystemMetrics, GetWindowRect, GetWindowTextW,
-    GetWindowThreadProcessId, IsIconic, IsWindow, IsWindowVisible, IsZoomed,
-    MoveWindow, PostMessageW, SetForegroundWindow, ShowWindow,
-    SM_CXVIRTUALSCREEN, SM_CYVIRTUALSCREEN, SM_XVIRTUALSCREEN, SM_YVIRTUALSCREEN,
-    SW_MAXIMIZE, SW_MINIMIZE, SW_RESTORE, WM_CLOSE,
+    GetWindowThreadProcessId, IsIconic, IsWindow, IsWindowVisible, IsZoomed, MoveWindow,
+    PostMessageW, SM_CXVIRTUALSCREEN, SM_CYVIRTUALSCREEN, SM_XVIRTUALSCREEN, SM_YVIRTUALSCREEN,
+    SW_MAXIMIZE, SW_MINIMIZE, SW_RESTORE, SetForegroundWindow, ShowWindow, WM_CLOSE,
 };
+use windows::core::BOOL;
 
 pub use crate::tools::computer::driver::{WinInfo, WinQuery, WinTarget};
 use crate::tools::computer::safety::CtlError;
@@ -136,7 +134,10 @@ pub fn list_windows(query: Option<WinQuery>) -> anyhow::Result<Vec<WinInfo>> {
     for (z, hwnd) in hwnds()?.into_iter().enumerate() {
         // SAFETY: plain window queries.
         unsafe {
-            if !IsWindow(Some(hwnd)).as_bool() || !IsWindowVisible(hwnd).as_bool() || is_cloaked(hwnd) {
+            if !IsWindow(Some(hwnd)).as_bool()
+                || !IsWindowVisible(hwnd).as_bool()
+                || is_cloaked(hwnd)
+            {
                 continue;
             }
         }
@@ -152,7 +153,6 @@ pub fn list_windows(query: Option<WinQuery>) -> anyhow::Result<Vec<WinInfo>> {
     Ok(out)
 }
 
-
 fn alt_input(up: bool) -> INPUT {
     INPUT {
         r#type: INPUT_KEYBOARD,
@@ -160,7 +160,11 @@ fn alt_input(up: bool) -> INPUT {
             ki: KEYBDINPUT {
                 wVk: VK_MENU,
                 wScan: 0,
-                dwFlags: if up { KEYEVENTF_KEYUP } else { Default::default() },
+                dwFlags: if up {
+                    KEYEVENTF_KEYUP
+                } else {
+                    Default::default()
+                },
                 time: 0,
                 dwExtraInfo: 0,
             },
@@ -213,7 +217,9 @@ pub fn focus_window(hwnd: HWND) -> anyhow::Result<()> {
         }
         std::thread::sleep(std::time::Duration::from_millis(100));
     }
-    Err(anyhow::Error::new(CtlError::FocusFailed { hwnd: hwnd.0 as u32 }))
+    Err(anyhow::Error::new(CtlError::FocusFailed {
+        hwnd: hwnd.0 as u32,
+    }))
 }
 
 /// Move/resize and/or set window state (`min` | `max` | `restore`).
@@ -265,6 +271,3 @@ pub fn close(hwnd: HWND) -> anyhow::Result<()> {
         hwnd.0 as u32
     ))
 }
-
-
-

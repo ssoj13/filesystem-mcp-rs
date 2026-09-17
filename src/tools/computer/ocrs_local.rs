@@ -38,7 +38,9 @@ fn models_dir() -> anyhow::Result<PathBuf> {
     if let Some(dir) = crate::env_spec::get(ENV_OCRS_MODELS_DIR) {
         return Ok(PathBuf::from(dir));
     }
-    Ok(crate::core::paths::sub_dir(crate::core::paths::SubDir::Ocrs)?)
+    Ok(crate::core::paths::sub_dir(
+        crate::core::paths::SubDir::Ocrs,
+    )?)
 }
 
 fn model_path(name: &str) -> anyhow::Result<PathBuf> {
@@ -100,8 +102,12 @@ fn engine() -> anyhow::Result<&'static OcrEngine> {
         ..Default::default()
     })
     .map_err(|e| anyhow::anyhow!("OcrEngine::new: {e}"))?;
-    ENGINE.set(engine).map_err(|_| anyhow::anyhow!("OCR engine already initialized"))?;
-    ENGINE.get().ok_or_else(|| anyhow::anyhow!("OCR engine unavailable"))
+    ENGINE
+        .set(engine)
+        .map_err(|_| anyhow::anyhow!("OCR engine already initialized"))?;
+    ENGINE
+        .get()
+        .ok_or_else(|| anyhow::anyhow!("OCR engine unavailable"))
 }
 
 /// Recognize `img` via ocrs. Same OcrOut shape as the media engine
@@ -111,7 +117,9 @@ pub fn recognize(img: &image::RgbaImage, find: Option<&str>) -> anyhow::Result<O
     let rgb = image::DynamicImage::ImageRgba8(img.clone()).into_rgb8();
     let source = ImageSource::from_bytes(rgb.as_raw(), rgb.dimensions())
         .map_err(|e| anyhow::anyhow!("ImageSource: {e}"))?;
-    let input = engine.prepare_input(source).map_err(|e| anyhow::anyhow!("prepare_input: {e}"))?;
+    let input = engine
+        .prepare_input(source)
+        .map_err(|e| anyhow::anyhow!("prepare_input: {e}"))?;
 
     let words = engine
         .detect_words(&input)
@@ -144,7 +152,9 @@ pub fn recognize(img: &image::RgbaImage, find: Option<&str>) -> anyhow::Result<O
             }
             rect = Some(match rect {
                 None => cell,
-                Some((l, t, rt, b)) => (l.min(cell.0), t.min(cell.1), rt.max(cell.2), b.max(cell.3)),
+                Some((l, t, rt, b)) => {
+                    (l.min(cell.0), t.min(cell.1), rt.max(cell.2), b.max(cell.3))
+                }
             });
         }
         if !text.is_empty() {
@@ -172,5 +182,9 @@ pub fn recognize(img: &image::RgbaImage, find: Option<&str>) -> anyhow::Result<O
                 .collect()
         }
     };
-    Ok(OcrOut { text, lines: out_lines, matches })
+    Ok(OcrOut {
+        text,
+        lines: out_lines,
+        matches,
+    })
 }

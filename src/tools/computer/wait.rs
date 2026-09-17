@@ -5,7 +5,7 @@ use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
 
-use super::capture::{self, CapTarget, hash_dist, default_cursor_size};
+use super::capture::{self, CapTarget, default_cursor_size, hash_dist};
 use super::driver;
 use super::driver::WinQuery;
 
@@ -70,19 +70,31 @@ pub fn wait(
     let started = Instant::now();
     match kind {
         Kind::ScreenChange => {
-            let cap = cap_target.unwrap_or(CapTarget::Cursor { size: default_cursor_size() });
+            let cap = cap_target.unwrap_or(CapTarget::Cursor {
+                size: default_cursor_size(),
+            });
             let baseline = match since {
                 Some(h) => h,
                 None => capture::capture(cap.clone())?.hash,
             };
             loop {
                 if started.elapsed() > deadline {
-                    return Ok(WaitResult { ok: false, hash: None, wins: None, rgb: None });
+                    return Ok(WaitResult {
+                        ok: false,
+                        hash: None,
+                        wins: None,
+                        rgb: None,
+                    });
                 }
                 std::thread::sleep(poll);
                 let now = capture::capture(cap.clone())?.hash;
                 if hash_dist(baseline, now) > CHANGE_EPS {
-                    return Ok(WaitResult { ok: true, hash: Some(now), wins: None, rgb: None });
+                    return Ok(WaitResult {
+                        ok: true,
+                        hash: Some(now),
+                        wins: None,
+                        rgb: None,
+                    });
                 }
             }
         }
@@ -90,12 +102,22 @@ pub fn wait(
             let q = win_query.clone().unwrap_or_default();
             loop {
                 if started.elapsed() > deadline {
-                    return Ok(WaitResult { ok: false, hash: None, wins: None, rgb: None });
+                    return Ok(WaitResult {
+                        ok: false,
+                        hash: None,
+                        wins: None,
+                        rgb: None,
+                    });
                 }
                 std::thread::sleep(poll);
                 let wins = driver::list_windows(Some(q.clone()))?;
                 if !wins.is_empty() {
-                    return Ok(WaitResult { ok: true, hash: None, wins: Some(wins.len() as u32), rgb: None });
+                    return Ok(WaitResult {
+                        ok: true,
+                        hash: None,
+                        wins: Some(wins.len() as u32),
+                        rgb: None,
+                    });
                 }
             }
         }
@@ -103,11 +125,21 @@ pub fn wait(
             let base = super::driver::clipboard_seq()?;
             loop {
                 if started.elapsed() > deadline {
-                    return Ok(WaitResult { ok: false, hash: None, wins: None, rgb: None });
+                    return Ok(WaitResult {
+                        ok: false,
+                        hash: None,
+                        wins: None,
+                        rgb: None,
+                    });
                 }
                 std::thread::sleep(poll);
                 if super::driver::clipboard_seq()? != base {
-                    return Ok(WaitResult { ok: true, hash: None, wins: None, rgb: None });
+                    return Ok(WaitResult {
+                        ok: true,
+                        hash: None,
+                        wins: None,
+                        rgb: None,
+                    });
                 }
             }
         }
@@ -120,15 +152,24 @@ pub fn wait(
             };
             loop {
                 if started.elapsed() > deadline {
-                    return Ok(WaitResult { ok: false, hash: None, wins: None, rgb: None });
+                    return Ok(WaitResult {
+                        ok: false,
+                        hash: None,
+                        wins: None,
+                        rgb: None,
+                    });
                 }
                 let c = super::driver::color_at(t.x, t.y)?;
                 if near(c) {
-                    return Ok(WaitResult { ok: true, hash: None, wins: None, rgb: Some(c) });
+                    return Ok(WaitResult {
+                        ok: true,
+                        hash: None,
+                        wins: None,
+                        rgb: Some(c),
+                    });
                 }
                 std::thread::sleep(poll);
             }
         }
     }
 }
-

@@ -12,7 +12,6 @@ use xcap::Monitor;
 
 use super::Rect;
 
-
 /// Monitor info (agent-facing shape).
 #[derive(Debug, Clone, Serialize)]
 pub struct MonInfo {
@@ -35,15 +34,30 @@ pub struct MonInfo {
 #[derive(Debug, Clone, serde::Deserialize, schemars::JsonSchema)]
 #[serde(untagged)]
 pub enum CapTarget {
-    Monitor { monitor: u32 },
-    Win { win: u32 },
-    Rect { x: i32, y: i32, w: u32, h: u32 },
+    Monitor {
+        monitor: u32,
+    },
+    Win {
+        win: u32,
+    },
+    Rect {
+        x: i32,
+        y: i32,
+        w: u32,
+        h: u32,
+    },
     /// {"size": N} — cursor square by side.
-    Cursor { size: u32 },
+    Cursor {
+        size: u32,
+    },
     /// Nested rect: {"rect": {x, y, w, h}}.
-    RectNested { rect: RectArgs },
+    RectNested {
+        rect: RectArgs,
+    },
     /// {"cursor": ...} — value is an object {size:N} or a bare number.
-    CursorKey { cursor: CursorSize },
+    CursorKey {
+        cursor: CursorSize,
+    },
 }
 
 /// Value of the `cursor` key: object or bare number.
@@ -106,8 +120,15 @@ pub fn capture(target: CapTarget) -> anyhow::Result<CapResult> {
             .into_iter()
             .find(|w| w.id().unwrap_or(0) == id)
             .ok_or_else(|| anyhow::anyhow!("window {id} not found"))?;
-        let img = w.capture_image().map_err(|e| anyhow::anyhow!("capture window: {e}"))?;
-        let rect = Rect::new(w.x().unwrap_or(0), w.y().unwrap_or(0), w.width().unwrap_or(0), w.height().unwrap_or(0));
+        let img = w
+            .capture_image()
+            .map_err(|e| anyhow::anyhow!("capture window: {e}"))?;
+        let rect = Rect::new(
+            w.x().unwrap_or(0),
+            w.y().unwrap_or(0),
+            w.width().unwrap_or(0),
+            w.height().unwrap_or(0),
+        );
         return save(img, rect);
     }
     // Monitor / Rect / Cursor: resolve a rect, then monitor-crop.
@@ -116,7 +137,9 @@ pub fn capture(target: CapTarget) -> anyhow::Result<CapResult> {
     let wanted = match target {
         CapTarget::Monitor { monitor: idx } => {
             let ms = monitors()?;
-            let m = ms.get(idx as usize).ok_or_else(|| anyhow::anyhow!("monitor {idx} not found"))?;
+            let m = ms
+                .get(idx as usize)
+                .ok_or_else(|| anyhow::anyhow!("monitor {idx} not found"))?;
             Rect::new(m.x, m.y, m.w, m.h)
         }
         CapTarget::Rect { x, y, w, h } => Rect::new(x, y, w, h),
@@ -133,7 +156,9 @@ pub fn capture(target: CapTarget) -> anyhow::Result<CapResult> {
         .clamp_into(&bounds)
         .ok_or_else(|| anyhow::anyhow!("target rect entirely outside virtual screen"))?;
     let mon = monitor_for(&rect)?;
-    let img = mon.capture_image().map_err(|e| anyhow::anyhow!("capture monitor: {e}"))?;
+    let img = mon
+        .capture_image()
+        .map_err(|e| anyhow::anyhow!("capture monitor: {e}"))?;
     let mx = mon.x().unwrap_or(0);
     let my = mon.y().unwrap_or(0);
     let mw = mon.width().unwrap_or(0);
@@ -156,7 +181,10 @@ fn monitor_for(rect: &Rect) -> anyhow::Result<Monitor> {
     let cy = rect.y + rect.h as i32 / 2;
     for m in &all {
         let (x, y) = (m.x().unwrap_or(0), m.y().unwrap_or(0));
-        let (w, h) = (m.width().unwrap_or(0) as i32, m.height().unwrap_or(0) as i32);
+        let (w, h) = (
+            m.width().unwrap_or(0) as i32,
+            m.height().unwrap_or(0) as i32,
+        );
         if cx >= x && cx < x + w && cy >= y && cy < y + h {
             return Ok(m.clone());
         }
@@ -184,7 +212,11 @@ fn save(img: RgbaImage, rect: Rect) -> anyhow::Result<CapResult> {
     let dir = crate::core::paths::sub_dir(crate::core::paths::SubDir::Tmp)?;
     let path = dir.join(format!("capture-{}-{}.png", now_ms(), std::process::id()));
     img.save_with_format(&path, image::ImageFormat::Png)?;
-    Ok(CapResult { path: path.display().to_string(), hash: dhash64(&img), rect })
+    Ok(CapResult {
+        path: path.display().to_string(),
+        hash: dhash64(&img),
+        rect,
+    })
 }
 
 /// Millisecond timestamp for artifact filenames (shared with `annotate`).
@@ -200,7 +232,12 @@ pub(super) fn now_ms() -> u128 {
 pub fn dhash64(img: &RgbaImage) -> u64 {
     const W: usize = 9;
     const H: usize = 8;
-    let small = image::imageops::resize(img, W as u32, H as u32, image::imageops::FilterType::Triangle);
+    let small = image::imageops::resize(
+        img,
+        W as u32,
+        H as u32,
+        image::imageops::FilterType::Triangle,
+    );
     let luma = |x: usize, y: usize| -> u32 {
         let p = small.get_pixel(x as u32, y as u32).0;
         (p[0] as u32 * 299 + p[1] as u32 * 587 + p[2] as u32 * 114) / 1000
@@ -230,8 +267,17 @@ mod tests {
     fn dhash_stable_and_sensitive() {
         // Horizontal gradients are the canonical dhash probe:
         // increasing luma -> all bits 0, decreasing -> all bits 1.
-        let grad = RgbaImage::from_fn(64, 64, |x, _y| image::Rgba([(x * 4) as u8, (x * 4) as u8, (x * 4) as u8, 255]));
-        let inv = RgbaImage::from_fn(64, 64, |x, _y| image::Rgba([(255 - x * 4) as u8, (255 - x * 4) as u8, (255 - x * 4) as u8, 255]));
+        let grad = RgbaImage::from_fn(64, 64, |x, _y| {
+            image::Rgba([(x * 4) as u8, (x * 4) as u8, (x * 4) as u8, 255])
+        });
+        let inv = RgbaImage::from_fn(64, 64, |x, _y| {
+            image::Rgba([
+                (255 - x * 4) as u8,
+                (255 - x * 4) as u8,
+                (255 - x * 4) as u8,
+                255,
+            ])
+        });
         assert_eq!(dhash64(&grad), dhash64(&grad));
         assert_ne!(dhash64(&grad), dhash64(&inv));
     }

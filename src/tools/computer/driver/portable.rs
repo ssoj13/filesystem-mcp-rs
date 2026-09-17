@@ -63,7 +63,14 @@ pub fn to_monitor(id: u32, monitor: u32) -> anyhow::Result<WinInfo> {
         .get(monitor as usize)
         .ok_or_else(|| anyhow::anyhow!("monitor {monitor} not found (0..={})", ms.len() - 1))?;
     super::geom(id, None, None, None, None, Some("restore"))?;
-    super::geom(id, Some(m.x), Some(m.y), Some(m.w as i32), Some(m.h as i32), None)
+    super::geom(
+        id,
+        Some(m.x),
+        Some(m.y),
+        Some(m.w as i32),
+        Some(m.h as i32),
+        None,
+    )
 }
 
 /// Snapshot every visible top-level window into `<state>/layouts/<name>.json`.
@@ -71,7 +78,15 @@ pub fn layout_save(name: &str) -> anyhow::Result<Vec<LayoutEntry>> {
     let entries: Vec<LayoutEntry> = super::list_windows(None)?
         .into_iter()
         .filter(|w| w.w > 0 && w.h > 0)
-        .map(|w| LayoutEntry { id: w.id, title: w.title, exe: w.exe, x: w.x, y: w.y, w: w.w, h: w.h })
+        .map(|w| LayoutEntry {
+            id: w.id,
+            title: w.title,
+            exe: w.exe,
+            x: w.x,
+            y: w.y,
+            w: w.w,
+            h: w.h,
+        })
         .collect();
     std::fs::write(layout_path(name)?, serde_json::to_string_pretty(&entries)?)?;
     Ok(entries)
@@ -149,7 +164,13 @@ mod tests {
     fn resolves_unique_id_and_title() {
         assert_eq!(resolve_in(&scene(), &WinTarget::Id { id: 2 }).unwrap(), 2);
         assert_eq!(
-            resolve_in(&scene(), &WinTarget::Title { title: "cargo".into() }).unwrap(),
+            resolve_in(
+                &scene(),
+                &WinTarget::Title {
+                    title: "cargo".into()
+                }
+            )
+            .unwrap(),
             2,
             "title match is case-insensitive"
         );
@@ -157,16 +178,34 @@ mod tests {
 
     #[test]
     fn ambiguity_is_an_error_naming_the_candidates() {
-        let e = resolve_in(&scene(), &WinTarget::Exe { exe: "notepad".into() }).unwrap_err();
+        let e = resolve_in(
+            &scene(),
+            &WinTarget::Exe {
+                exe: "notepad".into(),
+            },
+        )
+        .unwrap_err();
         let msg = e.to_string();
-        assert!(msg.contains('2') || msg.contains("2 windows"), "reports the count: {msg}");
+        assert!(
+            msg.contains('2') || msg.contains("2 windows"),
+            "reports the count: {msg}"
+        );
         assert!(msg.contains("Notepad"), "names candidates: {msg}");
     }
 
     #[test]
     fn no_match_is_an_error_not_an_empty_ok() {
-        let e = resolve_in(&scene(), &WinTarget::Title { title: "nothing".into() }).unwrap_err();
-        assert!(matches!(e.downcast_ref::<CtlError>(), Some(CtlError::NoMatch { .. })));
+        let e = resolve_in(
+            &scene(),
+            &WinTarget::Title {
+                title: "nothing".into(),
+            },
+        )
+        .unwrap_err();
+        assert!(matches!(
+            e.downcast_ref::<CtlError>(),
+            Some(CtlError::NoMatch { .. })
+        ));
     }
 
     #[test]
@@ -176,6 +215,9 @@ mod tests {
         // Traversal characters are filtered out, not rejected late.
         let p = layout_path("../../etc/passwd").unwrap();
         assert!(p.ends_with("etcpasswd.json"), "got {p:?}");
-        assert!(layout_path("///").is_err(), "empty after sanitizing must fail loudly");
+        assert!(
+            layout_path("///").is_err(),
+            "empty after sanitizing must fail loudly"
+        );
     }
 }

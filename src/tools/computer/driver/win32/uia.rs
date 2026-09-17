@@ -17,11 +17,11 @@
 
 use serde::Serialize;
 use uiautomation::types::Handle;
-use uiautomation::{UIAutomation, UIMatcher, UIElement};
+use uiautomation::{UIAutomation, UIElement, UIMatcher};
 
 use super::input;
-use crate::tools::computer::safety::SafetyGate;
 use super::win::WinTarget;
+use crate::tools::computer::safety::SafetyGate;
 
 /// One UI element (agent-facing shape).
 #[derive(Debug, Clone, Serialize)]
@@ -65,7 +65,11 @@ fn target_hwnd(win_target: Option<WinTarget>) -> anyhow::Result<windows::Win32::
 }
 
 /// Matcher rooted at a window, depth-limited, no retry-wait (instant misses).
-fn matcher(automation: UIAutomation, hwnd: windows::Win32::Foundation::HWND, depth: u32) -> anyhow::Result<UIMatcher> {
+fn matcher(
+    automation: UIAutomation,
+    hwnd: windows::Win32::Foundation::HWND,
+    depth: u32,
+) -> anyhow::Result<UIMatcher> {
     let root = automation
         .element_from_handle(Handle::from(hwnd))
         .map_err(|e| anyhow::anyhow!("root element: {e}"))?;
@@ -155,13 +159,17 @@ fn patterns_of(el: &UIElement) -> Vec<String> {
 
 /// ToggleState of a Toggle-pattern element, if it has one.
 fn toggle_state_of(el: &UIElement) -> Option<String> {
-    let toggle = el.get_pattern::<uiautomation::patterns::UITogglePattern>().ok()?;
+    let toggle = el
+        .get_pattern::<uiautomation::patterns::UITogglePattern>()
+        .ok()?;
     Some(format!("{:?}", toggle.get_toggle_state().ok()?))
 }
 
 /// Current value of a Value-pattern element (empty when none).
 fn value_of(el: &UIElement) -> Option<String> {
-    let v = el.get_pattern::<uiautomation::patterns::UIValuePattern>().ok()?;
+    let v = el
+        .get_pattern::<uiautomation::patterns::UIValuePattern>()
+        .ok()?;
     v.get_value().ok()
 }
 
@@ -194,39 +202,67 @@ pub fn click(
         let _ = scroll.scroll_into_view();
     }
     if let Ok(invoke) = el.get_pattern::<UIInvokePattern>() {
-        invoke.invoke().map_err(|e| anyhow::anyhow!("invoke: {e}"))?;
-        gate.record("ui_click", serde_json::json!({ "via": "invoke", "name": name, "idx": idx }))?;
+        invoke
+            .invoke()
+            .map_err(|e| anyhow::anyhow!("invoke: {e}"))?;
+        gate.record(
+            "ui_click",
+            serde_json::json!({ "via": "invoke", "name": name, "idx": idx }),
+        )?;
         return Ok(serde_json::json!({ "via": "invoke", "focus": input::focus() }));
     }
     if let Ok(toggle) = el.get_pattern::<UITogglePattern>() {
-        toggle.toggle().map_err(|e| anyhow::anyhow!("toggle: {e}"))?;
-        gate.record("ui_click", serde_json::json!({ "via": "toggle", "name": name, "idx": idx }))?;
+        toggle
+            .toggle()
+            .map_err(|e| anyhow::anyhow!("toggle: {e}"))?;
+        gate.record(
+            "ui_click",
+            serde_json::json!({ "via": "toggle", "name": name, "idx": idx }),
+        )?;
         return Ok(serde_json::json!({ "via": "toggle", "focus": input::focus() }));
     }
     if let Ok(expand) = el.get_pattern::<UIExpandCollapsePattern>() {
-        expand.expand().map_err(|e| anyhow::anyhow!("expand: {e}"))?;
-        gate.record("ui_click", serde_json::json!({ "via": "expand", "name": name, "idx": idx }))?;
+        expand
+            .expand()
+            .map_err(|e| anyhow::anyhow!("expand: {e}"))?;
+        gate.record(
+            "ui_click",
+            serde_json::json!({ "via": "expand", "name": name, "idx": idx }),
+        )?;
         return Ok(serde_json::json!({ "via": "expand", "focus": input::focus() }));
     }
     if let Ok(sel) = el.get_pattern::<UISelectionItemPattern>() {
         sel.select().map_err(|e| anyhow::anyhow!("select: {e}"))?;
-        gate.record("ui_click", serde_json::json!({ "via": "select", "name": name, "idx": idx }))?;
+        gate.record(
+            "ui_click",
+            serde_json::json!({ "via": "select", "name": name, "idx": idx }),
+        )?;
         return Ok(serde_json::json!({ "via": "select", "focus": input::focus() }));
     }
     // Last resort: synthesized click at the element center (armed input).
     let (x, y, w, h) = rect_of(el);
     if w == 0 || h == 0 {
-        return Err(anyhow::anyhow!("element {name:?} has an empty rect and no usable pattern"));
+        return Err(anyhow::anyhow!(
+            "element {name:?} has an empty rect and no usable pattern"
+        ));
     }
     let (cx, cy) = (x + w / 2, y + h / 2);
     let focus = input::click(gate, Some(cx), Some(cy), input::Btn::Left, 1, &[])?;
-    gate.record("ui_click", serde_json::json!({ "via": "click", "name": name, "idx": idx, "pos": [cx, cy] }))?;
+    gate.record(
+        "ui_click",
+        serde_json::json!({ "via": "click", "name": name, "idx": idx, "pos": [cx, cy] }),
+    )?;
     Ok(serde_json::json!({ "via": "click", "pos": [cx, cy], "focus": focus }))
 }
 
 /// Find by name OR automation id (exact match on auto_id preferred — it's
 /// the stable handle; falls back to CI-substring name match).
-fn find_el(automation: UIAutomation, hwnd: windows::Win32::Foundation::HWND, name: &str, depth: u32) -> anyhow::Result<Vec<UIElement>> {
+fn find_el(
+    automation: UIAutomation,
+    hwnd: windows::Win32::Foundation::HWND,
+    name: &str,
+    depth: u32,
+) -> anyhow::Result<Vec<UIElement>> {
     let elements = matcher(automation, hwnd, depth)?
         .find_all()
         .map_err(|e| anyhow::anyhow!("find_all: {e}"))?;
@@ -242,7 +278,12 @@ fn find_el(automation: UIAutomation, hwnd: windows::Win32::Foundation::HWND, nam
     let needle = name.to_lowercase();
     Ok(elements
         .into_iter()
-        .filter(|el| el.get_name().unwrap_or_default().to_lowercase().contains(&needle))
+        .filter(|el| {
+            el.get_name()
+                .unwrap_or_default()
+                .to_lowercase()
+                .contains(&needle)
+        })
         .collect())
 }
 

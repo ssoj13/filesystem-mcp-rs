@@ -74,7 +74,10 @@ mod tests {
     #[test]
     fn finds_simple_ident() {
         let s = format!("& {}git clone", d());
-        assert_eq!(first_dollar_token(&s).as_deref(), Some(&format!("{}git", d())[..]));
+        assert_eq!(
+            first_dollar_token(&s).as_deref(),
+            Some(&format!("{}git", d())[..])
+        );
     }
 
     #[test]

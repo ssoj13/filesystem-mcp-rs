@@ -5,8 +5,8 @@
 //! {text, rects} only. Missing language packs = explicit error, never a silent
 //! fallback.
 
-use image::RgbaImage;
 use image::ImageEncoder as _;
+use image::RgbaImage;
 
 // The result shape is engine-independent and lives in the computer module, so
 // `ocr` (WinRT, here) and `ocrs_local` (portable) return the very same type.
@@ -14,8 +14,8 @@ use crate::tools::computer::{OcrMatch, OcrOut};
 
 /// Recognize `img` (RGBA). `find` (case-insensitive) switches on bbox-matching.
 pub fn recognize(img: &RgbaImage, find: Option<&str>) -> anyhow::Result<OcrOut> {
-    let engine = windows::Media::Ocr::OcrEngine::TryCreateFromUserProfileLanguages()
-        .map_err(|e| {
+    let engine =
+        windows::Media::Ocr::OcrEngine::TryCreateFromUserProfileLanguages().map_err(|e| {
             anyhow::anyhow!(
                 "no OCR language pack usable ({e}); add one: Settings > Time & Language > Language"
             )
@@ -26,7 +26,8 @@ pub fn recognize(img: &RgbaImage, find: Option<&str>) -> anyhow::Result<OcrOut> 
             .RecognizeAsync(&bitmap)
             .map_err(|e| anyhow::anyhow!("RecognizeAsync: {e}"))?;
         // IAsyncOperation implements IntoFuture (not Future) — convert first.
-        futures::executor::block_on(op.into_future()).map_err(|e| anyhow::anyhow!("recognize: {e}"))?
+        futures::executor::block_on(op.into_future())
+            .map_err(|e| anyhow::anyhow!("recognize: {e}"))?
     };
 
     let mut text = String::new();
@@ -38,11 +39,15 @@ pub fn recognize(img: &RgbaImage, find: Option<&str>) -> anyhow::Result<OcrOut> 
             .to_string_lossy();
         let mut rect = None::<(f32, f32, f32, f32)>;
         for word in line.Words().map_err(|e| anyhow::anyhow!("Words: {e}"))? {
-            let r = word.BoundingRect().map_err(|e| anyhow::anyhow!("BoundingRect: {e}"))?;
+            let r = word
+                .BoundingRect()
+                .map_err(|e| anyhow::anyhow!("BoundingRect: {e}"))?;
             let cell = (r.X, r.Y, r.X + r.Width, r.Y + r.Height);
             rect = Some(match rect {
                 None => cell,
-                Some((l, t, rt, b)) => (l.min(cell.0), t.min(cell.1), rt.max(cell.2), b.max(cell.3)),
+                Some((l, t, rt, b)) => {
+                    (l.min(cell.0), t.min(cell.1), rt.max(cell.2), b.max(cell.3))
+                }
             });
         }
         if !text.is_empty() {
@@ -67,16 +72,22 @@ pub fn recognize(img: &RgbaImage, find: Option<&str>) -> anyhow::Result<OcrOut> 
             lines
                 .iter()
                 .filter(|l| l.text.to_lowercase().contains(&n))
-            .cloned()
+                .cloned()
                 .collect()
         }
     };
-    Ok(OcrOut { text, lines, matches })
+    Ok(OcrOut {
+        text,
+        lines,
+        matches,
+    })
 }
 
 /// RGBA image -> WinRT SoftwareBitmap via in-memory PNG + BitmapDecoder
 /// (decoder handles pixel-format/alpha conversion for us).
-fn to_software_bitmap(img: &RgbaImage) -> anyhow::Result<windows::Graphics::Imaging::SoftwareBitmap> {
+fn to_software_bitmap(
+    img: &RgbaImage,
+) -> anyhow::Result<windows::Graphics::Imaging::SoftwareBitmap> {
     use windows::Graphics::Imaging::BitmapDecoder;
     use windows::Storage::Streams::{DataWriter, InMemoryRandomAccessStream};
 
@@ -92,20 +103,28 @@ fn to_software_bitmap(img: &RgbaImage) -> anyhow::Result<windows::Graphics::Imag
     // futures::executor::block_on (we run on the blocking pool, no reactor).
     // Encoder -> stream -> decoder path lets WinRT own pixel-format conversion.
     let stream = InMemoryRandomAccessStream::new().map_err(|e| anyhow::anyhow!("stream: {e}"))?;
-    let writer = DataWriter::CreateDataWriter(&stream).map_err(|e| anyhow::anyhow!("DataWriter: {e}"))?;
+    let writer =
+        DataWriter::CreateDataWriter(&stream).map_err(|e| anyhow::anyhow!("DataWriter: {e}"))?;
     writer
         .WriteBytes(&png)
         .map_err(|e| anyhow::anyhow!("WriteBytes: {e}"))?;
-    let op = writer.StoreAsync().map_err(|e| anyhow::anyhow!("StoreAsync: {e}"))?;
+    let op = writer
+        .StoreAsync()
+        .map_err(|e| anyhow::anyhow!("StoreAsync: {e}"))?;
     futures::executor::block_on(op.into_future()).map_err(|e| anyhow::anyhow!("store: {e}"))?;
-    let op = writer.FlushAsync().map_err(|e| anyhow::anyhow!("FlushAsync: {e}"))?;
+    let op = writer
+        .FlushAsync()
+        .map_err(|e| anyhow::anyhow!("FlushAsync: {e}"))?;
     futures::executor::block_on(op.into_future()).map_err(|e| anyhow::anyhow!("flush: {e}"))?;
 
-    let op = BitmapDecoder::CreateAsync(&stream).map_err(|e| anyhow::anyhow!("BitmapDecoder: {e}"))?;
-    let decoder = futures::executor::block_on(op.into_future()).map_err(|e| anyhow::anyhow!("decode: {e}"))?;
+    let op =
+        BitmapDecoder::CreateAsync(&stream).map_err(|e| anyhow::anyhow!("BitmapDecoder: {e}"))?;
+    let decoder = futures::executor::block_on(op.into_future())
+        .map_err(|e| anyhow::anyhow!("decode: {e}"))?;
     let op = decoder
         .GetSoftwareBitmapAsync()
         .map_err(|e| anyhow::anyhow!("GetSoftwareBitmapAsync: {e}"))?;
-    let bitmap = futures::executor::block_on(op.into_future()).map_err(|e| anyhow::anyhow!("bitmap: {e}"))?;
+    let bitmap = futures::executor::block_on(op.into_future())
+        .map_err(|e| anyhow::anyhow!("bitmap: {e}"))?;
     Ok(bitmap)
 }

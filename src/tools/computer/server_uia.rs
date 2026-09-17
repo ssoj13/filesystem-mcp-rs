@@ -4,11 +4,8 @@
 //! arm gate, so the gate field exists when ctl-uia is on even without ctl-input.
 
 use rmcp::{
-    ErrorData as McpError,
-    handler::server::wrapper::Parameters,
-    model::{CallToolResult},
-    serde::Deserialize,
-    tool, tool_router,
+    ErrorData as McpError, handler::server::wrapper::Parameters, model::CallToolResult,
+    serde::Deserialize, tool, tool_router,
 };
 use schemars::JsonSchema;
 use serde_json::json;
@@ -27,10 +24,20 @@ impl FileSystemServer {
     )]
     async fn ctl_ui(
         &self,
-        Parameters(UiArgs { target, query, depth, max }): Parameters<UiArgs>,
+        Parameters(UiArgs {
+            target,
+            query,
+            depth,
+            max,
+        }): Parameters<UiArgs>,
     ) -> Result<CallToolResult, McpError> {
         let elems = tokio::task::spawn_blocking(move || {
-            uia::tree(target, query, depth.unwrap_or(6), max.unwrap_or(50).min(200) as usize)
+            uia::tree(
+                target,
+                query,
+                depth.unwrap_or(6),
+                max.unwrap_or(50).min(200) as usize,
+            )
         })
         .await
         .map_err(|e| McpError::internal_error(e.to_string(), None))?
@@ -49,12 +56,11 @@ impl FileSystemServer {
         Parameters(UiClickArgs { target, name, idx }): Parameters<UiClickArgs>,
     ) -> Result<CallToolResult, McpError> {
         let gate = super::safety::gate();
-        let res = tokio::task::spawn_blocking(move || {
-            uia::click(&gate, target, &name, idx.unwrap_or(0))
-        })
-        .await
-        .map_err(|e| McpError::internal_error(e.to_string(), None))?
-        .map_err(super::ctl_err)?;
+        let res =
+            tokio::task::spawn_blocking(move || uia::click(&gate, target, &name, idx.unwrap_or(0)))
+                .await
+                .map_err(|e| McpError::internal_error(e.to_string(), None))?
+                .map_err(super::ctl_err)?;
         ok_json(res)
     }
 
@@ -82,12 +88,19 @@ impl FileSystemServer {
     )]
     async fn ctl_ui_set(
         &self,
-        Parameters(UiSetArgs { target, name, idx, value }): Parameters<UiSetArgs>,
+        Parameters(UiSetArgs {
+            target,
+            name,
+            idx,
+            value,
+        }): Parameters<UiSetArgs>,
     ) -> Result<CallToolResult, McpError> {
-        tokio::task::spawn_blocking(move || uia::set_value(Some(target), &name, idx.unwrap_or(0), &value))
-            .await
-            .map_err(|e| McpError::internal_error(e.to_string(), None))?
-            .map_err(super::ctl_err)?;
+        tokio::task::spawn_blocking(move || {
+            uia::set_value(Some(target), &name, idx.unwrap_or(0), &value)
+        })
+        .await
+        .map_err(|e| McpError::internal_error(e.to_string(), None))?
+        .map_err(super::ctl_err)?;
         ok_json(json!({}))
     }
 }

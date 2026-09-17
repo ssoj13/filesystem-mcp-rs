@@ -142,7 +142,10 @@ mod tests {
         ("src/core/paths.rs", &["computer-mcp-rs"]),
         // Same: documents that the layouts left in the old directory are NOT migrated, which the
         // reader cannot act on unless the directory is named.
-        ("src/tools/computer/driver/portable.rs", &["computer-mcp-rs"]),
+        (
+            "src/tools/computer/driver/portable.rs",
+            &["computer-mcp-rs"],
+        ),
         // These name OTHER applications' config locations (Claude, Cursor, ...), not this
         // server's state - the whole point of those two functions. Known, bounded cost: an
         // exemption clears the whole line, so a doc about OUR state written in this file and
@@ -190,7 +193,8 @@ mod tests {
     #[test]
     fn md_denylist_catches_a_stale_readme_row() {
         // `FS_MCP_MEMORY_DB`'s row as it read before this wave corrected it.
-        let stale = "| `FS_MCP_MEMORY_DB` | *(unset)* | Memory database path. Unset = system data dir |";
+        let stale =
+            "| `FS_MCP_MEMORY_DB` | *(unset)* | Memory database path. Unset = system data dir |";
         assert!(md_offence(stale, &[]), "the denylist must catch: {stale}");
         // Prose, not only table rows: markdown has no `///` marker to key on.
         assert!(md_offence(
@@ -309,8 +313,14 @@ mod tests {
         let stale = "/// SQLite file for the memory tools. Blank = <local data>/memory2.db.";
         assert!(doc_offence(stale, &[]), "the denylist must catch: {stale}");
         // The `--log` shape, which goes stale the moment wave 2 wires `SubDir::Logs`.
-        assert!(doc_offence("    /// Log file. Blank = the system data dir.", &[]));
-        assert!(doc_offence("/// Cache dir: <data>/computer-mcp-rs/ocrs.", &[]));
+        assert!(doc_offence(
+            "    /// Log file. Blank = the system data dir.",
+            &[]
+        ));
+        assert!(doc_offence(
+            "/// Cache dir: <data>/computer-mcp-rs/ocrs.",
+            &[]
+        ));
         assert!(doc_offence("/// Client config under %LOCALAPPDATA%.", &[]));
 
         // Correctly anchored prose is not an offence.
@@ -319,7 +329,10 @@ mod tests {
             &[]
         ));
         // Only `///` lines are scanned: `//!` narrates history, and code is the other list's job.
-        assert!(!doc_offence("//! The pre-2026-09 root was <local data>/x.", &[]));
+        assert!(!doc_offence(
+            "//! The pre-2026-09 root was <local data>/x.",
+            &[]
+        ));
         assert!(!doc_offence("    let legacy = \"computer-mcp-rs\";", &[]));
         // An exemption clears the spelling it names, and only that one.
         assert!(!doc_offence(stale, &["<local data>"]));

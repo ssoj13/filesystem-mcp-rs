@@ -36,7 +36,9 @@ mod null;
 pub use portable::{layout_load, layout_save, resolve_target, to_monitor};
 
 /// Modifier keys, platform-neutral (wire + macro steps use these names).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize, schemars::JsonSchema)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize, schemars::JsonSchema,
+)]
 #[serde(rename_all = "lowercase")]
 pub enum KeyMod {
     Ctrl,
@@ -57,13 +59,17 @@ pub fn parse_keymods(mods: Option<&[String]>) -> anyhow::Result<Vec<KeyMod>> {
             "alt" => Ok(KeyMod::Alt),
             "shift" => Ok(KeyMod::Shift),
             "win" | "meta" => Ok(KeyMod::Win),
-            other => Err(anyhow::anyhow!("unknown modifier {other:?} (ctrl|alt|shift|win)")),
+            other => Err(anyhow::anyhow!(
+                "unknown modifier {other:?} (ctrl|alt|shift|win)"
+            )),
         })
         .collect()
 }
 
 /// Mouse button.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize, schemars::JsonSchema)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize, schemars::JsonSchema,
+)]
 #[serde(rename_all = "lowercase")]
 pub enum Btn {
     Left,
@@ -72,7 +78,9 @@ pub enum Btn {
 }
 
 /// Drag trajectory easing.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize, schemars::JsonSchema)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize, schemars::JsonSchema,
+)]
 #[serde(rename_all = "lowercase")]
 pub enum Ease {
     Linear,
@@ -361,19 +369,27 @@ pub fn caps() -> Caps {
 // and turns an absent one into a loud, specific error.
 
 fn input() -> anyhow::Result<&'static dyn InputDrv> {
-    backend().input().ok_or_else(|| unsupported("input injection"))
+    backend()
+        .input()
+        .ok_or_else(|| unsupported("input injection"))
 }
 
 fn win() -> anyhow::Result<&'static dyn WinDrv> {
-    backend().win().ok_or_else(|| unsupported("window management"))
+    backend()
+        .win()
+        .ok_or_else(|| unsupported("window management"))
 }
 
 fn screen() -> anyhow::Result<&'static dyn ScreenDrv> {
-    backend().screen().ok_or_else(|| unsupported("screen geometry"))
+    backend()
+        .screen()
+        .ok_or_else(|| unsupported("screen geometry"))
 }
 
 fn clip() -> anyhow::Result<&'static dyn ClipDrv> {
-    backend().clip().ok_or_else(|| unsupported("clipboard file lists"))
+    backend()
+        .clip()
+        .ok_or_else(|| unsupported("clipboard file lists"))
 }
 
 pub fn move_cursor(x: i32, y: i32) -> anyhow::Result<FocusInfo> {

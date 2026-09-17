@@ -88,7 +88,11 @@ pub fn draw(
         if let Some(label) = &s.label {
             let th = 8 * scale as i32;
             // Above the shape when it fits, otherwise just below it.
-            let ty = if by - th - 3 >= 0 { by - th - 3 } else { by + bh + 3 };
+            let ty = if by - th - 3 >= 0 {
+                by - th - 3
+            } else {
+                by + bh + 3
+            };
             text(img, bx, ty, label, scale, c);
         }
     }
@@ -101,7 +105,11 @@ pub fn draw(
 /// error the caller reports, never a silent fall back to the OS temp directory.
 pub fn out_path() -> anyhow::Result<std::path::PathBuf> {
     let dir = crate::core::paths::sub_dir(crate::core::paths::SubDir::Tmp)?;
-    Ok(dir.join(format!("annot-{}-{}.png", super::capture::now_ms(), std::process::id())))
+    Ok(dir.join(format!(
+        "annot-{}-{}.png",
+        super::capture::now_ms(),
+        std::process::id()
+    )))
 }
 
 /// Color name or `#rrggbb` -> RGB. Unknown input is an error: a silently
@@ -172,9 +180,19 @@ fn marker(img: &mut RgbaImage, x: i32, y: i32, c: Rgba<u8>) {
 /// screenshot content, so they need their own contrast).
 fn text(img: &mut RgbaImage, x: i32, y: i32, s: &str, scale: u32, fg: Rgba<u8>) {
     let sc = scale as i32;
-    let cells: Vec<usize> = s.chars().map(|ch| if (ch as u32) < 128 { ch as usize } else { 0x7f }).collect();
+    let cells: Vec<usize> = s
+        .chars()
+        .map(|ch| if (ch as u32) < 128 { ch as usize } else { 0x7f })
+        .collect();
     let bg = Rgba([16, 16, 16, 255]);
-    fill(img, x - 1, y - 1, cells.len() as i32 * 8 * sc + 2, 8 * sc + 2, bg);
+    fill(
+        img,
+        x - 1,
+        y - 1,
+        cells.len() as i32 * 8 * sc + 2,
+        8 * sc + 2,
+        bg,
+    );
     for (i, &cell) in cells.iter().enumerate() {
         let glyph = font8x8::legacy::BASIC_LEGACY[cell];
         for (row, bits) in glyph.iter().enumerate() {
@@ -210,17 +228,35 @@ mod tests {
     #[test]
     fn rect_paints_its_border_not_its_interior() {
         let mut img = canvas();
-        let shapes = [Shape { x: 20, y: 20, w: Some(40), h: Some(30), label: None, color: Some("red".into()) }];
+        let shapes = [Shape {
+            x: 20,
+            y: 20,
+            w: Some(40),
+            h: Some(30),
+            label: None,
+            color: Some("red".into()),
+        }];
         assert!(draw(&mut img, (0, 0), &shapes, 2).unwrap().is_empty());
         assert_eq!(img.get_pixel(20, 20).0, [255, 48, 48, 255], "corner");
-        assert_eq!(img.get_pixel(40, 35).0, [0, 0, 0, 255], "interior stays untouched");
+        assert_eq!(
+            img.get_pixel(40, 35).0,
+            [0, 0, 0, 255],
+            "interior stays untouched"
+        );
     }
 
     #[test]
     fn origin_shifts_screen_coords_into_image_space() {
         let mut img = canvas();
         // Screen rect at (1020,520) inside a crop whose origin is (1000,500).
-        let shapes = [Shape { x: 1020, y: 520, w: Some(10), h: Some(10), label: None, color: Some("lime".into()) }];
+        let shapes = [Shape {
+            x: 1020,
+            y: 520,
+            w: Some(10),
+            h: Some(10),
+            label: None,
+            color: Some("lime".into()),
+        }];
         draw(&mut img, (1000, 500), &shapes, 1).unwrap();
         assert_eq!(img.get_pixel(20, 20).0, [48, 255, 80, 255]);
     }
@@ -229,8 +265,22 @@ mod tests {
     fn shapes_outside_the_image_are_reported_not_dropped_silently() {
         let mut img = canvas();
         let shapes = [
-            Shape { x: 10, y: 10, w: Some(5), h: Some(5), label: None, color: None },
-            Shape { x: 900, y: 900, w: Some(5), h: Some(5), label: None, color: None },
+            Shape {
+                x: 10,
+                y: 10,
+                w: Some(5),
+                h: Some(5),
+                label: None,
+                color: None,
+            },
+            Shape {
+                x: 900,
+                y: 900,
+                w: Some(5),
+                h: Some(5),
+                label: None,
+                color: None,
+            },
         ];
         assert_eq!(draw(&mut img, (0, 0), &shapes, 1).unwrap(), vec![1]);
     }
@@ -238,18 +288,47 @@ mod tests {
     #[test]
     fn marker_leaves_the_target_pixel_readable() {
         let mut img = canvas();
-        let shapes = [Shape { x: 100, y: 50, w: None, h: None, label: None, color: Some("cyan".into()) }];
+        let shapes = [Shape {
+            x: 100,
+            y: 50,
+            w: None,
+            h: None,
+            label: None,
+            color: Some("cyan".into()),
+        }];
         draw(&mut img, (0, 0), &shapes, 1).unwrap();
-        assert_eq!(img.get_pixel(100, 50).0, [0, 0, 0, 255], "center left clear");
-        assert_eq!(img.get_pixel(100 + ARM as u32, 50).0, [48, 255, 255, 255], "arm tip drawn");
+        assert_eq!(
+            img.get_pixel(100, 50).0,
+            [0, 0, 0, 255],
+            "center left clear"
+        );
+        assert_eq!(
+            img.get_pixel(100 + ARM as u32, 50).0,
+            [48, 255, 255, 255],
+            "arm tip drawn"
+        );
     }
 
     #[test]
     fn label_renders_glyph_pixels() {
         let mut plain = canvas();
         let mut labeled = canvas();
-        let bare = [Shape { x: 40, y: 40, w: Some(20), h: Some(20), label: None, color: Some("white".into()) }];
-        let named = [Shape { x: 40, y: 40, w: Some(20), h: Some(20), label: Some("OK 7".into()), color: Some("white".into()) }];
+        let bare = [Shape {
+            x: 40,
+            y: 40,
+            w: Some(20),
+            h: Some(20),
+            label: None,
+            color: Some("white".into()),
+        }];
+        let named = [Shape {
+            x: 40,
+            y: 40,
+            w: Some(20),
+            h: Some(20),
+            label: Some("OK 7".into()),
+            color: Some("white".into()),
+        }];
         draw(&mut plain, (0, 0), &bare, 2).unwrap();
         draw(&mut labeled, (0, 0), &named, 2).unwrap();
         assert!(lit(&labeled) > lit(&plain), "label must add lit pixels");
@@ -258,7 +337,14 @@ mod tests {
     #[test]
     fn unknown_color_is_an_error() {
         let mut img = canvas();
-        let shapes = [Shape { x: 1, y: 1, w: Some(2), h: Some(2), label: None, color: Some("burgundy".into()) }];
+        let shapes = [Shape {
+            x: 1,
+            y: 1,
+            w: Some(2),
+            h: Some(2),
+            label: None,
+            color: Some("burgundy".into()),
+        }];
         assert!(draw(&mut img, (0, 0), &shapes, 1).is_err());
     }
 

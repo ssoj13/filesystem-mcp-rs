@@ -14,8 +14,8 @@
 use std::time::Duration;
 
 use super::capture::{self, CapTarget, hash_dist};
-use super::safety::SafetyGate;
 use super::driver::{self, WinQuery};
+use super::safety::SafetyGate;
 
 /// Full acceptance loop: focus → type → hash-change → OCR. #[ignore]d by
 /// default (needs a human-visible desktop, no CI).
@@ -34,8 +34,14 @@ fn canary_run() -> anyhow::Result<()> {
     gate.arm(Duration::from_secs(60));
 
     // 1. Snapshot existing Notepad windows; ours is the diff.
-    let q = WinQuery { exe: Some("notepad".into()), title: None };
-    let before: Vec<u32> = driver::list_windows(Some(q.clone()))?.iter().map(|w| w.id).collect();
+    let q = WinQuery {
+        exe: Some("notepad".into()),
+        title: None,
+    };
+    let before: Vec<u32> = driver::list_windows(Some(q.clone()))?
+        .iter()
+        .map(|w| w.id)
+        .collect();
 
     // 2. Spawn Notepad; pid kept for cleanup.
     let child = std::process::Command::new("notepad.exe")
@@ -74,7 +80,12 @@ fn canary_run() -> anyhow::Result<()> {
 
     // 5. Baseline capture of the edit-area strip (top-left client area).
     let strip = super::Rect::new(active.x + 20, active.y + 90, 400, 120);
-    let base = capture::capture(CapTarget::Rect { x: strip.x, y: strip.y, w: 400, h: 120 })?;
+    let base = capture::capture(CapTarget::Rect {
+        x: strip.x,
+        y: strip.y,
+        w: 400,
+        h: 120,
+    })?;
     println!("baseline hash={:016x}", base.hash);
 
     // 6. Type ASCII + unicode synthetically (KEYEVENTF_UNICODE, paste=false).
@@ -83,7 +94,12 @@ fn canary_run() -> anyhow::Result<()> {
     std::thread::sleep(Duration::from_millis(300));
 
     // 7. The same strip must now hash-differ.
-    let after = capture::capture(CapTarget::Rect { x: strip.x, y: strip.y, w: 400, h: 120 })?;
+    let after = capture::capture(CapTarget::Rect {
+        x: strip.x,
+        y: strip.y,
+        w: 400,
+        h: 120,
+    })?;
     let dist = hash_dist(base.hash, after.hash);
     println!("after hash={:016x} dist={}", after.hash, dist);
 
@@ -148,8 +164,14 @@ fn juggle_run() -> anyhow::Result<()> {
     let mut cb = arboard::Clipboard::new()?;
     cb.set_text(marker.to_string())?;
     // 2. Paste-type into our Notepad (this MUST temporarily take the clipboard).
-    let q = WinQuery { exe: Some("notepad".into()), title: None };
-    let before: Vec<u32> = driver::list_windows(Some(q.clone()))?.iter().map(|w| w.id).collect();
+    let q = WinQuery {
+        exe: Some("notepad".into()),
+        title: None,
+    };
+    let before: Vec<u32> = driver::list_windows(Some(q.clone()))?
+        .iter()
+        .map(|w| w.id)
+        .collect();
     let pid = std::process::Command::new("notepad.exe").spawn()?.id();
     let mut id = 0u32;
     for _ in 0..50 {
@@ -165,7 +187,11 @@ fn juggle_run() -> anyhow::Result<()> {
     driver::focus_window(id)?;
     let r = driver::type_text(&gate, marker, true, 0, Some(id))?;
     println!("paste mode={} restored={:?}", r.mode, r.clipboard_restored);
-    assert_eq!(r.clipboard_restored, Some(true), "clipboard must be restored");
+    assert_eq!(
+        r.clipboard_restored,
+        Some(true),
+        "clipboard must be restored"
+    );
     // 3. The marker must be back.
     let mut cb = arboard::Clipboard::new()?;
     let now = cb.get_text()?;
@@ -191,7 +217,13 @@ fn kill(pid: u32) {
 #[ignore = "interactive; downloads ~12 MB of models on first run"]
 fn ocrs_smoke() {
     super::ensure_dpi_aware().unwrap();
-    let cap = super::capture::capture(CapTarget::Rect { x: 100, y: 100, w: 400, h: 200 }).unwrap();
+    let cap = super::capture::capture(CapTarget::Rect {
+        x: 100,
+        y: 100,
+        w: 400,
+        h: 200,
+    })
+    .unwrap();
     let img = image::open(&cap.path).unwrap().to_rgba8();
     let out = super::ocrs_local::recognize(&img, None).unwrap();
     println!("ocrs text ({} lines): {}", out.lines.len(), out.text);
@@ -228,7 +260,10 @@ fn matrix_run() -> anyhow::Result<()> {
     super::ensure_dpi_aware()?;
     let gate = SafetyGate::with_audit(600, None);
     gate.arm(Duration::from_secs(120));
-    let q = WinQuery { exe: Some("notepad".into()), title: None };
+    let q = WinQuery {
+        exe: Some("notepad".into()),
+        title: None,
+    };
     let text = "canary 123";
     println!("typed text: {text:?}  (read-back = window title)");
     println!("{:<12} {:>5} {:>6}  result", "mode", "ms", "exact");
@@ -239,7 +274,10 @@ fn matrix_run() -> anyhow::Result<()> {
         kill_all_notepads();
         clear_notepad_session();
         // Fresh instance per scenario; own pid for cleanup.
-        let before: Vec<u32> = driver::list_windows(Some(q.clone()))?.iter().map(|w| w.id).collect();
+        let before: Vec<u32> = driver::list_windows(Some(q.clone()))?
+            .iter()
+            .map(|w| w.id)
+            .collect();
         let pid = std::process::Command::new("notepad.exe").spawn()?.id();
         let mut id = 0u32;
         for _ in 0..50 {
@@ -260,9 +298,9 @@ fn matrix_run() -> anyhow::Result<()> {
         // Focus + verify immediately before typing.
         driver::focus_window(id)?;
         let active = driver::list_windows(None)?
-        .into_iter()
-        .find(|w| w.active)
-        .ok_or_else(|| anyhow::anyhow!("no active window"))?;
+            .into_iter()
+            .find(|w| w.active)
+            .ok_or_else(|| anyhow::anyhow!("no active window"))?;
         if active.id != id {
             kill(pid);
             return Err(anyhow::anyhow!("focus verify failed before {label:?}"));
@@ -319,12 +357,18 @@ fn mixed_dpi_run() -> anyhow::Result<()> {
 
     let mons = capture::monitors()?;
     for m in &mons {
-        println!("monitor {}: {:>5}x{:<5} at {:>6},{:<6} scale={} primary={}", m.id, m.w, m.h, m.x, m.y, m.scale, m.primary);
+        println!(
+            "monitor {}: {:>5}x{:<5} at {:>6},{:<6} scale={} primary={}",
+            m.id, m.w, m.h, m.x, m.y, m.scale, m.primary
+        );
     }
     let scales: Vec<f32> = mons.iter().map(|m| m.scale).collect();
     let mixed = scales.iter().any(|s| (s - scales[0]).abs() > f32::EPSILON);
     if mons.len() < 2 || !mixed {
-        println!("SKIP: need >=2 monitors with different scale factors (have {} monitor(s), scales {scales:?})", mons.len());
+        println!(
+            "SKIP: need >=2 monitors with different scale factors (have {} monitor(s), scales {scales:?})",
+            mons.len()
+        );
         return Ok(());
     }
 
@@ -335,7 +379,13 @@ fn mixed_dpi_run() -> anyhow::Result<()> {
         if (cap.rect.x, cap.rect.y, cap.rect.w, cap.rect.h) != (m.x, m.y, m.w, m.h) {
             return Err(anyhow::anyhow!(
                 "monitor {} capture rect {:?} != advertised {}x{} at {},{} (scale {})",
-                m.id, cap.rect, m.w, m.h, m.x, m.y, m.scale
+                m.id,
+                cap.rect,
+                m.w,
+                m.h,
+                m.x,
+                m.y,
+                m.scale
             ));
         }
         println!("monitor {} capture rect OK ({:?})", m.id, cap.rect);
@@ -350,23 +400,36 @@ fn mixed_dpi_run() -> anyhow::Result<()> {
         std::thread::sleep(Duration::from_millis(60));
         let (gx, gy) = super::driver::cursor_pos()?;
         let (dx, dy) = ((gx - cx).abs(), (gy - cy).abs());
-        println!("monitor {} cursor round-trip: wanted {cx},{cy} got {gx},{gy} (d={dx},{dy})", m.id);
+        println!(
+            "monitor {} cursor round-trip: wanted {cx},{cy} got {gx},{gy} (d={dx},{dy})",
+            m.id
+        );
         if dx > 2 || dy > 2 {
             return Err(anyhow::anyhow!(
                 "monitor {} (scale {}): cursor landed {dx},{dy} px off — coordinate spaces disagree",
-                m.id, m.scale
+                m.id,
+                m.scale
             ));
         }
     }
 
     // 3. A window moved to each monitor must actually land inside it.
-    let q = WinQuery { exe: Some("notepad".into()), title: None };
-    let before: Vec<u32> = driver::list_windows(Some(q.clone()))?.iter().map(|w| w.id).collect();
+    let q = WinQuery {
+        exe: Some("notepad".into()),
+        title: None,
+    };
+    let before: Vec<u32> = driver::list_windows(Some(q.clone()))?
+        .iter()
+        .map(|w| w.id)
+        .collect();
     let pid = std::process::Command::new("notepad.exe").spawn()?.id();
     let mut id = 0u32;
     for _ in 0..50 {
         std::thread::sleep(Duration::from_millis(100));
-        if let Some(w) = driver::list_windows(Some(q.clone()))?.into_iter().find(|w| !before.contains(&w.id)) {
+        if let Some(w) = driver::list_windows(Some(q.clone()))?
+            .into_iter()
+            .find(|w| !before.contains(&w.id))
+        {
             id = w.id;
             break;
         }
@@ -380,10 +443,17 @@ fn mixed_dpi_run() -> anyhow::Result<()> {
         match driver::to_monitor(id, m.id) {
             Ok(info) => {
                 let (wcx, wcy) = (info.x + info.w / 2, info.y + info.h / 2);
-                let inside = wcx >= m.x && wcx < m.x + m.w as i32 && wcy >= m.y && wcy < m.y + m.h as i32;
-                println!("win -> monitor {}: rect {},{} {}x{} center {wcx},{wcy} inside={inside}", m.id, info.x, info.y, info.w, info.h);
+                let inside =
+                    wcx >= m.x && wcx < m.x + m.w as i32 && wcy >= m.y && wcy < m.y + m.h as i32;
+                println!(
+                    "win -> monitor {}: rect {},{} {}x{} center {wcx},{wcy} inside={inside}",
+                    m.id, info.x, info.y, info.w, info.h
+                );
                 if !inside {
-                    placement_err = Some(format!("window center {wcx},{wcy} is not on monitor {}", m.id));
+                    placement_err = Some(format!(
+                        "window center {wcx},{wcy} is not on monitor {}",
+                        m.id
+                    ));
                     break;
                 }
             }
@@ -400,7 +470,12 @@ fn mixed_dpi_run() -> anyhow::Result<()> {
     let mut match_err = None;
     for m in &mons {
         let patch_rect = super::Rect::new(m.x + 40, m.y + 40, 60, 40);
-        let patch = capture::capture(CapTarget::Rect { x: patch_rect.x, y: patch_rect.y, w: patch_rect.w, h: patch_rect.h })?;
+        let patch = capture::capture(CapTarget::Rect {
+            x: patch_rect.x,
+            y: patch_rect.y,
+            w: patch_rect.w,
+            h: patch_rect.h,
+        })?;
         let tpl = image::open(&patch.path)?.to_rgba8();
         let scene_cap = capture::capture(CapTarget::Monitor { monitor: m.id })?;
         let scene = image::open(&scene_cap.path)?.to_rgba8();
@@ -408,14 +483,23 @@ fn mixed_dpi_run() -> anyhow::Result<()> {
         match hits.first() {
             Some(hit) => {
                 let (sx, sy) = (hit.x + scene_cap.rect.x, hit.y + scene_cap.rect.y);
-                println!("monitor {} template found at screen {sx},{sy} (cut from {},{}) score={:.3}", m.id, patch_rect.x, patch_rect.y, hit.score);
+                println!(
+                    "monitor {} template found at screen {sx},{sy} (cut from {},{}) score={:.3}",
+                    m.id, patch_rect.x, patch_rect.y, hit.score
+                );
                 if (sx - patch_rect.x).abs() > 2 || (sy - patch_rect.y).abs() > 2 {
-                    match_err = Some(format!("monitor {}: template mapped back to {sx},{sy}, cut from {},{}", m.id, patch_rect.x, patch_rect.y));
+                    match_err = Some(format!(
+                        "monitor {}: template mapped back to {sx},{sy}, cut from {},{}",
+                        m.id, patch_rect.x, patch_rect.y
+                    ));
                     break;
                 }
             }
             None => {
-                match_err = Some(format!("monitor {}: a patch cut from this very monitor did not match itself", m.id));
+                match_err = Some(format!(
+                    "monitor {}: a patch cut from this very monitor did not match itself",
+                    m.id
+                ));
                 break;
             }
         }
@@ -428,7 +512,10 @@ fn mixed_dpi_run() -> anyhow::Result<()> {
     if let Some(e) = match_err {
         return Err(anyhow::anyhow!(e));
     }
-    println!("MIXED-DPI OK across {} monitors, scales {scales:?}", mons.len());
+    println!(
+        "MIXED-DPI OK across {} monitors, scales {scales:?}",
+        mons.len()
+    );
     Ok(())
 }
 
@@ -444,7 +531,9 @@ fn kill_all_notepads() {
 
 /// Wipe Win11 Notepad's unsaved-tab restore state (contaminates titles).
 fn clear_notepad_session() {
-    let Some(local) = std::env::var_os("LOCALAPPDATA") else { return };
+    let Some(local) = std::env::var_os("LOCALAPPDATA") else {
+        return;
+    };
     let dir = std::path::PathBuf::from(local)
         .join(r"Packages\Microsoft.WindowsNotepad_8wekyb3d8bbwe\LocalState\TabState");
     if dir.is_dir() {

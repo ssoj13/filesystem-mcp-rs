@@ -5,11 +5,8 @@
 //! `FileSystemServer::new()`. Every acting tool re-checks the arm gate.
 
 use rmcp::{
-    ErrorData as McpError,
-    handler::server::wrapper::Parameters,
-    model::{CallToolResult},
-    serde::Deserialize,
-    tool, tool_router,
+    ErrorData as McpError, handler::server::wrapper::Parameters, model::CallToolResult,
+    serde::Deserialize, tool, tool_router,
 };
 use schemars::JsonSchema;
 use serde_json::json;
@@ -33,9 +30,8 @@ impl FileSystemServer {
         &self,
         Parameters(ArmArgs { ttl_ms }): Parameters<ArmArgs>,
     ) -> Result<CallToolResult, McpError> {
-        let ttl = std::time::Duration::from_millis(
-            super::safety::resolve_arm_ttl_ms(ttl_ms) as u64,
-        );
+        let ttl =
+            std::time::Duration::from_millis(super::safety::resolve_arm_ttl_ms(ttl_ms) as u64);
         let until = super::safety::gate().arm(ttl);
         ok_json(json!({ "armed_until": until }))
     }
@@ -48,7 +44,13 @@ impl FileSystemServer {
     )]
     async fn ctl_mouse_click(
         &self,
-        Parameters(ClickArgs { x, y, button, clicks, mods }): Parameters<ClickArgs>,
+        Parameters(ClickArgs {
+            x,
+            y,
+            button,
+            clicks,
+            mods,
+        }): Parameters<ClickArgs>,
     ) -> Result<CallToolResult, McpError> {
         let btn = parse_btn(button.as_deref())?;
         let mod_keys = driver::parse_keymods(mods.as_deref()).map_err(super::ctl_err)?;
@@ -70,7 +72,14 @@ impl FileSystemServer {
     )]
     async fn ctl_mouse_drag(
         &self,
-        Parameters(DragArgs { from, to, button, duration_ms, ease, hold_ms }): Parameters<DragArgs>,
+        Parameters(DragArgs {
+            from,
+            to,
+            button,
+            duration_ms,
+            ease,
+            hold_ms,
+        }): Parameters<DragArgs>,
     ) -> Result<CallToolResult, McpError> {
         let btn = parse_btn(button.as_deref())?;
         let ease = parse_ease(ease.as_deref())?;
@@ -120,12 +129,11 @@ impl FileSystemServer {
         Parameters(TapArgs { key, hold_ms }): Parameters<TapArgs>,
     ) -> Result<CallToolResult, McpError> {
         let gate = super::safety::gate();
-        let focus = tokio::task::spawn_blocking(move || {
-            driver::key_tap(&gate, &key, hold_ms.unwrap_or(0))
-        })
-        .await
-        .map_err(|e| McpError::internal_error(e.to_string(), None))?
-        .map_err(ctl_err)?;
+        let focus =
+            tokio::task::spawn_blocking(move || driver::key_tap(&gate, &key, hold_ms.unwrap_or(0)))
+                .await
+                .map_err(|e| McpError::internal_error(e.to_string(), None))?
+                .map_err(ctl_err)?;
         ok_json(json!({ "focus": focus }))
     }
 
@@ -137,23 +145,26 @@ impl FileSystemServer {
     )]
     async fn ctl_key_type(
         &self,
-        Parameters(TypeArgs { text, paste, interval_ms, target }): Parameters<TypeArgs>,
+        Parameters(TypeArgs {
+            text,
+            paste,
+            interval_ms,
+            target,
+        }): Parameters<TypeArgs>,
     ) -> Result<CallToolResult, McpError> {
         let gate = super::safety::gate();
         // Mode/interval: explicit arg > FS_MCP_CTL_TYPE_MODE/INTERVAL_MS env > defaults.
         let paste = super::safety::resolve_paste(paste).map_err(super::ctl_err)?;
-        let interval = super::safety::resolve_interval_ms(interval_ms, paste)
-            .map_err(super::ctl_err)?;
+        let interval =
+            super::safety::resolve_interval_ms(interval_ms, paste).map_err(super::ctl_err)?;
         // Focus gate for paste: resolve the target window first so the paste
         // can never land in a wrong app (critic §10.2).
         let expect = match target {
             Some(t) => {
-                let hwnd_id = tokio::task::spawn_blocking(move || {
-                    driver::resolve_target(&t)
-                })
-                .await
-                .map_err(|e| McpError::internal_error(e.to_string(), None))?
-                .map_err(ctl_err)?;
+                let hwnd_id = tokio::task::spawn_blocking(move || driver::resolve_target(&t))
+                    .await
+                    .map_err(|e| McpError::internal_error(e.to_string(), None))?
+                    .map_err(ctl_err)?;
                 Some(hwnd_id)
             }
             None => None,
@@ -203,7 +214,14 @@ impl FileSystemServer {
     )]
     async fn ctl_win_geom(
         &self,
-        Parameters(GeomArgs { target, x, y, w, h, state }): Parameters<GeomArgs>,
+        Parameters(GeomArgs {
+            target,
+            x,
+            y,
+            w,
+            h,
+            state,
+        }): Parameters<GeomArgs>,
     ) -> Result<CallToolResult, McpError> {
         let gate = super::safety::gate();
         let res = tokio::task::spawn_blocking(move || {
@@ -276,12 +294,18 @@ impl FileSystemServer {
             match op.as_str() {
                 "save" => {
                     let entries = driver::layout_save(&name)?;
-                    gate.record("win_layout_save", json!({ "name": name, "windows": entries.len() }))?;
+                    gate.record(
+                        "win_layout_save",
+                        json!({ "name": name, "windows": entries.len() }),
+                    )?;
                     Ok(json!({ "saved": entries }))
                 }
                 "load" => {
                     let applied = driver::layout_load(&name, dry_run.unwrap_or(false))?;
-                    gate.record("win_layout_load", json!({ "name": name, "dry_run": dry_run }))?;
+                    gate.record(
+                        "win_layout_load",
+                        json!({ "name": name, "dry_run": dry_run }),
+                    )?;
                     Ok(json!({ "applied": applied }))
                 }
                 other => Err(anyhow::anyhow!("unknown op {other:?} (save|load)")),
@@ -301,11 +325,20 @@ impl FileSystemServer {
     )]
     async fn ctl_input_macro(
         &self,
-        Parameters(MacroArgs { steps, gap_ms, stop_on_fail }): Parameters<MacroArgs>,
+        Parameters(MacroArgs {
+            steps,
+            gap_ms,
+            stop_on_fail,
+        }): Parameters<MacroArgs>,
     ) -> Result<CallToolResult, McpError> {
         let gate = super::safety::gate();
         let res = tokio::task::spawn_blocking(move || {
-            super::steps::run(&gate, &steps, gap_ms.unwrap_or(30), stop_on_fail.unwrap_or(true))
+            super::steps::run(
+                &gate,
+                &steps,
+                gap_ms.unwrap_or(30),
+                stop_on_fail.unwrap_or(true),
+            )
         })
         .await
         .map_err(|e| McpError::internal_error(e.to_string(), None))?
@@ -321,7 +354,15 @@ impl FileSystemServer {
     )]
     async fn ctl_wait(
         &self,
-        Parameters(WaitArgs { kind, target, query, since, color, timeout_ms, poll_ms }): Parameters<WaitArgs>,
+        Parameters(WaitArgs {
+            kind,
+            target,
+            query,
+            since,
+            color,
+            timeout_ms,
+            poll_ms,
+        }): Parameters<WaitArgs>,
     ) -> Result<CallToolResult, McpError> {
         let kind = parse_wait_kind(&kind)?;
         let color_target = color.map(|c| super::wait::ColorTarget {
@@ -346,7 +387,10 @@ impl FileSystemServer {
         .await
         .map_err(|e| McpError::internal_error(e.to_string(), None))?
         .map_err(ctl_err)?;
-        ok_json(serde_json::to_value(&res).map_err(|e| McpError::internal_error(e.to_string(), None))?)
+        ok_json(
+            serde_json::to_value(&res)
+                .map_err(|e| McpError::internal_error(e.to_string(), None))?,
+        )
     }
 }
 
@@ -357,7 +401,10 @@ fn parse_wait_kind(s: &str) -> Result<super::wait::Kind, McpError> {
         "window" => Ok(super::wait::Kind::Window),
         "clipboard" => Ok(super::wait::Kind::Clipboard),
         "color" => Ok(super::wait::Kind::Color),
-        other => Err(McpError::invalid_params(format!("unknown kind {other:?}"), None)),
+        other => Err(McpError::invalid_params(
+            format!("unknown kind {other:?}"),
+            None,
+        )),
     }
 }
 
@@ -378,7 +425,10 @@ fn parse_btn(s: Option<&str>) -> Result<Btn, McpError> {
         "left" => Ok(Btn::Left),
         "right" => Ok(Btn::Right),
         "middle" => Ok(Btn::Middle),
-        other => Err(McpError::invalid_params(format!("unknown button {other:?}"), None)),
+        other => Err(McpError::invalid_params(
+            format!("unknown button {other:?}"),
+            None,
+        )),
     }
 }
 
@@ -386,10 +436,12 @@ fn parse_ease(s: Option<&str>) -> Result<super::driver::Ease, McpError> {
     match s.unwrap_or("linear") {
         "linear" => Ok(super::driver::Ease::Linear),
         "out" => Ok(super::driver::Ease::Out),
-        other => Err(McpError::invalid_params(format!("unknown ease {other:?}"), None)),
+        other => Err(McpError::invalid_params(
+            format!("unknown ease {other:?}"),
+            None,
+        )),
     }
 }
-
 
 /// Downcast CtlError for a stable wire code prefix (see mod.rs ctl_err).
 fn ctl_err(e: anyhow::Error) -> McpError {

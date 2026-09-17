@@ -10,24 +10,21 @@ use std::sync::Mutex;
 use anyhow::Context as _;
 use windows::Win32::Foundation::POINT;
 use windows::Win32::UI::Input::KeyboardAndMouse::{
-    INPUT, INPUT_0, INPUT_KEYBOARD, INPUT_MOUSE, KEYBDINPUT,
-    KEYBD_EVENT_FLAGS, KEYEVENTF_KEYUP, KEYEVENTF_UNICODE, MOUSEEVENTF_ABSOLUTE,
-    MOUSEEVENTF_HWHEEL, MOUSEEVENTF_LEFTDOWN, MOUSEEVENTF_LEFTUP, MOUSEEVENTF_MIDDLEDOWN,
-    MOUSEEVENTF_MIDDLEUP, MOUSEEVENTF_MOVE, MOUSEEVENTF_RIGHTDOWN, MOUSEEVENTF_RIGHTUP,
-    MOUSEEVENTF_VIRTUALDESK, MOUSEEVENTF_WHEEL, MOUSEINPUT, SendInput, VIRTUAL_KEY, VK_BACK,
-    VK_CONTROL, VK_DELETE, VK_DOWN, VK_END, VK_ESCAPE, VK_F1, VK_HOME, VK_INSERT, VK_LEFT,
-    VK_LWIN, VK_MENU, VK_NEXT, VK_PRIOR, VK_RETURN, VK_RIGHT, VK_SHIFT, VK_SPACE, VK_TAB,
-    VK_UP, MOUSE_EVENT_FLAGS,
+    INPUT, INPUT_0, INPUT_KEYBOARD, INPUT_MOUSE, KEYBD_EVENT_FLAGS, KEYBDINPUT, KEYEVENTF_KEYUP,
+    KEYEVENTF_UNICODE, MOUSE_EVENT_FLAGS, MOUSEEVENTF_ABSOLUTE, MOUSEEVENTF_HWHEEL,
+    MOUSEEVENTF_LEFTDOWN, MOUSEEVENTF_LEFTUP, MOUSEEVENTF_MIDDLEDOWN, MOUSEEVENTF_MIDDLEUP,
+    MOUSEEVENTF_MOVE, MOUSEEVENTF_RIGHTDOWN, MOUSEEVENTF_RIGHTUP, MOUSEEVENTF_VIRTUALDESK,
+    MOUSEEVENTF_WHEEL, MOUSEINPUT, SendInput, VIRTUAL_KEY, VK_BACK, VK_CONTROL, VK_DELETE, VK_DOWN,
+    VK_END, VK_ESCAPE, VK_F1, VK_HOME, VK_INSERT, VK_LEFT, VK_LWIN, VK_MENU, VK_NEXT, VK_PRIOR,
+    VK_RETURN, VK_RIGHT, VK_SHIFT, VK_SPACE, VK_TAB, VK_UP,
 };
-use windows::Win32::UI::WindowsAndMessaging::{
-    GetCursorPos, GetForegroundWindow, WHEEL_DELTA,
-};
+use windows::Win32::UI::WindowsAndMessaging::{GetCursorPos, GetForegroundWindow, WHEEL_DELTA};
 
 // Platform-neutral types: defined in the driver, re-exported for callers that
 // historically imported them from input (input::Btn etc.).
+use super::win;
 pub use crate::tools::computer::driver::{Btn, Ease, FocusInfo, TypeResult};
 use crate::tools::computer::safety::{CtlError, SafetyGate};
-use super::win;
 
 /// One mutex serializes every SendInput batch (macro down/up ordering, §5).
 static INPUT_MTX: Mutex<()> = Mutex::new(());
@@ -155,7 +152,14 @@ fn mouse(flags: MOUSE_EVENT_FLAGS, dx: i32, dy: i32, data: u32) -> INPUT {
     INPUT {
         r#type: INPUT_MOUSE,
         Anonymous: INPUT_0 {
-            mi: MOUSEINPUT { dx, dy, mouseData: data, dwFlags: flags, time: 0, dwExtraInfo: 0 },
+            mi: MOUSEINPUT {
+                dx,
+                dy,
+                mouseData: data,
+                dwFlags: flags,
+                time: 0,
+                dwExtraInfo: 0,
+            },
         },
     }
 }
@@ -192,7 +196,11 @@ pub fn focus() -> FocusInfo {
     let hwnd = unsafe { GetForegroundWindow() };
     FocusInfo {
         hwnd: hwnd.0 as u32,
-        title: if hwnd.0.is_null() { String::new() } else { win::win_title(hwnd) },
+        title: if hwnd.0.is_null() {
+            String::new()
+        } else {
+            win::win_title(hwnd)
+        },
     }
 }
 
@@ -202,9 +210,7 @@ pub fn focus() -> FocusInfo {
 pub(crate) fn cursor_pos() -> Option<(i32, i32)> {
     let mut p = POINT::default();
     // SAFETY: out-pointer only.
-    unsafe { GetCursorPos(&mut p) }
-        .ok()
-        .map(|_| (p.x, p.y))
+    unsafe { GetCursorPos(&mut p) }.ok().map(|_| (p.x, p.y))
 }
 
 /// Move-only hover (absolute virtual-screen coords).
@@ -242,7 +248,10 @@ pub fn click(
         _ => focus(),
     };
     if clicks == 0 {
-        gate.record("mouse_hover", serde_json::json!({ "pos": [pos.hwnd, pos.title] }))?;
+        gate.record(
+            "mouse_hover",
+            serde_json::json!({ "pos": [pos.hwnd, pos.title] }),
+        )?;
         return Ok(focus());
     }
     let (down, up) = btn.flags();
@@ -357,10 +366,20 @@ pub fn scroll(gate: &SafetyGate, dy: i32, dx: i32) -> anyhow::Result<FocusInfo> 
     let mut batch = Vec::new();
     if dy != 0 {
         // Windows wheel: positive delta = up, so invert for "dy>0 = down".
-        batch.push(mouse(MOUSEEVENTF_WHEEL, 0, 0, (-dy * WHEEL_DELTA as i32) as u32));
+        batch.push(mouse(
+            MOUSEEVENTF_WHEEL,
+            0,
+            0,
+            (-dy * WHEEL_DELTA as i32) as u32,
+        ));
     }
     if dx != 0 {
-        batch.push(mouse(MOUSEEVENTF_HWHEEL, 0, 0, (dx * WHEEL_DELTA as i32) as u32));
+        batch.push(mouse(
+            MOUSEEVENTF_HWHEEL,
+            0,
+            0,
+            (dx * WHEEL_DELTA as i32) as u32,
+        ));
     }
     send_batch(&batch)?;
     gate.record("mouse_scroll", serde_json::json!({ "dy": dy, "dx": dx }))?;
@@ -372,7 +391,10 @@ pub fn scroll(gate: &SafetyGate, dy: i32, dx: i32) -> anyhow::Result<FocusInfo> 
 pub fn key_tap(gate: &SafetyGate, combo: &str, hold_ms: u32) -> anyhow::Result<FocusInfo> {
     gate.check()?;
     let codes = parse_combo(combo)?;
-    let downs: Vec<INPUT> = codes.iter().map(|c| key(c.0, KEYBD_EVENT_FLAGS(0))).collect();
+    let downs: Vec<INPUT> = codes
+        .iter()
+        .map(|c| key(c.0, KEYBD_EVENT_FLAGS(0)))
+        .collect();
     let ups: Vec<INPUT> = codes
         .iter()
         .rev()
@@ -387,7 +409,10 @@ pub fn key_tap(gate: &SafetyGate, combo: &str, hold_ms: u32) -> anyhow::Result<F
         std::thread::sleep(std::time::Duration::from_millis(hold_ms as u64));
         send_batch(&ups)?;
     }
-    gate.record("key_tap", serde_json::json!({ "combo": combo, "hold_ms": hold_ms }))?;
+    gate.record(
+        "key_tap",
+        serde_json::json!({ "combo": combo, "hold_ms": hold_ms }),
+    )?;
     Ok(focus())
 }
 
@@ -443,7 +468,8 @@ pub fn type_text(
                 Err(_) => ClipSnap::None,
             },
         };
-        cb.set_text(text.to_string()).context("set clipboard text")?;
+        cb.set_text(text.to_string())
+            .context("set clipboard text")?;
         let batch = vec![
             key(VK_CONTROL.0, KEYBD_EVENT_FLAGS(0)),
             key(b'V' as u16, KEYBD_EVENT_FLAGS(0)),
@@ -473,7 +499,10 @@ pub fn type_text(
             }
             ok
         };
-        gate.record("key_type", serde_json::json!({ "mode": "paste", "chars": chars }))?;
+        gate.record(
+            "key_type",
+            serde_json::json!({ "mode": "paste", "chars": chars }),
+        )?;
         return Ok(TypeResult {
             mode: "paste",
             chars,
@@ -493,8 +522,16 @@ pub fn type_text(
             std::thread::sleep(std::time::Duration::from_millis(interval_ms as u64));
         }
     }
-    gate.record("key_type", serde_json::json!({ "mode": "unicode", "chars": chars }))?;
-    Ok(TypeResult { mode: "unicode", chars, clipboard_restored: None, focus: focus() })
+    gate.record(
+        "key_type",
+        serde_json::json!({ "mode": "unicode", "chars": chars }),
+    )?;
+    Ok(TypeResult {
+        mode: "unicode",
+        chars,
+        clipboard_restored: None,
+        focus: focus(),
+    })
 }
 
 #[cfg(test)]
@@ -504,7 +541,10 @@ mod tests {
     #[test]
     fn combo_parser() {
         let codes = parse_combo("ctrl+shift+t").unwrap();
-        assert_eq!(codes.iter().map(|c| c.0).collect::<Vec<_>>(), vec![0x11, 0x10, 0x54]); // shift = 0x10
+        assert_eq!(
+            codes.iter().map(|c| c.0).collect::<Vec<_>>(),
+            vec![0x11, 0x10, 0x54]
+        ); // shift = 0x10
         assert_eq!(parse_combo("Enter").unwrap()[0].0, VK_RETURN.0);
         assert_eq!(parse_combo("f5").unwrap()[0].0, VK_F1.0 + 4);
         assert_eq!(parse_combo("ctrl+alt+del").unwrap()[0].0, 0x11); // ctrl before alt

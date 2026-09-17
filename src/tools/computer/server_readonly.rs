@@ -6,16 +6,18 @@
 //! their router merged whenever a domain needs them.
 
 use rmcp::{
-    ErrorData as McpError,
-    handler::server::wrapper::Parameters,
-    model::{CallToolResult},
-    serde::Deserialize,
-    tool, tool_router,
+    ErrorData as McpError, handler::server::wrapper::Parameters, model::CallToolResult,
+    serde::Deserialize, tool, tool_router,
 };
 use schemars::JsonSchema;
 use serde_json::json;
 
-use super::{annotate::{self, Shape}, capture::{self, CapTarget}, driver::{self, WinQuery}, ok_json};
+use super::{
+    annotate::{self, Shape},
+    capture::{self, CapTarget},
+    driver::{self, WinQuery},
+    ok_json,
+};
 use crate::FileSystemServer;
 
 #[cfg(any(feature = "ctl-input", feature = "ctl-uia", feature = "ctl-ocr"))]
@@ -38,7 +40,8 @@ impl FileSystemServer {
             .map_err(super::ctl_err)?;
         let mut out = json!({ "path": res.path, "hash": res.hash, "rect": res.rect });
         if inline == Some(true) {
-            let bytes = std::fs::read(&res.path).map_err(|e| McpError::internal_error(format!("read png: {e}"), None))?;
+            let bytes = std::fs::read(&res.path)
+                .map_err(|e| McpError::internal_error(format!("read png: {e}"), None))?;
             out["b64_png"] = json!(base64_encode(&bytes));
         }
         ok_json(out)
@@ -82,15 +85,25 @@ impl FileSystemServer {
     )]
     async fn find_image(
         &self,
-        Parameters(FindArgs { template, target, threshold, max }): Parameters<FindArgs>,
+        Parameters(FindArgs {
+            template,
+            target,
+            threshold,
+            max,
+        }): Parameters<FindArgs>,
     ) -> Result<CallToolResult, McpError> {
         let res = tokio::task::spawn_blocking(move || -> anyhow::Result<serde_json::Value> {
             let cap = target.unwrap_or(CapTarget::Monitor { monitor: 0 });
             let captured = super::capture::capture(cap)?;
-            let scene = image::open(&captured.path).map_err(|e| anyhow::anyhow!("open capture: {e}"))?.to_rgba8();
-            let tpl = image::open(&template).map_err(|e| anyhow::anyhow!("open template: {e}"))?.to_rgba8();
+            let scene = image::open(&captured.path)
+                .map_err(|e| anyhow::anyhow!("open capture: {e}"))?
+                .to_rgba8();
+            let tpl = image::open(&template)
+                .map_err(|e| anyhow::anyhow!("open template: {e}"))?
+                .to_rgba8();
             let thr = threshold.unwrap_or(0.85);
-            let matches = super::find::find_template(&scene, &tpl, thr, max.unwrap_or(5).max(1) as usize)?;
+            let matches =
+                super::find::find_template(&scene, &tpl, thr, max.unwrap_or(5).max(1) as usize)?;
             // Screen-space: add the capture rect origin.
             let ox = captured.rect.x;
             let oy = captured.rect.y;
@@ -127,7 +140,14 @@ impl FileSystemServer {
     )]
     async fn ctl_annotate(
         &self,
-        Parameters(AnnArgs { src, target, origin, shapes, out, scale }): Parameters<AnnArgs>,
+        Parameters(AnnArgs {
+            src,
+            target,
+            origin,
+            shapes,
+            out,
+            scale,
+        }): Parameters<AnnArgs>,
     ) -> Result<CallToolResult, McpError> {
         let res = tokio::task::spawn_blocking(move || -> anyhow::Result<serde_json::Value> {
             if src.is_some() && target.is_some() {
@@ -138,7 +158,8 @@ impl FileSystemServer {
             let (path, default_origin) = match src {
                 Some(p) => (p, (0, 0)),
                 None => {
-                    let cap = capture::capture(target.unwrap_or(CapTarget::Monitor { monitor: 0 }))?;
+                    let cap =
+                        capture::capture(target.unwrap_or(CapTarget::Monitor { monitor: 0 }))?;
                     (cap.path, (cap.rect.x, cap.rect.y))
                 }
             };
@@ -177,7 +198,10 @@ impl FileSystemServer {
             Read-only, no arm. Use it to adapt automation plans per platform."
     )]
     async fn ctl_caps(&self) -> Result<CallToolResult, McpError> {
-        ok_json(serde_json::to_value(super::driver::caps()).map_err(|e| McpError::internal_error(e.to_string(), None))?)
+        ok_json(
+            serde_json::to_value(super::driver::caps())
+                .map_err(|e| McpError::internal_error(e.to_string(), None))?,
+        )
     }
 
     #[tool(

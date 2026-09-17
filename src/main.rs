@@ -37,10 +37,10 @@ use tracing::{info, warn};
 
 use crate::core::agent_policy;
 use crate::core::allowed::AllowedDirs;
-use crate::core::dollar_guard;
 use crate::core::content_plane::{
     ContentError, ContentMode, ContentPlane, ContentRef, TextOrRef, sha256_hex,
 };
+use crate::core::dollar_guard;
 use crate::core::format;
 use crate::core::path::resolve_validated_path;
 use crate::core::schema::normalize_tool_schemas;
@@ -98,6 +98,7 @@ use reqwest::Url;
 use reqwest::redirect::Policy;
 
 mod core;
+mod env_spec;
 /// Vendored copy of the private `mcp-setup-rs` crate — see `src/mcp_setup/VENDOR.md`.
 ///
 /// The upstream library API is kept verbatim so the copy can be resynced with a plain `cp` + the
@@ -107,7 +108,6 @@ mod core;
 /// boundary rather than by deleting upstream items (which would diverge us from upstream).
 #[allow(dead_code, unused_imports)]
 mod mcp_setup;
-mod env_spec;
 mod setup;
 mod tools;
 
@@ -7618,9 +7618,9 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
     // all; it now does in every mode, plain stdio included, which is how an MCP client normally
     // starts this server.
     #[cfg(any(feature = "ctl-input", feature = "ctl-uia"))]
-    crate::tools::computer::safety::init_gate(
-        crate::tools::computer::safety::resolve_ops_per_min(args.ctl_ops_per_min),
-    );
+    crate::tools::computer::safety::init_gate(crate::tools::computer::safety::resolve_ops_per_min(
+        args.ctl_ops_per_min,
+    ));
 
     // Create server instance
     let allowed = AllowedDirs::new(args.allowed_dirs);

@@ -61,15 +61,7 @@ fn downscale(plane: &[u8], w: u32, h: u32, factor: u32) -> (Vec<u8>, u32, u32) {
 
 /// Match score of the template at (ox, oy) in the scene luma: fraction of
 /// template pixels within [`PIX_TOL`] luma of the scene pixel.
-fn score_at(
-    scene: &[u8],
-    sw: u32,
-    tpl: &[u8],
-    tw: u32,
-    th: u32,
-    ox: u32,
-    oy: u32,
-) -> f32 {
+fn score_at(scene: &[u8], sw: u32, tpl: &[u8], tw: u32, th: u32, ox: u32, oy: u32) -> f32 {
     let mut hit = 0usize;
     let mut total = 0usize;
     for ty in 0..th {
@@ -158,7 +150,11 @@ pub fn find_template(
             }
         }
     }
-    out.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap_or(std::cmp::Ordering::Equal));
+    out.sort_by(|a, b| {
+        b.score
+            .partial_cmp(&a.score)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
     out.dedup_by(|a, b| a.x == b.x && a.y == b.y);
     Ok(out)
 }
@@ -176,7 +172,9 @@ mod tests {
         let mut seed = 12345u32;
         let mut px = |x: u32, y: u32| {
             // xorshift-ish per-pixel noise, stable across runs.
-            seed = seed.wrapping_mul(1_664_525).wrapping_add(1_013_904_223 ^ x ^ (y << 8));
+            seed = seed
+                .wrapping_mul(1_664_525)
+                .wrapping_add(1_013_904_223 ^ x ^ (y << 8));
             image::Rgba([seed as u8, (seed >> 8) as u8, (seed >> 16) as u8, 255])
         };
         let scene = RgbaImage::from_fn(200, 120, |x, y| {

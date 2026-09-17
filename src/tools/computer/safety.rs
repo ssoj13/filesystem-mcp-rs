@@ -67,7 +67,9 @@ pub fn init_gate(max_ops_per_min: u32) {
 /// The process-global gate (input/uia tool handlers borrow it).
 #[cfg(any(feature = "ctl-input", feature = "ctl-uia"))]
 pub fn gate() -> std::sync::Arc<SafetyGate> {
-    GATE.get().cloned().expect("computer safety gate not initialized (init_gate)")
+    GATE.get()
+        .cloned()
+        .expect("computer safety gate not initialized (init_gate)")
 }
 
 // ---- Environment configuration (set in mcpServers env; empty = unset) ----
@@ -86,7 +88,10 @@ pub const ENV_ARM_TTL_MS: &str = "FS_MCP_CTL_ARM_TTL_MS";
 pub const ENV_OPS_PER_MIN: &str = "FS_MCP_CTL_OPS_PER_MIN";
 
 fn env_trimmed(name: &str) -> Option<String> {
-    std::env::var(name).ok().map(|v| v.trim().to_string()).filter(|v| !v.is_empty())
+    std::env::var(name)
+        .ok()
+        .map(|v| v.trim().to_string())
+        .filter(|v| !v.is_empty())
 }
 
 /// Effective paste flag: explicit arg > env > default (paste).
@@ -115,9 +120,9 @@ pub fn resolve_interval_ms(explicit: Option<u32>, paste: bool) -> anyhow::Result
         return Ok(v);
     }
     match env_trimmed(ENV_TYPE_INTERVAL_MS) {
-        Some(v) => v.parse::<u32>().map_err(|_| {
-            anyhow::anyhow!("{ENV_TYPE_INTERVAL_MS}={v:?} is not a number (ms)")
-        }),
+        Some(v) => v
+            .parse::<u32>()
+            .map_err(|_| anyhow::anyhow!("{ENV_TYPE_INTERVAL_MS}={v:?} is not a number (ms)")),
         None => Ok(if paste { 0 } else { 30 }),
     }
 }
@@ -203,7 +208,8 @@ impl SafetyGate {
         {
             let mut st = self.state.lock().expect("gate poisoned");
             let now = Instant::now();
-            st.ops.retain(|t| now.duration_since(*t) < Duration::from_secs(60));
+            st.ops
+                .retain(|t| now.duration_since(*t) < Duration::from_secs(60));
             if st.ops.len() as u32 >= self.max_ops_per_min {
                 let retry_after = st
                     .ops
@@ -295,7 +301,10 @@ fn append_line(path: &PathBuf, line: &str) -> std::io::Result<()> {
     if let Some(dir) = path.parent() {
         std::fs::create_dir_all(dir)?;
     }
-    let mut f = std::fs::OpenOptions::new().create(true).append(true).open(path)?;
+    let mut f = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)?;
     f.write_all(line.as_bytes())?;
     f.write_all(b"\n")
 }

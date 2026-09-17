@@ -399,12 +399,12 @@ enum CopyFailed {
 ///
 /// The contents are flushed with `sync_all` before `old` is removed, so a crash between the two
 /// cannot leave a destination whose bytes are still only in the page cache.
-fn copy_into_a_new_file(
-    old: &Path,
-    new: &Path,
-    after_create: &dyn Fn(),
-) -> Result<(), CopyFailed> {
-    let mut dst = match std::fs::File::options().write(true).create_new(true).open(new) {
+fn copy_into_a_new_file(old: &Path, new: &Path, after_create: &dyn Fn()) -> Result<(), CopyFailed> {
+    let mut dst = match std::fs::File::options()
+        .write(true)
+        .create_new(true)
+        .open(new)
+    {
         Ok(dst) => dst,
         Err(e) if e.kind() == io::ErrorKind::AlreadyExists => return Err(CopyFailed::Occupied),
         Err(e) => return Err(CopyFailed::Io(e)),
@@ -696,7 +696,10 @@ mod tests {
             }
             other => panic!("expected Disabled, got {other:?}"),
         }
-        assert!(matches!(memory_db_decision(Migrated::Moved), MemoryDbDecision::Use));
+        assert!(matches!(
+            memory_db_decision(Migrated::Moved),
+            MemoryDbDecision::Use
+        ));
         assert!(matches!(
             memory_db_decision(Migrated::FreshStart),
             MemoryDbDecision::Use
@@ -723,7 +726,10 @@ mod tests {
             panic!("a failed move must disable the store");
         };
         assert!(msg.contains("/old/memory2.db"), "{msg}");
-        assert!(msg.contains("os error 32"), "the reason must survive: {msg}");
+        assert!(
+            msg.contains("os error 32"),
+            "the reason must survive: {msg}"
+        );
         assert!(
             msg.contains("still running"),
             "the usual remedy must be named: {msg}"
@@ -957,7 +963,8 @@ mod tests {
         let live = path.with_extension("live");
         let conn = rusqlite::Connection::open(&live).expect("open");
         conn.execute_batch("PRAGMA journal_mode=WAL;").expect("wal");
-        conn.execute_batch("CREATE TABLE note(t TEXT);").expect("schema");
+        conn.execute_batch("CREATE TABLE note(t TEXT);")
+            .expect("schema");
         conn.execute("INSERT INTO note(t) VALUES (?1)", [note])
             .expect("insert");
         // Snapshot the pair while the connection is open, i.e. before any checkpoint.

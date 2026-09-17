@@ -617,10 +617,7 @@ fn cmd_fail_fast(line: &str) -> String {
 
 fn cmd_has_control_flow(line: &str) -> bool {
     line.split('\n').any(|l| {
-        let t = l
-            .trim()
-            .trim_start_matches('@')
-            .to_ascii_lowercase();
+        let t = l.trim().trim_start_matches('@').to_ascii_lowercase();
         t.starts_with("if ") || t.starts_with("for ") || t.contains('(')
     })
 }
@@ -1842,7 +1839,9 @@ mod tests {
     #[tokio::test]
     async fn test_tempscript_create_and_drop() {
         let dir = tempfile::TempDir::new().unwrap();
-        let script = TempScript::create_in(dir.path(), "a\nb\r\nc").await.unwrap();
+        let script = TempScript::create_in(dir.path(), "a\nb\r\nc")
+            .await
+            .unwrap();
         let path = script.path.clone();
         let body = tokio::fs::read_to_string(&path).await.unwrap();
         assert_eq!(body, "@echo off\r\nchcp 65001 >nul\r\na\r\nb\r\nc\r\n");

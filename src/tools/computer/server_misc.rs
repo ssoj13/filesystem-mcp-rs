@@ -5,18 +5,15 @@
 //! UIA -> OCR -> pixels).
 
 use rmcp::{
-    ErrorData as McpError,
-    handler::server::wrapper::Parameters,
-    model::{CallToolResult},
-    serde::Deserialize,
-    tool, tool_router,
+    ErrorData as McpError, handler::server::wrapper::Parameters, model::CallToolResult,
+    serde::Deserialize, tool, tool_router,
 };
 use schemars::JsonSchema;
 use serde_json::json;
 
-use super::ok_json;
 #[cfg(feature = "ctl-ocr")]
 use super::capture::CapTarget;
+use super::ok_json;
 use crate::FileSystemServer;
 
 #[cfg(feature = "ctl-ocr")]
@@ -30,12 +27,18 @@ impl FileSystemServer {
     )]
     async fn ctl_ocr(
         &self,
-        Parameters(OcrArgs { target, find, engine }): Parameters<OcrArgs>,
+        Parameters(OcrArgs {
+            target,
+            find,
+            engine,
+        }): Parameters<OcrArgs>,
     ) -> Result<CallToolResult, McpError> {
         let res = tokio::task::spawn_blocking(move || -> anyhow::Result<serde_json::Value> {
             let cap = target.unwrap_or(super::capture::CapTarget::Monitor { monitor: 0 });
             let captured = super::capture::capture(cap)?;
-            let img = image::open(&captured.path).map_err(|e| anyhow::anyhow!("open capture: {e}"))?.to_rgba8();
+            let img = image::open(&captured.path)
+                .map_err(|e| anyhow::anyhow!("open capture: {e}"))?
+                .to_rgba8();
             let out = match engine.as_deref().unwrap_or("media") {
                 "ocrs" => super::ocrs_local::recognize(&img, find.as_deref())?,
                 "media" => super::driver::ocr_media(&img, find.as_deref())?,

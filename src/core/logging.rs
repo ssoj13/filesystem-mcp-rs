@@ -93,7 +93,10 @@ fn sinks(plan: &Plan) -> (Option<&Path>, bool) {
 /// [`Plan`] and [`degraded_reason`] instead. Called once, from `main`.
 pub fn init_logging(mode: TransportMode, log_file: Option<String>) -> Plan {
     let level = level();
-    let plan = install(target_for(mode, log_file, level.as_deref()), level.as_deref());
+    let plan = install(
+        target_for(mode, log_file, level.as_deref()),
+        level.as_deref(),
+    );
     // After the subscriber exists, so these reach the file in every mode that has one.
     if let Some(complaint) = level.as_deref().and_then(level_complaint) {
         tracing::warn!("{complaint}");
@@ -574,7 +577,15 @@ mod tests {
 
         // Real values, left alone: the plain levels, and the env-filter syntax an operator who
         // knows what they are doing is entitled to use.
-        for ok in ["trace", "DEBUG", "info", "warn", "error", "info,hyper=warn", "fsmcp=debug"] {
+        for ok in [
+            "trace",
+            "DEBUG",
+            "info",
+            "warn",
+            "error",
+            "info,hyper=warn",
+            "fsmcp=debug",
+        ] {
             assert_eq!(level_complaint(ok), None, "{ok}");
         }
         // `off` never reaches here - it is answered by `target_for_in` - but it is a level, so it
@@ -656,7 +667,9 @@ mod tests {
     fn the_advertised_default_level_is_one_the_filter_applies() {
         assert_eq!(level_complaint(LEVEL_DEFAULT), None);
         assert!(
-            filter(Some(LEVEL_DEFAULT)).to_string().contains(LEVEL_DEFAULT),
+            filter(Some(LEVEL_DEFAULT))
+                .to_string()
+                .contains(LEVEL_DEFAULT),
             "the advertised default must survive into the filter"
         );
     }

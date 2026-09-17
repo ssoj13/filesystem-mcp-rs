@@ -276,7 +276,10 @@ pub(crate) fn sweep_log_dirs(
         let entry = match entry {
             Ok(entry) => entry,
             Err(e) => {
-                warn!("Housekeeping: cannot read an entry of {}: {e}", dir.display());
+                warn!(
+                    "Housekeeping: cannot read an entry of {}: {e}",
+                    dir.display()
+                );
                 continue;
             }
         };
@@ -286,7 +289,10 @@ pub(crate) fn sweep_log_dirs(
             // `logs/` is somebody else's and stays where it is.
             Ok(file_type) if file_type.is_dir() => {}
             Ok(_) => {
-                warn!("Housekeeping: {} is not a log directory; kept", path.display());
+                warn!(
+                    "Housekeeping: {} is not a log directory; kept",
+                    path.display()
+                );
                 continue;
             }
             Err(e) => {
@@ -387,7 +393,10 @@ pub(crate) fn sweep_by_budget(
         let day = match day {
             Ok(day) => day,
             Err(e) => {
-                warn!("Housekeeping: cannot read an entry of {}: {e}", dir.display());
+                warn!(
+                    "Housekeeping: cannot read an entry of {}: {e}",
+                    dir.display()
+                );
                 continue;
             }
         };
@@ -543,7 +552,10 @@ pub(crate) fn sweep_dir(dir: &Path, max_age: Duration, now: SystemTime) -> io::R
         let entry = match entry {
             Ok(entry) => entry,
             Err(e) => {
-                warn!("Housekeeping: cannot read an entry of {}: {e}", dir.display());
+                warn!(
+                    "Housekeeping: cannot read an entry of {}: {e}",
+                    dir.display()
+                );
                 continue;
             }
         };
@@ -598,7 +610,10 @@ fn newest_mtime(path: &Path, depth: u32) -> io::Result<SystemTime> {
     if depth > MAX_DEPTH {
         return Err(io::Error::new(
             io::ErrorKind::InvalidData,
-            format!("{} is nested deeper than {MAX_DEPTH} levels", path.display()),
+            format!(
+                "{} is nested deeper than {MAX_DEPTH} levels",
+                path.display()
+            ),
         ));
     }
     let meta = std::fs::symlink_metadata(path)?;
@@ -945,7 +960,10 @@ mod tests {
             .map(|e| e.file_name().to_string_lossy().into_owned())
             .filter(|n| n != ".housekeeping-tmp")
             .collect();
-        assert!(left.is_empty(), "the rename must leave nothing over: {left:?}");
+        assert!(
+            left.is_empty(),
+            "the rename must leave nothing over: {left:?}"
+        );
         assert_eq!(lease_due(root, "tmp", HOUR, now), Lease::Held);
     }
 
@@ -984,8 +1002,14 @@ mod tests {
         let odd = dir.path().join("not-a-date");
         std::fs::create_dir_all(&odd).expect("mkdir");
         assert_eq!(
-            sweep_log_dirs(dir.path(), 0, "2026-09-17", &HashSet::new(), SystemTime::now())
-                .expect("sweep"),
+            sweep_log_dirs(
+                dir.path(),
+                0,
+                "2026-09-17",
+                &HashSet::new(),
+                SystemTime::now()
+            )
+            .expect("sweep"),
             0
         );
         assert!(odd.is_dir());
@@ -1043,8 +1067,14 @@ mod tests {
         // Two hours of quiet later it is reclaimed, so the assertion above pins the window and
         // not merely the fact that nothing is ever deleted.
         assert_eq!(
-            sweep_log_dirs(dir.path(), 14, "2026-09-17", &HashSet::new(), now + 2 * HOUR)
-                .expect("sweep"),
+            sweep_log_dirs(
+                dir.path(),
+                14,
+                "2026-09-17",
+                &HashSet::new(),
+                now + 2 * HOUR
+            )
+            .expect("sweep"),
             1
         );
     }

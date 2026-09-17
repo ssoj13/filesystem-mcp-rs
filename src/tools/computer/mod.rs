@@ -82,12 +82,16 @@ pub(crate) fn ctl_err(e: anyhow::Error) -> rmcp::ErrorData {
 /// verdict: rmcp cannot cfg-gate methods inside one shared impl).
 #[cfg(feature = "ctl-input")]
 pub(crate) mod server_input;
+#[cfg(any(
+    feature = "ctl-ocr",
+    feature = "ctl-notify",
+    feature = "ctl-clip-files"
+))]
+pub(crate) mod server_misc;
 #[cfg(any(feature = "ctl-input", feature = "ctl-uia", feature = "ctl-ocr"))]
 pub(crate) mod server_readonly;
 #[cfg(all(windows, feature = "ctl-uia"))]
 pub(crate) mod server_uia;
-#[cfg(any(feature = "ctl-ocr", feature = "ctl-notify", feature = "ctl-clip-files"))]
-pub(crate) mod server_misc;
 
 /// Shared response helper for the ctl server files: text + structured JSON.
 /// Uses the host's private `WithStructured` trait (main.rs) to fill
@@ -131,11 +135,7 @@ pub struct OcrOut {
 }
 
 /// Virtual-screen rectangle in physical pixels (may have negative origin).
-#[cfg(any(
-    feature = "ctl-input",
-    feature = "ctl-uia",
-    feature = "ctl-ocr"
-))]
+#[cfg(any(feature = "ctl-input", feature = "ctl-uia", feature = "ctl-ocr"))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, schemars::JsonSchema)]
 pub struct Rect {
     pub x: i32,
@@ -144,11 +144,7 @@ pub struct Rect {
     pub h: u32,
 }
 
-#[cfg(any(
-    feature = "ctl-input",
-    feature = "ctl-uia",
-    feature = "ctl-ocr"
-))]
+#[cfg(any(feature = "ctl-input", feature = "ctl-uia", feature = "ctl-ocr"))]
 impl Rect {
     pub fn new(x: i32, y: i32, w: u32, h: u32) -> Self {
         Self { x, y, w, h }
@@ -174,11 +170,7 @@ impl Rect {
 /// acceptable as long as the host chose SOME aware context (critic §10.4), so
 /// we query the actual context and succeed; only a truly DPI-unaware process
 /// is an error, because clicks/captures would land misaligned.
-#[cfg(any(
-    feature = "ctl-input",
-    feature = "ctl-uia",
-    feature = "ctl-ocr"
-))]
+#[cfg(any(feature = "ctl-input", feature = "ctl-uia", feature = "ctl-ocr"))]
 pub fn ensure_dpi_aware() -> anyhow::Result<()> {
     #[cfg(not(windows))]
     {
@@ -190,33 +182,35 @@ pub fn ensure_dpi_aware() -> anyhow::Result<()> {
     }
     #[cfg(windows)]
     {
-    use windows::Win32::UI::HiDpi::{
-        AreDpiAwarenessContextsEqual, GetThreadDpiAwarenessContext, DPI_AWARENESS_CONTEXT,
-        DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE, DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2,
-        DPI_AWARENESS_CONTEXT_SYSTEM_AWARE, SetProcessDpiAwarenessContext,
-    };
+        use windows::Win32::UI::HiDpi::{
+            AreDpiAwarenessContextsEqual, DPI_AWARENESS_CONTEXT,
+            DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE, DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2,
+            DPI_AWARENESS_CONTEXT_SYSTEM_AWARE, GetThreadDpiAwarenessContext,
+            SetProcessDpiAwarenessContext,
+        };
 
-    let want = DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2;
-    // SAFETY: plain Win32 DPI setters; no invariants beyond thread safety.
-    if unsafe { SetProcessDpiAwarenessContext(want) }.is_ok() {
-        return Ok(());
-    }
-    // Setter refused: awareness already fixed for this process. Thread-scoped
-    // query is enough for the host-already-aware check (per-process getter
-    // was dropped in windows 0.62).
-    let actual = unsafe { GetThreadDpiAwarenessContext() };
-    let eq = |c: DPI_AWARENESS_CONTEXT| unsafe { AreDpiAwarenessContextsEqual(actual, c) }.as_bool();
-    if eq(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2)
-        || eq(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE)
-        || eq(DPI_AWARENESS_CONTEXT_SYSTEM_AWARE)
-    {
-        tracing::debug!("DPI awareness already fixed by host (per-monitor/system aware)");
-        Ok(())
-    } else {
-        Err(anyhow::anyhow!(
-            "process DPI awareness is fixed to a non-aware context; input/capture would misalign"
-        ))
-    }
+        let want = DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2;
+        // SAFETY: plain Win32 DPI setters; no invariants beyond thread safety.
+        if unsafe { SetProcessDpiAwarenessContext(want) }.is_ok() {
+            return Ok(());
+        }
+        // Setter refused: awareness already fixed for this process. Thread-scoped
+        // query is enough for the host-already-aware check (per-process getter
+        // was dropped in windows 0.62).
+        let actual = unsafe { GetThreadDpiAwarenessContext() };
+        let eq =
+            |c: DPI_AWARENESS_CONTEXT| unsafe { AreDpiAwarenessContextsEqual(actual, c) }.as_bool();
+        if eq(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2)
+            || eq(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE)
+            || eq(DPI_AWARENESS_CONTEXT_SYSTEM_AWARE)
+        {
+            tracing::debug!("DPI awareness already fixed by host (per-monitor/system aware)");
+            Ok(())
+        } else {
+            Err(anyhow::anyhow!(
+                "process DPI awareness is fixed to a non-aware context; input/capture would misalign"
+            ))
+        }
     }
 }
 

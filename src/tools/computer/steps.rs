@@ -9,7 +9,7 @@ use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
 
-use super::capture::{self, CapTarget, hash_dist, default_cursor_size};
+use super::capture::{self, CapTarget, default_cursor_size, hash_dist};
 use super::driver::{self, Btn, WinTarget};
 use super::safety::SafetyGate;
 
@@ -28,7 +28,10 @@ pub struct Pt {
 #[derive(Debug, Clone, Deserialize, schemars::JsonSchema)]
 #[serde(tag = "t", rename_all = "snake_case")]
 pub enum Step {
-    Move { x: i32, y: i32 },
+    Move {
+        x: i32,
+        y: i32,
+    },
     Click {
         x: Option<i32>,
         y: Option<i32>,
@@ -48,10 +51,21 @@ pub enum Step {
         /// Settle at `from` with button down before moving (ms).
         hold_ms: Option<u32>,
     },
-    Scroll { dy: i32, dx: Option<i32> },
-    Key { key: String, hold_ms: Option<u32> },
-    Type { text: String, paste: Option<bool> },
-    Wait { ms: u32 },
+    Scroll {
+        dy: i32,
+        dx: Option<i32>,
+    },
+    Key {
+        key: String,
+        hold_ms: Option<u32>,
+    },
+    Type {
+        text: String,
+        paste: Option<bool>,
+    },
+    Wait {
+        ms: u32,
+    },
     WaitScreen {
         target: Option<CapTarget>,
         /// dhash to compare against; omitted -> hash the screen now, then wait for change.
@@ -59,8 +73,12 @@ pub enum Step {
         timeout_ms: Option<u32>,
         poll_ms: Option<u32>,
     },
-    Capture { target: Option<CapTarget> },
-    Focus { target: WinTarget },
+    Capture {
+        target: Option<CapTarget>,
+    },
+    Focus {
+        target: WinTarget,
+    },
 }
 
 /// Outcome of one step (aligned by index with the input steps).
@@ -94,7 +112,10 @@ pub fn run(
     stop_on_fail: bool,
 ) -> anyhow::Result<MacroResult> {
     if raw_steps.len() > MAX_STEPS {
-        return Err(anyhow::anyhow!("{MAX_STEPS}-step cap exceeded ({})", raw_steps.len()));
+        return Err(anyhow::anyhow!(
+            "{MAX_STEPS}-step cap exceeded ({})",
+            raw_steps.len()
+        ));
     }
     let started = Instant::now();
     let mut results: Vec<StepResult> = Vec::with_capacity(raw_steps.len());
@@ -105,26 +126,34 @@ pub fn run(
                 err: Some(format!("30 s wall cap hit at step {idx}")),
                 value: None,
             });
-            return Ok(MacroResult { results, elapsed_ms: started.elapsed().as_millis() as u64 });
+            return Ok(MacroResult {
+                results,
+                elapsed_ms: started.elapsed().as_millis() as u64,
+            });
         }
         if gap_ms > 0 && idx > 0 {
             std::thread::sleep(Duration::from_millis(gap_ms as u64));
         }
         let mut raw_step = raw.clone();
         resolve_refs(&mut raw_step, &results)?;
-        let step: Step = serde_json::from_value(raw_step).map_err(|e| {
-            anyhow::anyhow!("step {idx}: invalid step definition: {e}")
-        })?;
+        let step: Step = serde_json::from_value(raw_step)
+            .map_err(|e| anyhow::anyhow!("step {idx}: invalid step definition: {e}"))?;
         let res = run_step(gate, &step);
         let ok = res.is_ok();
         let value = res.as_ref().ok().cloned();
         let err = res.as_ref().err().map(|e| e.to_string());
         results.push(StepResult { ok, value, err });
         if !ok && stop_on_fail {
-            return Ok(MacroResult { results, elapsed_ms: started.elapsed().as_millis() as u64 });
+            return Ok(MacroResult {
+                results,
+                elapsed_ms: started.elapsed().as_millis() as u64,
+            });
         }
     }
-    Ok(MacroResult { results, elapsed_ms: started.elapsed().as_millis() as u64 })
+    Ok(MacroResult {
+        results,
+        elapsed_ms: started.elapsed().as_millis() as u64,
+    })
 }
 
 fn run_step(gate: &SafetyGate, step: &Step) -> anyhow::Result<serde_json::Value> {
@@ -134,13 +163,26 @@ fn run_step(gate: &SafetyGate, step: &Step) -> anyhow::Result<serde_json::Value>
             let f = driver::move_cursor(*x, *y)?;
             Ok(serde_json::json!({ "focus": f }))
         }
-        Step::Click { x, y, button, clicks, mods } => {
+        Step::Click {
+            x,
+            y,
+            button,
+            clicks,
+            mods,
+        } => {
             let btn = *button.as_ref().unwrap_or(&Btn::Left);
             let mod_keys = driver::parse_keymods(mods.as_deref())?;
             let f = driver::click(gate, *x, *y, btn, clicks.unwrap_or(1), &mod_keys)?;
             Ok(serde_json::json!({ "focus": f }))
         }
-        Step::Drag { from, to, button, duration_ms, ease, hold_ms } => {
+        Step::Drag {
+            from,
+            to,
+            button,
+            duration_ms,
+            ease,
+            hold_ms,
+        } => {
             let btn = *button.as_ref().unwrap_or(&Btn::Left);
             // No explicit start = drag from where the cursor is. A failed
             // query must NOT fall back to (0,0): that would silently drag from
@@ -172,16 +214,29 @@ fn run_step(gate: &SafetyGate, step: &Step) -> anyhow::Result<serde_json::Value>
             let paste = paste.unwrap_or(true);
             // Paste safety: the expected window is whatever is focused NOW —
             // a focus change between steps refuses the paste (critic §10.2).
-            let expect = if paste { Some(driver::focus()?.hwnd) } else { None };
+            let expect = if paste {
+                Some(driver::focus()?.hwnd)
+            } else {
+                None
+            };
             let r = driver::type_text(gate, text, paste, 0, expect)?;
-            Ok(serde_json::json!({ "mode": r.mode, "chars": r.chars, "focus": r.focus, "clipboard_restored": r.clipboard_restored }))
+            Ok(
+                serde_json::json!({ "mode": r.mode, "chars": r.chars, "focus": r.focus, "clipboard_restored": r.clipboard_restored }),
+            )
         }
         Step::Wait { ms } => {
             std::thread::sleep(Duration::from_millis(*ms as u64));
             Ok(serde_json::json!({ "waited_ms": ms }))
         }
-        Step::WaitScreen { target, since, timeout_ms, poll_ms } => {
-            let cap = target.clone().unwrap_or(CapTarget::Cursor { size: default_cursor_size() });
+        Step::WaitScreen {
+            target,
+            since,
+            timeout_ms,
+            poll_ms,
+        } => {
+            let cap = target.clone().unwrap_or(CapTarget::Cursor {
+                size: default_cursor_size(),
+            });
             let baseline = match since {
                 Some(h) => *h,
                 None => capture::capture(cap.clone())?.hash,
@@ -229,8 +284,9 @@ fn resolve_refs(value: &mut serde_json::Value, results: &[StepResult]) -> anyhow
                 };
                 // `end` is relative to `start`; the closing brace is absolute.
                 let token = &rest[start + 2..start + end];
-                let (idx, path) = parse_ref(token)
-                    .ok_or_else(|| anyhow::anyhow!("invalid ref ${{{token}}} (want N or N.path)"))?;
+                let (idx, path) = parse_ref(token).ok_or_else(|| {
+                    anyhow::anyhow!("invalid ref ${{{token}}} (want N or N.path)")
+                })?;
                 let v = lookup_ref(results, idx, &path)?;
                 replaced = true;
                 let whole_string = start == 0 && start + end == rest.len() - 1;
@@ -282,7 +338,10 @@ fn lookup_ref(
     path: &[String],
 ) -> anyhow::Result<serde_json::Value> {
     let res = results.get(idx).ok_or_else(|| {
-        anyhow::anyhow!("ref ${{{idx}}} points ahead (only steps 0..{} have run)", results.len())
+        anyhow::anyhow!(
+            "ref ${{{idx}}} points ahead (only steps 0..{} have run)",
+            results.len()
+        )
     })?;
     let Some(v) = &res.value else {
         return Err(anyhow::anyhow!("ref ${{{idx}}}: step failed, no result"));
@@ -299,21 +358,24 @@ fn lookup_ref(
                     anyhow::anyhow!("ref ${{{idx}}}: array index {i} out of range")
                 })?
             }
-            obj => obj.get(seg).ok_or_else(|| {
-                anyhow::anyhow!("ref ${{{idx}}}: no key {seg:?} in result")
-            })?,
+            obj => obj
+                .get(seg)
+                .ok_or_else(|| anyhow::anyhow!("ref ${{{idx}}}: no key {seg:?} in result"))?,
         };
     }
     Ok(cur.clone())
 }
-
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
     fn res(idx_ok: bool, v: serde_json::Value) -> StepResult {
-        StepResult { ok: idx_ok, value: Some(v), err: None }
+        StepResult {
+            ok: idx_ok,
+            value: Some(v),
+            err: None,
+        }
     }
 
     #[test]

@@ -116,11 +116,14 @@ impl ContentRef {
             // old opaque message lacked.
             let parsed: serde_json::Value = serde_json::from_str(trimmed)
                 .map_err(|e| format!("content: string looks like a JSON object but failed to parse: {e} (fix escaping or stage via blob)"))?;
-            let o = ContentRefObject::deserialize(parsed)
-                .map_err(|e| format!("content: string holds JSON but not a ContentRef object: {e}"))?;
+            let o = ContentRefObject::deserialize(parsed).map_err(|e| {
+                format!("content: string holds JSON but not a ContentRef object: {e}")
+            })?;
             return Ok(o.into());
         }
-        Ok(ContentRef::Inline { text: s.to_string() })
+        Ok(ContentRef::Inline {
+            text: s.to_string(),
+        })
     }
 }
 
@@ -528,7 +531,12 @@ mod tests {
     #[test]
     fn tolerant_bare_string_is_inline() {
         let r: ContentRef = serde_json::from_str("\"plain text content\"").unwrap();
-        assert_eq!(r, ContentRef::Inline { text: "plain text content".into() });
+        assert_eq!(
+            r,
+            ContentRef::Inline {
+                text: "plain text content".into()
+            }
+        );
     }
 
     /// BUG.md fix 1: double-encoded ContentRef object is unwrapped.
@@ -543,8 +551,7 @@ mod tests {
     /// BUG.md fix 1: canonical object form unchanged.
     #[test]
     fn tolerant_object_passthrough() {
-        let r: ContentRef =
-            serde_json::from_str("{\"kind\":\"blob\",\"id\":\"abc\"}").unwrap();
+        let r: ContentRef = serde_json::from_str("{\"kind\":\"blob\",\"id\":\"abc\"}").unwrap();
         assert_eq!(r, ContentRef::Blob { id: "abc".into() });
     }
 
@@ -565,9 +572,12 @@ mod tests {
     /// A JSON object that is NOT a ContentRef fails with a field-level error.
     #[test]
     fn tolerant_wrong_object_shape_is_loud() {
-        let err = ContentRef::tolerant_from_value(serde_json::json!({ "kind": "inline" }))
-            .unwrap_err();
-        assert!(err.contains("text"), "error must name the missing field: {err}");
+        let err =
+            ContentRef::tolerant_from_value(serde_json::json!({ "kind": "inline" })).unwrap_err();
+        assert!(
+            err.contains("text"),
+            "error must name the missing field: {err}"
+        );
     }
 
     /// A spool in a throwaway directory. Tests must never write into the real state root, and

@@ -21,14 +21,14 @@ pub mod input;
 #[cfg(any(feature = "ctl-input", feature = "ctl-uia", feature = "ctl-ocr"))]
 pub mod win;
 
-#[cfg(feature = "ctl-uia")]
-pub mod uia;
-#[cfg(feature = "ctl-ocr")]
-pub mod ocr;
-#[cfg(feature = "ctl-notify")]
-pub mod notify;
 #[cfg(feature = "ctl-clip-files")]
 pub mod clip;
+#[cfg(feature = "ctl-notify")]
+pub mod notify;
+#[cfg(feature = "ctl-ocr")]
+pub mod ocr;
+#[cfg(feature = "ctl-uia")]
+pub mod uia;
 
 /// The Windows backend. Unit struct: all state lives in the OS.
 pub struct Win32;
@@ -240,7 +240,9 @@ impl ClipDrv for Win32 {
         }
         #[cfg(not(feature = "ctl-clip-files"))]
         {
-            Err(super::unsupported("clipboard file lists (build without ctl-clip-files)"))
+            Err(super::unsupported(
+                "clipboard file lists (build without ctl-clip-files)",
+            ))
         }
     }
 
@@ -252,7 +254,9 @@ impl ClipDrv for Win32 {
         #[cfg(not(feature = "ctl-clip-files"))]
         {
             let _ = files;
-            Err(super::unsupported("clipboard file lists (build without ctl-clip-files)"))
+            Err(super::unsupported(
+                "clipboard file lists (build without ctl-clip-files)",
+            ))
         }
     }
 

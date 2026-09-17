@@ -250,7 +250,10 @@ mod tests {
             "Blank = %LOCALAPPDATA%\\filesystem-mcp-rs.",
             "Blank = ~/Library/Application Support/filesystem-mcp-rs.",
         ] {
-            assert!(names_a_location(stale), "not detected as a location: {stale}");
+            assert!(
+                names_a_location(stale),
+                "not detected as a location: {stale}"
+            );
             assert!(
                 !STATE_ANCHORS.iter().any(|a| stale.contains(a)),
                 "wrongly accepted as anchored: {stale}"
@@ -312,7 +315,10 @@ mod tests {
             assert_eq!(all.iter().filter(|v| v.key == key).count(), 1, "{key}");
         }
 
-        let level = all.iter().find(|v| v.key == "FS_MCP_LOG").expect("level key");
+        let level = all
+            .iter()
+            .find(|v| v.key == "FS_MCP_LOG")
+            .expect("level key");
         // Trivially true today, because the `EnvVar` holds the constant itself rather than a
         // copy of its text. It is kept, not deleted: the moment someone re-inlines `"info"`
         // here it becomes the same load-bearing drift guard as the tmp assertion below, firing
