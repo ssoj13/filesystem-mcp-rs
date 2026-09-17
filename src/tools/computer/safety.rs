@@ -58,7 +58,10 @@ static GATE: OnceLock<Arc<SafetyGate>> = OnceLock::new();
 /// Install the process-global gate with the ops-per-minute runaway cap.
 #[cfg(any(feature = "ctl-input", feature = "ctl-uia"))]
 pub fn init_gate(max_ops_per_min: u32) {
-    let _ = GATE.set(Arc::new(SafetyGate::new(max_ops_per_min)));
+    let _ = GATE.set(Arc::new(SafetyGate::with_audit(
+        max_ops_per_min,
+        default_audit_path(),
+    )));
 }
 
 /// The process-global gate (input/uia tool handlers borrow it).
@@ -153,17 +156,13 @@ pub struct SafetyGate {
 }
 
 impl SafetyGate {
-    /// `max_ops_per_min` bounds executed input actions in a sliding 60 s window.
-    /// The audit trail goes to [`default_audit_path`], which resolves the real state root.
-    pub fn new(max_ops_per_min: u32) -> Self {
-        Self::with_audit(max_ops_per_min, default_audit_path())
-    }
-
-    /// A gate writing its audit trail to an explicit path, or nowhere with `None`.
+    /// `max_ops_per_min` bounds executed input actions in a sliding 60 s window; the audit
+    /// trail goes to `audit_path`, or nowhere when that is `None`.
     ///
-    /// Exists so tests can build a gate without touching the operator's real state directory:
-    /// [`default_audit_path`] creates `<state>/safety/` and migrates the pre-2026-09 log, which
-    /// is correct at startup and destructive in a test run.
+    /// The path is always passed in, never defaulted inside, so that no caller can reach
+    /// [`default_audit_path`] by accident: that function creates `<state>/safety/` and migrates
+    /// the pre-2026-09 log, which is right exactly once at startup and destructive anywhere
+    /// else. Production goes through [`init_gate`]; tests pass `None` or a temp path.
     pub fn with_audit(max_ops_per_min: u32, audit_path: Option<PathBuf>) -> Self {
         Self {
             state: Mutex::new(GateState {
@@ -324,8 +323,8 @@ mod tests {
     /// directory rather than appended to the operator's real log.
     #[test]
     fn op_cap_trips_and_records_only_executed_ops() {
-        let base = std::env::temp_dir().join(format!("fsmcp-audit-{}", uuid::Uuid::new_v4()));
-        let audit = base.join("safety/audit.jsonl");
+        let tmp = tempfile::TempDir::new().expect("temp dir");
+        let audit = tmp.path().join("safety/audit.jsonl");
         let gate = SafetyGate::with_audit(2, Some(audit.clone()));
 
         gate.record("t", serde_json::json!({})).expect("first op");
@@ -337,18 +336,35 @@ mod tests {
 
         let lines = std::fs::read_to_string(&audit).expect("audit log written");
         assert_eq!(lines.lines().count(), 2, "only executed ops are audited");
-        std::fs::remove_dir_all(&base).ok();
     }
 
-    /// A gate with no audit path still gates: auditing being off must never turn a permitted
-    /// action into an error, nor a refused one into a success.
+    /// With no audit path the gate writes nothing at all - not the log, not even the directory
+    /// `append_line` would otherwise create - while gating exactly as before.
+    ///
+    /// The absence is asserted against the very path that the paired `Some` gate below creates
+    /// from an identical op sequence, so "not there" is a real difference between the two
+    /// configurations rather than a vacuous claim about an unrelated path.
     #[test]
-    fn records_without_an_audit_path() {
-        let gate = SafetyGate::with_audit(1, None);
-        gate.record("t", serde_json::json!({})).expect("first op");
-        assert!(matches!(
-            gate.record("t", serde_json::json!({})),
-            Err(CtlError::OpCapExceeded { .. })
-        ));
+    fn a_gate_without_an_audit_path_writes_nothing() {
+        let tmp = tempfile::TempDir::new().expect("temp dir");
+        let audit = tmp.path().join("safety/audit.jsonl");
+        let dir = audit.parent().expect("audit parent").to_path_buf();
+
+        let quiet = SafetyGate::with_audit(1, None);
+        quiet.record("t", serde_json::json!({})).expect("first op");
+        assert!(
+            matches!(
+                quiet.record("t", serde_json::json!({})),
+                Err(CtlError::OpCapExceeded { .. })
+            ),
+            "the cap must still trip without an audit path"
+        );
+        assert!(!dir.exists(), "no audit path means no directory is created");
+
+        // Same cap, same ops, only `audit_path` differs - and now the file is there.
+        let loud = SafetyGate::with_audit(1, Some(audit.clone()));
+        loud.record("t", serde_json::json!({})).expect("first op");
+        let lines = std::fs::read_to_string(&audit).expect("audit log written");
+        assert_eq!(lines.lines().count(), 1);
     }
 }

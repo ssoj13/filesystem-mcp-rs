@@ -7569,8 +7569,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     init_logging(mode, args.log)?;
 
     // The process-global arm gate, built only now: resolving its audit path can fail, and that
-    // warning has to reach a subscriber. Built before logging it was silent in every mode, so a
-    // disabled security audit trail looked exactly like a working one.
+    // warning has to reach a subscriber. Built before `init_logging` it could not reach one at
+    // all. It now does under --stream and under stdio --log; plain stdio installs no subscriber
+    // (see core/logging.rs), so there the warning is still lost - and plain stdio is how an MCP
+    // client normally starts this server. Wave 2's per-process file logging closes that gap;
+    // a bespoke second channel here would defeat the unification this wave is for.
     #[cfg(any(feature = "ctl-input", feature = "ctl-uia"))]
     crate::tools::computer::safety::init_gate(
         crate::tools::computer::safety::resolve_ops_per_min(args.ctl_ops_per_min),
