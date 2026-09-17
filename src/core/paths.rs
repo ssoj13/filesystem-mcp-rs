@@ -125,15 +125,25 @@ pub const TMP_KEEP_HOURS_MAX: u64 = 24 * 365;
 /// without mutating the process environment.
 fn resolve_root(override_dir: Option<PathBuf>) -> io::Result<PathBuf> {
     let root = resolve_root_from(override_dir, dirs::home_dir())?;
-    std::fs::create_dir_all(&root)?;
+    mkdir(&root)?;
     Ok(root)
 }
 
 /// Resolve a subdirectory and create it. Split for the same reason as [`resolve_root`].
 fn resolve_sub(override_dir: Option<PathBuf>, kind: SubDir) -> io::Result<PathBuf> {
     let dir = resolve_root(override_dir)?.join(kind.as_str());
-    std::fs::create_dir_all(&dir)?;
+    mkdir(&dir)?;
     Ok(dir)
+}
+
+/// `create_dir_all` that names the directory it could not create.
+///
+/// A bare `std::fs` error carries only the reason, so with `FS_MCP_STATE_DIR` unset the operator
+/// read `Cannot prepare the server state directory: Access is denied. (os error 5)` and had no
+/// way to tell which directory was refused - the one thing they need in order to fix it.
+fn mkdir(dir: &Path) -> io::Result<()> {
+    std::fs::create_dir_all(dir)
+        .map_err(|e| io::Error::new(e.kind(), format!("Cannot create {}: {e}", dir.display())))
 }
 
 /// Pure path arithmetic: the override wins, otherwise `<home>/.filesystem-mcp-rs`.
@@ -176,8 +186,28 @@ pub enum Migrated {
     /// the steady state of every run after a successful migration, so this variant means "no
     /// action required", not "the server has no data".
     FreshStart,
-    /// Both existed, or the move failed. Nothing was touched: the data is still at `old`.
-    Ambiguous { old: PathBuf, new: PathBuf },
+    /// The data was not moved and is still at `old`. `cause` says which of the two very different
+    /// situations this is, because the advice an operator needs differs completely between them.
+    Ambiguous {
+        old: PathBuf,
+        new: PathBuf,
+        cause: Cause,
+    },
+}
+
+/// Why a migration ended up [`Migrated::Ambiguous`].
+///
+/// The distinction exists because only one of these two means there is anything at `new`. Three of
+/// [`migrate`]'s four refusal paths are `Failed`, and in all three `new` does not exist - either it
+/// never did, or the cleanup removed it - so a message telling the operator to "delete the one you
+/// do not want" would send them after a file that is not there.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Cause {
+    /// A file exists at both paths. Only a human can say which set of data to keep.
+    BothExist,
+    /// The move was attempted and could not be completed; the string is the underlying reason.
+    /// Nothing exists at `new`.
+    Failed(String),
 }
 
 /// Move `old` to `new` when that is unambiguous.
@@ -199,16 +229,15 @@ pub enum Migrated {
 /// on Unix that arm is verified by reading. The parent-creation failure returns before any of
 /// this and is covered separately.
 pub fn migrate(old: &Path, new: &Path) -> Migrated {
-    let ambiguous = || Migrated::Ambiguous {
+    let ambiguous = |cause: Cause| Migrated::Ambiguous {
         old: old.to_path_buf(),
         new: new.to_path_buf(),
+        cause,
     };
     if old.is_dir() {
-        warn!(
-            "Refusing to migrate {}: migrate() moves single files, not directories",
-            old.display()
-        );
-        return ambiguous();
+        let why = "migrate() moves single files, not directories";
+        warn!("Refusing to migrate {}: {why}", old.display());
+        return ambiguous(Cause::Failed(why.to_string()));
     }
     match (old.exists(), new.exists()) {
         (true, false) => {
@@ -216,7 +245,10 @@ pub fn migrate(old: &Path, new: &Path) -> Migrated {
                 && let Err(e) = std::fs::create_dir_all(parent)
             {
                 warn!("Cannot create {}: {e}", parent.display());
-                return ambiguous();
+                return ambiguous(Cause::Failed(format!(
+                    "cannot create {}: {e}",
+                    parent.display()
+                )));
             }
             if std::fs::rename(old, new).is_ok() {
                 info!("Migrated {} -> {}", old.display(), new.display());
@@ -247,11 +279,11 @@ pub fn migrate(old: &Path, new: &Path) -> Migrated {
                             new.display()
                         );
                     }
-                    ambiguous()
+                    ambiguous(Cause::Failed(e.to_string()))
                 }
             }
         }
-        (true, true) => ambiguous(),
+        (true, true) => ambiguous(Cause::BothExist),
         (false, _) => Migrated::FreshStart,
     }
 }
@@ -288,14 +320,34 @@ pub enum MemoryDbDecision {
 /// Two memory databases mean two different sets of the user's notes. Choosing one silently is
 /// how "where did my memories go" bugs are born, so the store stays off until a human decides
 /// which file to keep.
+///
+/// A failed move disables the store for the same reason - the data is somewhere the server no
+/// longer reads - but the remedy is the opposite, so the two get different messages. The common
+/// failure is a second instance of this server holding the legacy database open, which is the
+/// *normal* state on an upgrade: the installed server is running when the new one first starts.
 pub fn memory_db_decision(m: Migrated) -> MemoryDbDecision {
     match m {
         Migrated::Moved | Migrated::FreshStart => MemoryDbDecision::Use,
-        Migrated::Ambiguous { old, new } => MemoryDbDecision::Disabled(format!(
+        Migrated::Ambiguous {
+            old,
+            new,
+            cause: Cause::BothExist,
+        } => MemoryDbDecision::Disabled(format!(
             "Memory tools disabled: a memory database exists both at {} and at {}. \
              Keep the one you want, delete or rename the other, then restart.",
             old.display(),
             new.display()
+        )),
+        // Deliberately says nothing about the new path: there is no file there to act on.
+        Migrated::Ambiguous {
+            old,
+            cause: Cause::Failed(why),
+            ..
+        } => MemoryDbDecision::Disabled(format!(
+            "Memory tools disabled: the memory database is still at {}, because moving it into \
+             the state directory failed: {why}. The usual cause is another instance of this \
+             server still running and holding the file open; stop it and restart.",
+            old.display()
         )),
     }
 }
@@ -340,6 +392,21 @@ mod tests {
         assert!(tmp.is_dir(), "tmp must be created on demand");
     }
 
+    /// A root that cannot be created names itself in the error. The reason alone - "Access is
+    /// denied. (os error 5)" - leaves an operator with `FS_MCP_STATE_DIR` unset unable to tell
+    /// which directory was refused, which is the one fact they need.
+    #[test]
+    fn uncreatable_root_names_the_directory() {
+        let scratch = tempfile::TempDir::new().expect("scratch dir");
+        let blocker = scratch.path().join("blocker");
+        std::fs::write(&blocker, b"not a directory").expect("write blocker");
+        let root = blocker.join("state");
+
+        let err = resolve_root(Some(root.clone())).expect_err("a file cannot host a directory");
+        let msg = err.to_string();
+        assert!(msg.contains(&root.display().to_string()), "{msg}");
+    }
+
     /// An unresolvable home is an error, never a silent fallback to the current directory:
     /// falling back would scatter databases into whatever directory an agent started in.
     #[test]
@@ -361,12 +428,13 @@ mod tests {
         assert!(msg.contains("state"), "{msg}");
     }
 
-    /// An ambiguous memory database must disable the memory store rather than pick a file.
+    /// Two databases must disable the memory store rather than pick a file, and must name both.
     #[test]
     fn ambiguous_memory_db_disables_the_store() {
         let decision = memory_db_decision(Migrated::Ambiguous {
             old: PathBuf::from("/old/memory2.db"),
             new: PathBuf::from("/new/memory2.db"),
+            cause: Cause::BothExist,
         });
         match decision {
             MemoryDbDecision::Disabled(msg) => {
@@ -379,6 +447,58 @@ mod tests {
             memory_db_decision(Migrated::FreshStart),
             MemoryDbDecision::Use
         ));
+    }
+
+    /// A failed move must describe what actually happened. The old message claimed a database
+    /// existed at both paths and told the operator to delete one of them - but the cleanup in
+    /// [`migrate`] removes anything at the new path, so that advice pointed at a file that is not
+    /// there. This is the common case, not an exotic one: on an upgrade the installed server is
+    /// usually still running and holding the legacy database open.
+    #[test]
+    fn failed_migration_names_the_old_path_and_nothing_to_delete() {
+        let decision = memory_db_decision(Migrated::Ambiguous {
+            old: PathBuf::from("/old/memory2.db"),
+            new: PathBuf::from("/new/memory2.db"),
+            cause: Cause::Failed(
+                "The process cannot access the file because it is being used by another process. \
+                 (os error 32)"
+                    .to_string(),
+            ),
+        });
+        let MemoryDbDecision::Disabled(msg) = decision else {
+            panic!("a failed move must disable the store");
+        };
+        assert!(msg.contains("/old/memory2.db"), "{msg}");
+        assert!(msg.contains("os error 32"), "the reason must survive: {msg}");
+        assert!(
+            msg.contains("still running"),
+            "the usual remedy must be named: {msg}"
+        );
+        assert!(
+            !msg.contains("/new/memory2.db"),
+            "nothing exists at the new path, so it must not be mentioned: {msg}"
+        );
+        assert!(
+            !msg.contains("delete"),
+            "there is no second file to delete: {msg}"
+        );
+    }
+
+    /// The shape every refusal that is *not* "two files exist" must have: both paths carried, and
+    /// a `Failed` cause whose reason is non-empty, since that reason is what the operator is told.
+    fn assert_failed_migration(outcome: Migrated, old: &Path, new: &Path) {
+        match outcome {
+            Migrated::Ambiguous {
+                old: o,
+                new: n,
+                cause: Cause::Failed(why),
+            } => {
+                assert_eq!(o, old);
+                assert_eq!(n, new);
+                assert!(!why.is_empty(), "a failure must say why");
+            }
+            other => panic!("expected Ambiguous/Failed, got {other:?}"),
+        }
     }
 
     /// Old file present, new absent: the data moves and the old path is gone.
@@ -409,11 +529,15 @@ mod tests {
         }
 
         match migrate(&old, &new) {
-            Migrated::Ambiguous { old: o, new: n } => {
+            Migrated::Ambiguous {
+                old: o,
+                new: n,
+                cause: Cause::BothExist,
+            } => {
                 assert_eq!(o, old);
                 assert_eq!(n, new);
             }
-            other => panic!("expected Ambiguous, got {other:?}"),
+            other => panic!("expected Ambiguous/BothExist, got {other:?}"),
         }
         assert!(old.exists() && new.exists(), "neither file may be touched");
     }
@@ -440,13 +564,7 @@ mod tests {
         let new = base.join("new_dir");
         std::fs::create_dir_all(old.join("inner")).expect("mkdir");
 
-        assert_eq!(
-            migrate(&old, &new),
-            Migrated::Ambiguous {
-                old: old.clone(),
-                new: new.clone()
-            }
-        );
+        assert_failed_migration(migrate(&old, &new), &old, &new);
         assert!(old.join("inner").is_dir(), "the directory must be intact");
         assert!(!new.exists(), "nothing may be created at the new path");
     }
@@ -465,13 +583,7 @@ mod tests {
         std::fs::write(&old, b"payload").expect("write");
         std::fs::write(&blocker, b"not a directory").expect("write blocker");
 
-        assert_eq!(
-            migrate(&old, &new),
-            Migrated::Ambiguous {
-                old: old.clone(),
-                new: new.clone()
-            }
-        );
+        assert_failed_migration(migrate(&old, &new), &old, &new);
         assert!(old.exists(), "the original must survive a failed migration");
         assert_eq!(std::fs::read(&old).expect("read"), b"payload");
         assert!(!new.exists(), "no partial file may be left at the new path");
@@ -508,13 +620,7 @@ mod tests {
         let outcome = migrate(&old, &new);
         drop(handle);
 
-        assert_eq!(
-            outcome,
-            Migrated::Ambiguous {
-                old: old.clone(),
-                new: new.clone()
-            }
-        );
+        assert_failed_migration(outcome, &old, &new);
         assert!(old.exists(), "the original must survive");
         assert_eq!(std::fs::read(&old).expect("read"), b"payload");
         assert!(

@@ -254,14 +254,25 @@ fn default_audit_path() -> Option<PathBuf> {
     };
     let new = dir.join("audit.jsonl");
     if let Some(legacy) = crate::core::paths::legacy_ctl_audit()
-        && let crate::core::paths::Migrated::Ambiguous { old, .. } =
+        && let crate::core::paths::Migrated::Ambiguous { old, cause, .. } =
             crate::core::paths::migrate(&legacy, &new)
     {
-        tracing::warn!(
-            "Old audit log left at {}: a log already exists at {}. Merge or remove one by hand.",
-            old.display(),
-            new.display()
-        );
+        match cause {
+            crate::core::paths::Cause::BothExist => tracing::warn!(
+                "Old audit log left at {}: a log already exists at {}. Merge or remove one by hand.",
+                old.display(),
+                new.display()
+            ),
+            // Nothing exists at `new` after a failed move - `migrate` cleans up - so this must not
+            // send the operator looking for a second file. Auditing itself still works: the new
+            // log is created on the first append.
+            crate::core::paths::Cause::Failed(why) => tracing::warn!(
+                "Old audit log left at {}: moving it into the state directory failed: {why}. \
+                 New entries are recorded at {}; the old file is yours to keep or delete.",
+                old.display(),
+                new.display()
+            ),
+        }
     }
     Some(new)
 }
