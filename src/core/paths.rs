@@ -13,7 +13,8 @@
 #![allow(dead_code)]
 
 use std::io;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
+use tracing::{info, warn};
 
 use crate::env_spec;
 
@@ -95,6 +96,67 @@ fn resolve_root_from(override_dir: Option<PathBuf>, home: Option<PathBuf>) -> io
     }
 }
 
+/// Outcome of migrating one location from its pre-2026-09 home to the state root.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Migrated {
+    /// The old location existed and was moved to the new one.
+    Moved,
+    /// Neither location existed: the caller starts fresh.
+    FreshStart,
+    /// Both existed, or the move failed. Nothing was touched.
+    Ambiguous { old: PathBuf, new: PathBuf },
+}
+
+/// Move `old` to `new` when that is unambiguous.
+///
+/// `rename` is instantaneous within a volume; across volumes it fails with a platform-specific
+/// error, so we fall back to copy + remove. A failed copy leaves the original untouched and is
+/// reported as `Ambiguous`, which is the honest answer: the data is still at the old path.
+pub fn migrate(old: &Path, new: &Path) -> Migrated {
+    let ambiguous = || Migrated::Ambiguous {
+        old: old.to_path_buf(),
+        new: new.to_path_buf(),
+    };
+    match (old.exists(), new.exists()) {
+        (true, false) => {
+            if let Some(parent) = new.parent()
+                && let Err(e) = std::fs::create_dir_all(parent)
+            {
+                warn!("Cannot create {}: {e}", parent.display());
+                return ambiguous();
+            }
+            if std::fs::rename(old, new).is_ok() {
+                info!("Migrated {} -> {}", old.display(), new.display());
+                return Migrated::Moved;
+            }
+            match std::fs::copy(old, new).and_then(|_| std::fs::remove_file(old)) {
+                Ok(()) => {
+                    info!("Migrated (copied) {} -> {}", old.display(), new.display());
+                    Migrated::Moved
+                }
+                Err(e) => {
+                    warn!("Failed to migrate {} -> {}: {e}", old.display(), new.display());
+                    ambiguous()
+                }
+            }
+        }
+        (true, true) => ambiguous(),
+        (false, _) => Migrated::FreshStart,
+    }
+}
+
+/// The pre-2026-09 root for files that lived in `data_local_dir`, used only to find data left
+/// by older builds. Never used for new writes.
+pub fn legacy_local_dir() -> Option<PathBuf> {
+    dirs::data_local_dir().map(|d| d.join("filesystem-mcp-rs"))
+}
+
+/// The pre-2026-09 root for computer-control state, which used `data_dir` under the name of
+/// the crate this module was extracted from. Never used for new writes.
+pub fn legacy_ctl_dir() -> Option<PathBuf> {
+    dirs::data_dir().map(|d| d.join("computer-mcp-rs"))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -128,5 +190,52 @@ mod tests {
         let err = resolve_root_from(None, None).expect_err("must not fall back");
         assert_eq!(err.kind(), std::io::ErrorKind::NotFound);
         assert!(err.to_string().contains("FS_MCP_STATE_DIR"));
+    }
+
+    /// Old file present, new absent: the data moves and the old path is gone.
+    #[test]
+    fn migrate_moves_when_unambiguous() {
+        let base = std::env::temp_dir().join(format!("fsmcp-mig-{}", uuid::Uuid::new_v4()));
+        let old = base.join("old/memory2.db");
+        let new = base.join("new/memory2.db");
+        std::fs::create_dir_all(old.parent().expect("parent")).expect("mkdir");
+        std::fs::write(&old, b"payload").expect("write");
+
+        assert_eq!(migrate(&old, &new), Migrated::Moved);
+        assert!(!old.exists(), "old path must be gone after a move");
+        assert_eq!(std::fs::read(&new).expect("read"), b"payload");
+        std::fs::remove_dir_all(&base).ok();
+    }
+
+    /// Both present: refuse to guess, touch nothing.
+    #[test]
+    fn migrate_refuses_when_both_exist() {
+        let base = std::env::temp_dir().join(format!("fsmcp-mig-{}", uuid::Uuid::new_v4()));
+        let old = base.join("old/memory2.db");
+        let new = base.join("new/memory2.db");
+        for p in [&old, &new] {
+            std::fs::create_dir_all(p.parent().expect("parent")).expect("mkdir");
+            std::fs::write(p, b"payload").expect("write");
+        }
+
+        match migrate(&old, &new) {
+            Migrated::Ambiguous { old: o, new: n } => {
+                assert_eq!(o, old);
+                assert_eq!(n, new);
+            }
+            other => panic!("expected Ambiguous, got {other:?}"),
+        }
+        assert!(old.exists() && new.exists(), "neither file may be touched");
+        std::fs::remove_dir_all(&base).ok();
+    }
+
+    /// Nothing to migrate.
+    #[test]
+    fn migrate_reports_fresh_start() {
+        let base = std::env::temp_dir().join(format!("fsmcp-mig-{}", uuid::Uuid::new_v4()));
+        assert_eq!(
+            migrate(&base.join("old.db"), &base.join("new.db")),
+            Migrated::FreshStart
+        );
     }
 }
