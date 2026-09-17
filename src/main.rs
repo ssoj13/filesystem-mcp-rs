@@ -223,11 +223,12 @@ struct FileSystemServer {
 impl FileSystemServer {
     /// Build the server.
     ///
-    /// Fallible because the content plane's blob spool lives under the state root, and an
-    /// unresolvable state root breaks the memory database, captures, stream logs and temporary
-    /// scripts alike. Reporting it once here — in the same `io::Error` shape `main` already uses
-    /// for a bad memory access mode — beats smearing one root cause across a dozen unrelated
-    /// per-tool failures later.
+    /// Fallible because the content plane's blob spool is created here. An unresolvable state
+    /// root is no longer diagnosed at this point — `run` validates it before anything under it is
+    /// built, precisely so that the narrowest consumer does not get to frame a failure that
+    /// equally breaks the memory database, captures, stream logs and temporary scripts. What
+    /// reaches this message now is a genuine spool failure: the root resolved, but the spool
+    /// directory beneath it could not be created.
     fn new(allowed: AllowedDirs) -> std::io::Result<Self> {
         let mut tool_router = Self::tool_router();
         // Computer-control domains: per-domain routers (S1 spike — rmcp cannot
@@ -7527,8 +7528,23 @@ fn install_panic_hook() {
     }));
 }
 
+/// Print a startup failure the way a human reads it, and exit non-zero.
+///
+/// `main` returning `Result` renders the error with `Debug`, so an operator whose state root is
+/// unresolvable saw `Error: Custom { kind: InvalidInput, error: "..." }` - the sentence written
+/// for them wrapped in the shape of the type carrying it. The real work lives in [`run`]; this
+/// shim exists only so the `Display` form is what reaches stderr. It covers every startup
+/// failure in the binary, not only the state directory.
+fn main() {
+    if let Err(e) = run() {
+        eprintln!("error: {e}");
+        std::process::exit(1);
+    }
+}
+
+/// Parse the command line, build the server and hand it to the selected transport.
 #[tokio::main]
-async fn main() -> Result<(), Box<dyn std::error::Error>> {
+async fn run() -> Result<(), Box<dyn std::error::Error>> {
     // Install panic hook FIRST - writes to file since stderr breaks stdio MCP
     install_panic_hook();
 
@@ -7569,6 +7585,17 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         print_features();
         return Ok(());
     }
+
+    // The state root, validated once and early. Every consumer of it - the memory database, the
+    // content-plane blob spool, captures, stream logs, temporary scripts - fails for this one
+    // reason, and whichever happened to be constructed first used to own the message: the spool,
+    // the narrowest of them, was explaining a failure that is not about the spool at all.
+    core::paths::state_dir().map_err(|e| {
+        std::io::Error::new(
+            e.kind(),
+            format!("Cannot prepare the server state directory: {e}"),
+        )
+    })?;
 
     // Determine transport mode
     let mode = if args.stream_mode {
