@@ -13,7 +13,10 @@ use super::driver::WinQuery;
 const CHANGE_EPS: u32 = 6;
 
 /// What to wait for.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+///
+/// `JsonSchema` because this is the wire type of `wait`'s `kind`: deriving it puts the four
+/// options in the tool schema, where a model reads them, instead of in prose it has to trust.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, schemars::JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum Kind {
     ScreenChange,

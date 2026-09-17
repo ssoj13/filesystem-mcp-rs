@@ -101,14 +101,17 @@ starts claiming to be the options. A variant counts as listed only when the text
 backtick-quoted, or adjacent to a `|` — so "(default)" as English prose is not read as the
 `"default"` variant.
 
-The reach is small and worth knowing rather than assuming: of **525 top-level properties, 14 carry
-a schema enum**, and 2 of those are skipped because a variant is under four characters and cannot
-be told from ordinary English (`run`, `sh`, `cmd`). So the rule guards **12 properties**. It cannot
-see the six properties that document an option list in prose while typed as a bare `String` —
-`wait.kind`, `mouse_click.button`, `mouse_drag.button`, `mouse_drag.ease`, `win_geom.state`,
-`win_layout.op` — because there is no enum in the schema to compare against. Giving those
-properties real enum types is the change that would bring them under this rule; until then they are
-read-and-hope.
+The reach is small and worth knowing rather than assuming: of **525 top-level properties, 20 carry
+a schema enum** and the rule guards **16**. Four are skipped because a variant is under four
+characters and cannot be told from ordinary English (`run`, `sh`, `cmd`, `out`, `min`).
+
+**An option list in prose is a smell: give the parameter a type instead.** Six properties used to
+document their options only in a sentence, typed as bare `String` and resolved by a `match` in the
+handler — `wait.kind` was one, and it was the one that drifted. They are now real enums, and the
+surface has **no prose-only option lists left**. Type the next one at review time: the options land
+in the schema where a model reads them rather than in prose it must trust, an unknown value is
+refused at deserialization naming the accepted set instead of falling through a handler arm, and
+the parameter comes under this rule for free.
 
 "Reads as a parameter" is deliberately narrow: lowercase first character, `[A-Za-z0-9_]` only, and
 compound — an interior capital or an underscore. That admits `filePattern` and `context_after` while

@@ -2,6 +2,21 @@
 
 ## [Unreleased]
 
+### Six stringly-typed parameters become real enums
+
+- **`wait.kind`, `mouse_click.button`, `mouse_drag.button`, `mouse_drag.ease`, `win_geom.state` and
+  `win_layout.op` documented their options in prose while typed as a bare `String`**, resolved by a
+  `match` in the handler. `wait` is what that costs: it listed three `kind` values where the code
+  accepted four, and nothing could notice. They are now enums, so the options ship in the schema
+  where a model reads them, an unknown value is refused at deserialization with a message naming the
+  accepted set (`unknown variant "maximise", expected one of "min", "max", "restore"`) instead of
+  falling through a handler arm, and the surface has no prose-only option lists left.
+- **No behaviour was lost.** Every one of the six `match` arms was already strict — exact lowercase
+  spellings, no synonyms, no case folding, no catch-all default — so no serde `alias` was needed and
+  nothing that worked before stops working. The defaults for an absent value (`button` → left,
+  `ease` → linear) are preserved. `parse_btn`, `parse_ease` and `parse_wait_kind` are gone; `Btn`
+  and `Ease` already derived what was needed and were being converted from strings for no reason.
+
 ### A lighter `tools/list`, and a guard that keeps it that way
 
 - **`src/core/tool_surface_guard.rs` enforces `docs/TOOL_STYLE.md` on every `cargo test`**, over the
@@ -18,9 +33,8 @@
   behind is the failure most likely to recur, and `wait` had it. A variant counts as listed only
   when the text offers it (backtick-quoted, or beside a `|`), so "(default)" as English prose is not
   mistaken for the `default` variant. Reach is known rather than assumed: 14 of 525 top-level
-  properties carry a schema enum and 12 are guarded, the other two having a variant too short to
-  tell from ordinary English. Six properties document options in prose while typed as a bare
-  `String` — `wait.kind` among them — and are out of reach until they are given real enum types. Exceptions carry a ceiling and a
+  properties carry a schema enum and 16 are guarded, the rest having a variant too short to tell
+  from ordinary English. Exceptions carry a ceiling and a
   written reason, so "exempt" never means "unbounded", and an exception that stops being needed
   fails the test by name instead of lingering. A budget nobody checks decays within two waves —
   `paths_guard` exists for the same reason.

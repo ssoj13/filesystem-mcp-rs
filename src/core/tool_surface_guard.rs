@@ -121,10 +121,13 @@ mod tests {
             "19 ripgrep options, each carrying a convention",
         ),
         // Four condition kinds in one tool, so it carries CapTarget, WinQuery and ColorWaitArgs.
-        // Splitting it into four tools costs more than it saves.
+        // Splitting it into four tools costs more than it saves. Grew ~310 when `kind` became a
+        // real enum: the four options moved out of prose into the schema, which is where a model
+        // can act on them instead of trusting a sentence. A good trade, and the guard made it a
+        // decision rather than a drift.
         (
             "wait",
-            3_300,
+            3_700,
             "four condition kinds, three shared definitions",
         ),
         // The Anthropic Messages request: messages, content blocks, tools, thinking. The shape is

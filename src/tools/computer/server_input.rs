@@ -52,7 +52,7 @@ impl FileSystemServer {
             mods,
         }): Parameters<ClickArgs>,
     ) -> Result<CallToolResult, McpError> {
-        let btn = parse_btn(button.as_deref())?;
+        let btn = button.unwrap_or(Btn::Left);
         let mod_keys = driver::parse_keymods(mods.as_deref()).map_err(super::ctl_err)?;
         let gate = super::safety::gate();
         let focus = tokio::task::spawn_blocking(move || {
@@ -67,8 +67,8 @@ impl FileSystemServer {
     #[tool(
         name = "mouse_drag",
         description = "Drag from {x,y} to {x,y} with an interpolated path (drag&drop, marquee).\n\
-            button: left|right|middle; duration_ms: real drag tempo (0 = instant),
-            ease: linear|out; hold_ms: settle at `from` with button down. Requires arm."
+            duration_ms sets the real drag tempo (0 = instant); hold_ms settles at `from` with the\n\
+            button down before moving. Requires arm."
     )]
     async fn ctl_mouse_drag(
         &self,
@@ -81,8 +81,8 @@ impl FileSystemServer {
             hold_ms,
         }): Parameters<DragArgs>,
     ) -> Result<CallToolResult, McpError> {
-        let btn = parse_btn(button.as_deref())?;
-        let ease = parse_ease(ease.as_deref())?;
+        let btn = button.unwrap_or(Btn::Left);
+        let ease = ease.unwrap_or(super::driver::Ease::Linear);
         let gate = super::safety::gate();
         let focus = tokio::task::spawn_blocking(move || {
             driver::drag(
@@ -209,7 +209,7 @@ impl FileSystemServer {
 
     #[tool(
         name = "win_geom",
-        description = "Move/resize (x,y,w,h — all four) and/or set state (min|max|restore). Requires arm.\n\
+        description = "Move/resize (x,y,w,h — all four) and/or set the window state. Requires arm.\n\
             Returns fresh geometry."
     )]
     async fn ctl_win_geom(
@@ -227,7 +227,7 @@ impl FileSystemServer {
         let res = tokio::task::spawn_blocking(move || {
             gate.check()?;
             let id = driver::resolve_target(&target)?;
-            driver::geom(id, x, y, w, h, state.as_deref())
+            driver::geom(id, x, y, w, h, state.map(WinState::as_str))
         })
         .await
         .map_err(|e| McpError::internal_error(e.to_string(), None))?
@@ -282,7 +282,7 @@ impl FileSystemServer {
     #[tool(
         name = "win_layout",
         description = "Save/restore positions of all visible windows (name identifies the snapshot).\n\
-            op: save|load; load applies unless dry_run=true. Per-window applied flags — HWND-bound:\n\
+            `load` applies unless dry_run=true. Per-window applied flags — HWND-bound:\n\
             windows reopened since the save report applied=false. Requires arm."
     )]
     async fn ctl_win_layout(
@@ -291,8 +291,8 @@ impl FileSystemServer {
     ) -> Result<CallToolResult, McpError> {
         let gate = super::safety::gate();
         let res = tokio::task::spawn_blocking(move || -> anyhow::Result<serde_json::Value> {
-            match op.as_str() {
-                "save" => {
+            match op {
+                LayoutOp::Save => {
                     let entries = driver::layout_save(&name)?;
                     gate.record(
                         "win_layout_save",
@@ -300,7 +300,7 @@ impl FileSystemServer {
                     )?;
                     Ok(json!({ "saved": entries }))
                 }
-                "load" => {
+                LayoutOp::Load => {
                     let applied = driver::layout_load(&name, dry_run.unwrap_or(false))?;
                     gate.record(
                         "win_layout_load",
@@ -308,7 +308,6 @@ impl FileSystemServer {
                     )?;
                     Ok(json!({ "applied": applied }))
                 }
-                other => Err(anyhow::anyhow!("unknown op {other:?} (save|load)")),
             }
         })
         .await
@@ -364,7 +363,6 @@ impl FileSystemServer {
             poll_ms,
         }): Parameters<WaitArgs>,
     ) -> Result<CallToolResult, McpError> {
-        let kind = parse_wait_kind(&kind)?;
         let color_target = color.map(|c| super::wait::ColorTarget {
             x: c.x,
             y: c.y,
@@ -394,18 +392,34 @@ impl FileSystemServer {
     }
 }
 
-/// Map a wire error string to a wait Kind.
-fn parse_wait_kind(s: &str) -> Result<super::wait::Kind, McpError> {
-    match s {
-        "screen_change" => Ok(super::wait::Kind::ScreenChange),
-        "window" => Ok(super::wait::Kind::Window),
-        "clipboard" => Ok(super::wait::Kind::Clipboard),
-        "color" => Ok(super::wait::Kind::Color),
-        other => Err(McpError::invalid_params(
-            format!("unknown kind {other:?}"),
-            None,
-        )),
+/// Window state for `win_geom`.
+///
+/// The driver's `geom` still takes `Option<&str>` (`portable.rs` passes a literal), so this
+/// converts at the MCP boundary rather than rippling a type change through the backend seam.
+#[derive(Debug, Clone, Copy, Deserialize, JsonSchema)]
+#[serde(rename_all = "lowercase")]
+pub enum WinState {
+    Min,
+    Max,
+    Restore,
+}
+
+impl WinState {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Min => "min",
+            Self::Max => "max",
+            Self::Restore => "restore",
+        }
     }
+}
+
+/// Operation for `win_layout`.
+#[derive(Debug, Clone, Copy, Deserialize, JsonSchema)]
+#[serde(rename_all = "lowercase")]
+pub enum LayoutOp {
+    Save,
+    Load,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -417,30 +431,6 @@ pub struct ColorWaitArgs {
     pub b: u8,
     /// Max per-channel delta (default 12).
     pub tol: Option<u8>,
-}
-
-/// Button string -> Btn.
-fn parse_btn(s: Option<&str>) -> Result<Btn, McpError> {
-    match s.unwrap_or("left") {
-        "left" => Ok(Btn::Left),
-        "right" => Ok(Btn::Right),
-        "middle" => Ok(Btn::Middle),
-        other => Err(McpError::invalid_params(
-            format!("unknown button {other:?}"),
-            None,
-        )),
-    }
-}
-
-fn parse_ease(s: Option<&str>) -> Result<super::driver::Ease, McpError> {
-    match s.unwrap_or("linear") {
-        "linear" => Ok(super::driver::Ease::Linear),
-        "out" => Ok(super::driver::Ease::Out),
-        other => Err(McpError::invalid_params(
-            format!("unknown ease {other:?}"),
-            None,
-        )),
-    }
 }
 
 /// Downcast CtlError for a stable wire code prefix (see mod.rs ctl_err).
@@ -459,8 +449,8 @@ pub struct ArmArgs {
 pub struct ClickArgs {
     pub x: Option<i32>,
     pub y: Option<i32>,
-    /// left|right|middle (default left).
-    pub button: Option<String>,
+    /// Default left.
+    pub button: Option<Btn>,
     /// 0 = hover, 1 = single, 2 = double (default 1).
     pub clicks: Option<u32>,
     /// Modifier keys held across the click: ctrl/alt/shift/win.
@@ -471,12 +461,12 @@ pub struct ClickArgs {
 pub struct DragArgs {
     pub from: PtArgs,
     pub to: PtArgs,
-    /// left|right|middle (default left).
-    pub button: Option<String>,
+    /// Default left.
+    pub button: Option<Btn>,
     /// Real drag duration (ms; 0 = instant single batch).
     pub duration_ms: Option<u32>,
-    /// linear | out (default linear).
-    pub ease: Option<String>,
+    /// Default linear.
+    pub ease: Option<super::driver::Ease>,
     /// Settle at `from` with button down before moving (ms).
     pub hold_ms: Option<u32>,
 }
@@ -526,8 +516,7 @@ pub struct GeomArgs {
     pub y: Option<i32>,
     pub w: Option<i32>,
     pub h: Option<i32>,
-    /// min | max | restore.
-    pub state: Option<String>,
+    pub state: Option<WinState>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -539,8 +528,7 @@ pub struct MonitorArgs {
 
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct LayoutArgs {
-    /// save | load.
-    pub op: String,
+    pub op: LayoutOp,
     /// Snapshot name (alphanumeric/-/_).
     pub name: String,
     /// load only: report what would move without moving (default false).
@@ -560,8 +548,7 @@ pub struct MacroArgs {
 
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct WaitArgs {
-    /// screen_change | window | clipboard | color.
-    pub kind: String,
+    pub kind: super::wait::Kind,
     /// screen_change: capture target (default cursor square).
     pub target: Option<CapTarget>,
     /// window: filter (title/exe substrings).
