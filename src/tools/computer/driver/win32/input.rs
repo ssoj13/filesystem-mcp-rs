@@ -1,7 +1,7 @@
 //! Mouse/keyboard input via SendInput (Windows).
 //!
 //! All coordinates are virtual-screen physical pixels (multi-monitor, negative
-//! origins allowed — PLAN2.md critic §10.5). SendInput batches are serialized by
+//! origins allowed). SendInput batches are serialized by
 //! one mutex so concurrent MCP calls cannot interleave down/up pairs (§5). Every
 //! action returns the focus window so the agent catches a focus race for free.
 
@@ -360,7 +360,7 @@ pub fn drag(
     Ok(focus())
 }
 
-/// Wheel scroll: `dy > 0` scrolls down, `dx > 0` scrolls right (PLAN2.md §3).
+/// Wheel scroll: `dy > 0` scrolls down, `dx > 0` scrolls right.
 pub fn scroll(gate: &SafetyGate, dy: i32, dx: i32) -> anyhow::Result<FocusInfo> {
     gate.check()?;
     let mut batch = Vec::new();
@@ -431,7 +431,7 @@ enum ClipSnap {
 /// paste mode (default): save clipboard -> set text -> ctrl+v -> settle ->
 /// restore clipboard. The settle wait exists because the target app processes
 /// WM_PASTE asynchronously on its own UI thread — restoring the clipboard too
-/// early makes it paste the OLD text (PLAN2.md critic §10.2/§10.5).
+/// early makes it paste the OLD text.
 /// paste is refused (FocusFailed) when the focus moved away from `expect_hwnd`,
 /// given by the caller that resolved the target window: pasting into the wrong
 /// window is worse than slow typing.

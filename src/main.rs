@@ -1021,7 +1021,7 @@ struct GrepFilesArgs {
     /// Glob pattern for files to include (e.g., "*.rs", "**/*.txt")
     // Aliases accept the built-in Grep/ripgrep vocabulary clients reflexively
     // send; without them `glob` was silently dropped and the search widened to
-    // the whole tree (see BUG.md).
+    // the whole tree.
     #[serde(
         skip_serializing_if = "Option::is_none",
         alias = "glob",
@@ -2013,7 +2013,7 @@ struct OutputFilterArgs {
 /// shlex crate, which would consume those backslashes). Used to auto-split a
 /// command line passed via `command` whenever no explicit `args` and no shell
 /// are given; a program path containing spaces must therefore be quoted, the
-/// same rule every shell uses. See `fsmcp_bug.md` #2.
+/// same rule every shell uses.
 fn split_command_line(line: &str) -> Vec<String> {
     let mut tokens = Vec::new();
     let mut cur = String::new();
@@ -2500,7 +2500,7 @@ struct EnvRemoveArgs {
 struct WhichArgs {
     /// Command name to find (e.g. `cargo`, `naga`). The `name` alias is
     /// accepted too, since the Unix `which <name>` mental model makes it a
-    /// natural first guess (bug.md #5).
+    /// natural first guess.
     #[serde(alias = "name")]
     command: String,
 }
@@ -4868,7 +4868,7 @@ All edits match against a FROZEN SNAPSHOT of the file; overlapping spans resolve
         let error_count = results.iter().filter(|r| r.error.is_some()).count();
 
         // Hard cap per-file diff size so the structured payload never overruns
-        // MCP transport limits when many files are edited (bug.md BUG #4).
+        // MCP transport limits when many files are edited.
         const PER_DIFF_MAX_CHARS: usize = 4_000;
         const TOTAL_STRUCTURED_MAX_CHARS: usize = 200_000;
 
@@ -6035,7 +6035,6 @@ USE CASES: Patch executables, fix binary data, search-replace in non-text files.
         // the program, the rest its arguments. Deterministic, no filesystem
         // probing — a program path containing spaces must be quoted, as in any
         // shell. Explicit `args`, or any shell, leave `command` exactly as given.
-        // See `fsmcp_bug.md` #2.
         let (command, run_args): (String, Vec<String>) =
             if args.args.is_empty() && *args.shell == ShellKind::None {
                 let mut toks = split_command_line(&args.command).into_iter();
@@ -6222,7 +6221,7 @@ USE CASES: Patch executables, fix binary data, search-replace in non-text files.
         // without a shell, …) is a real tool-level error. When a top-level shell
         // operator was detected (`pipe_hint`) it is the likely cause — e.g.
         // `cd x && pwsh ...` fails to spawn `cd` — so fold the advisory into the
-        // error message instead of dropping it on this path. See BUG3.md #2.
+        // error message instead of dropping it on this path.
         let result = match process::run_command(
             &command,
             &args_refs,
@@ -6319,7 +6318,6 @@ USE CASES: Patch executables, fix binary data, search-replace in non-text files.
         // could not run to normal completion — killed by timeout/watchdog or
         // cancelled. A launch failure is already a separate Err path above. The
         // exit code itself is always surfaced in the text + structuredContent.
-        // See BUG3.md #3.
         r.is_error = Some(result.killed || result.timed_out || result.cancelled);
         Ok(r)
     }

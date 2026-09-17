@@ -1,5 +1,5 @@
-//! Windows OCR (Windows.Media.Ocr via WinRT) — text with bounding boxes
-//! (PLAN2.md §8 P3). Middle rung of the click hierarchy: UIA -> OCR -> pixels.
+//! Windows OCR (Windows.Media.Ocr via WinRT) — text with bounding boxes.
+//! Middle rung of the click hierarchy: UIA -> OCR -> pixels.
 //!
 //! No per-word confidence exists in WinRT OCR (critic §10.6) — output is
 //! {text, rects} only. Missing language packs = explicit error, never a silent

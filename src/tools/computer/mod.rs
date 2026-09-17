@@ -61,7 +61,7 @@ pub mod annotate;
 #[cfg(feature = "ctl-ocr")]
 pub mod ocrs_local;
 
-/// Downcast CtlError for a stable wire code prefix (PLAN2.md §3 codes:
+/// Downcast CtlError for a stable wire code prefix (codes:
 /// not_armed / op_cap / no_match / focus_failed). Shared by all server files.
 #[cfg(any(
     feature = "ctl-input",

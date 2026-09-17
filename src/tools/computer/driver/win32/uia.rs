@@ -1,6 +1,6 @@
-//! Windows UI Automation (COM) — structured element access (PLAN2.md §8 P3).
+//! Windows UI Automation (COM) — structured element access.
 //!
-//! Click hierarchy (PLAN2.md §2): UIA element -> OCR text -> pixels. This
+//! Click hierarchy: UIA element -> OCR text -> pixels. This
 //! module implements the reliable head of that chain: enumerate elements with
 //! names/roles/rects, click by name (Invoke pattern first, real click
 //! fallback), set values via the Value pattern.

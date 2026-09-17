@@ -1,5 +1,5 @@
 //! Clipboard file lists (CF_HDROP) via clipboard-win — arboard has no file
-//! support (PLAN2.md §2). One facade for all clipboard access in this crate:
+//! support. One facade for all clipboard access in this crate:
 //! both arboard (text, in input::type_text) and clipboard-win (files, here)
 //! open the clipboard, so every access goes through the same mutex to avoid
 //! open/close races (critic §10.7).

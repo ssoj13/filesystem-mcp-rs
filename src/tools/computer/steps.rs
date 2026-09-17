@@ -1,5 +1,5 @@
 //! Macro engine: a sequence of input/capture/wait steps executed in ONE MCP
-//! round trip (PLAN2.md §3 `input_macro` — the biggest latency saver).
+//! round trip — the biggest latency saver.
 //!
 //! Semantics: fail-fast (critic A), per-step arm re-check (input steps already
 //! gate inside driver::*), 40-step and 30 s wall caps, results aligned with the

@@ -182,7 +182,7 @@ fn foreground_is(hwnd: HWND) -> bool {
     fg == hwnd
 }
 
-/// Bring `hwnd` to the foreground and VERIFY it (PLAN2.md §6.1).
+/// Bring `hwnd` to the foreground and VERIFY it.
 /// Chain: restore-if-minimized → plain SetForegroundWindow → ALT-key trick.
 /// Both failure paths are loud ([`CtlError::FocusFailed`]); no silent fallback.
 pub fn focus_window(hwnd: HWND) -> anyhow::Result<()> {

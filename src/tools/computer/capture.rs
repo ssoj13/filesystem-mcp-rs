@@ -1,7 +1,7 @@
 //! Screen capture (xcap) with cursor/monitor/window/rect targets + dhash.
 //!
 //! Coordinates are virtual-screen physical pixels with NEGATIVE origins
-//! supported (PLAN2.md critic §10.5): we locate the monitor containing the
+//! supported: we locate the monitor containing the
 //! rect's center, capture that monitor and crop with validated offsets —
 //! never a silent clamp. Results go to disk; inline base64 is opt-in at the
 //! srv layer (token economy, §2).
@@ -29,9 +29,9 @@ pub struct MonInfo {
 /// | `{cursor:N}` or `{cursor:{size:N}}` (a square of N px centred on the
 /// pointer). Coordinates are virtual-screen physical pixels; negative origins
 /// are valid across monitors.
-// Untagged serde type (PLAN2.md §3 `capture`), reused directly by the MCP layer,
+// Untagged serde type, reused directly by the MCP layer,
 // macro steps and wait. Every loose wire form is its own variant because hosts
-// wrap values inconsistently (BUG.md quirks) and an untagged enum fails closed.
+// wrap values inconsistently and an untagged enum fails closed.
 // The doc comment above is caller-facing: it ships in every schema that takes a
 // CapTarget, so rationale stays in `//` comments like these.
 #[derive(Debug, Clone, serde::Deserialize, schemars::JsonSchema)]
@@ -66,7 +66,7 @@ pub struct RectArgs {
     pub h: u32,
 }
 
-/// Default cursor-square side (PLAN2.md §3).
+/// Default cursor-square side.
 pub fn default_cursor_size() -> u32 {
     400
 }

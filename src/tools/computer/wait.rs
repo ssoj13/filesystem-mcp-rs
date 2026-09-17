@@ -1,5 +1,5 @@
-//! Waits: screen-change / window / clipboard-change polls with timeout
-//! (PLAN2.md §3 `wait`) — replaces sleep-polling in agent loops.
+//! Waits: screen-change / window / clipboard-change polls with timeout —
+//! replaces sleep-polling in agent loops.
 
 use std::time::{Duration, Instant};
 

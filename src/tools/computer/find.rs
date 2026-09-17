@@ -1,6 +1,6 @@
 //! Template matching: find a small template image inside a screen capture.
 //!
-//! Completes the click hierarchy (PLAN2.md §2): UIA -> OCR -> template -> pixels.
+//! Completes the click hierarchy: UIA -> OCR -> template -> pixels.
 //! Pure-Rust coarse-to-fine NCC on downscaled luma — no OpenCV, no GPU:
 //!
 //! 1. coarse pass on 1/4-scale luma, stride 1, max-abs-diff scoring

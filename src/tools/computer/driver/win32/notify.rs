@@ -1,6 +1,6 @@
-//! Windows toast notifications (PLAN2.md §3 `notify`).
+//! Windows toast notifications.
 //!
-//! GOTCHA (PLAN2.md §2): an unpackaged exe has no AUMID of its own — toasts
+//! GOTCHA: an unpackaged exe has no AUMID of its own — toasts
 //! silently vanish unless we borrow an installed AUMID. We reuse PowerShell's,
 //! which is present on stock Windows 10/11.
 

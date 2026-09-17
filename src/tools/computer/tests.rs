@@ -1,4 +1,4 @@
-//! Real-machine canary (PLAN2.md §9): NOT part of normal `cargo test`.
+//! Real-machine canary: NOT part of normal `cargo test`.
 //!
 //! Requires an interactive desktop. Runs the full acceptance loop against its
 //! own Notepad instance:

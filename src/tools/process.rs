@@ -466,7 +466,7 @@ struct ShellSpawn {
     /// `raw_arg` instead of MSVCRT-escaping them. Required for `cmd.exe`, whose
     /// command-line parsing does not follow the MSVCRT convention; other shells
     /// (bash/pwsh) are ordinary programs and use normal escaping. Read only on
-    /// Windows, hence the platform-gated lint allowance. See `fsmcp_bug.md` #1/#2.
+    /// Windows, hence the platform-gated lint allowance.
     #[cfg_attr(not(windows), allow(dead_code))]
     windows_raw_arg: bool,
 }
@@ -481,7 +481,7 @@ struct ShellSpawn {
 /// `tail`, `grep`) run on Windows, where `cmd.exe` understands neither `;` nor
 /// those tools. The program names recorded here are resolved to a concrete
 /// binary later by [`resolve_shell_program`]: on Windows `bash` deliberately
-/// means git-bash, never the `System32` WSL launcher. See `fsmcp_bug.md` #1.
+/// means git-bash, never the `System32` WSL launcher.
 fn shell_wrap(kind: ShellKind, command: &str, args: &[&str]) -> Option<ShellSpawn> {
     // Resolve the platform default to a concrete shell first, so `args` can be
     // quoted with that shell's rules before being joined onto the command line.
@@ -883,7 +883,7 @@ fn bash_candidates() -> Vec<std::path::PathBuf> {
 /// cmd reads the batch file LAZILY during execution, so the file must outlive
 /// the child process; the guard is therefore held until the child has been
 /// awaited (to the end of `run_command` for foreground runs, or moved into the
-/// detached reaper task) and removes the file on `Drop`. See `BUG5.md`.
+/// detached reaper task) and removes the file on `Drop`.
 #[cfg(windows)]
 struct TempScript {
     path: std::path::PathBuf,
@@ -1101,7 +1101,7 @@ pub async fn run_command(
     // with no escaping, so `cmd /C <line>` is parsed exactly as if typed at the
     // prompt. This applies ONLY to cmd.exe (`windows_raw_arg`): direct spawns
     // and other shells (bash/pwsh) are ordinary programs that DO follow the
-    // MSVCRT convention, so they keep normal escaping. See `fsmcp_bug.md` #1/#2.
+    // MSVCRT convention, so they keep normal escaping.
     let mut cmd = Command::new(&effective_cmd);
     #[cfg(windows)]
     {
@@ -2409,7 +2409,7 @@ mod tests {
         assert!(result.stdout.contains("world"));
     }
 
-    /// Regression for bug.md #1/#2: a shell command embedding an absolute
+    /// Regression: a shell command embedding an absolute
     /// Windows path (backslashes + a space in the dir name) must reach cmd.exe
     /// intact. Before the `raw_arg` fix, Rust's MSVCRT escaping turned the
     /// quoted path into `\"C:\..\"` and `if exist`/`type` failed with

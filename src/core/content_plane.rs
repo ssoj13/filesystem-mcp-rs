@@ -21,7 +21,7 @@ use uuid::Uuid;
 /// Max inline content carried in a single tool argument (write_file content,
 /// edit snippets, stdin). 64 KiB keeps single-argument payloads bounded (no
 /// megabyte smuggling) while not forcing blob staging for ordinary sources —
-/// the old 8 KiB tripped real files (BUG.md follow-up, 2026-08-29).
+/// the old 8 KiB tripped real files (raised 2026-08-29).
 pub const INLINE_MAX_BYTES: usize = 64 * 1024;
 
 /// Hard max per `blob_append` chunk (kept equal to [`INLINE_MAX_BYTES`] so
@@ -38,8 +38,8 @@ pub enum ContentMode {
 }
 
 /// Tagged content reference — canonical form is an object; a bare string is
-/// tolerated as inline text (BUG.md fix 1: hosts that double-encode the
-/// argument would otherwise die at deserialization).
+/// tolerated as inline text (hosts that double-encode the argument would
+/// otherwise die at deserialization).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, JsonSchema)]
 #[serde(tag = "kind", rename_all = "camelCase")]
 pub enum ContentRef {
@@ -84,12 +84,12 @@ impl<'de> Deserialize<'de> for ContentRef {
 }
 
 impl ContentRef {
-    /// Tolerant parse (BUG.md): canonical object OR string forms.
+    /// Tolerant parse: canonical object OR string forms.
     ///
     /// - object → canonical tagged parse (unknown fields ignored, as before)
     /// - string starting with `{` → must parse as a JSON object holding a
     ///   ContentRef (double-encoded form); failures are LOUD with line/column
-    ///   from serde_json (BUG.md fix 2) — a mangled encoding must not silently
+    ///   from serde_json — a mangled encoding must not silently
     ///   become file content
     /// - any other string → inline text
     pub fn tolerant_from_value(value: serde_json::Value) -> Result<Self, String> {
@@ -527,7 +527,7 @@ pub fn sha256_hex(bytes: &[u8]) -> String {
 mod tests {
     use super::*;
 
-    /// BUG.md fix 1: bare string → inline text.
+    /// Bare string → inline text.
     #[test]
     fn tolerant_bare_string_is_inline() {
         let r: ContentRef = serde_json::from_str("\"plain text content\"").unwrap();
@@ -539,7 +539,7 @@ mod tests {
         );
     }
 
-    /// BUG.md fix 1: double-encoded ContentRef object is unwrapped.
+    /// Double-encoded ContentRef object is unwrapped.
     #[test]
     fn tolerant_double_encoded_object() {
         let inner = serde_json::json!({ "kind": "inline", "text": "hi" });
@@ -548,14 +548,14 @@ mod tests {
         assert_eq!(r, ContentRef::Inline { text: "hi".into() });
     }
 
-    /// BUG.md fix 1: canonical object form unchanged.
+    /// Canonical object form unchanged.
     #[test]
     fn tolerant_object_passthrough() {
         let r: ContentRef = serde_json::from_str("{\"kind\":\"blob\",\"id\":\"abc\"}").unwrap();
         assert_eq!(r, ContentRef::Blob { id: "abc".into() });
     }
 
-    /// BUG.md fix 2: malformed `{`-string fails LOUDLY with serde line/column.
+    /// Malformed `{`-string fails LOUDLY with serde line/column.
     #[test]
     fn tolerant_mangled_object_is_loud() {
         let err = ContentRef::tolerant_from_str("{kind: inline").unwrap_err();

@@ -9,7 +9,7 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-/// Domain errors surfaced to MCP as typed codes (PLAN2.md §3).
+/// Domain errors surfaced to MCP as typed codes.
 ///
 /// Every message carries its payload: these strings are what an agent reads to
 /// decide what to do next, so "no window match" without the candidates, or an
@@ -191,8 +191,8 @@ impl SafetyGate {
         epoch_ms() + ttl.as_millis() as u64
     }
 
-    /// Throw [`CtlError::NotArmed`] unless currently armed (per-step re-check,
-    /// PLAN2.md critic A: an arm must never silently expire mid-sequence).
+    /// Throw [`CtlError::NotArmed`] unless currently armed (per-step re-check:
+    /// an arm must never silently expire mid-sequence).
     pub fn check(&self) -> Result<(), CtlError> {
         let st = self.state.lock().expect("gate poisoned");
         match st.armed_until {

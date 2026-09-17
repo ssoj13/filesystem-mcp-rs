@@ -134,7 +134,7 @@ mod tests {
     fn cwd_accepts_common_aliases() {
         // LLM-tolerant: a caller guessing any of these synonyms still sets cwd,
         // instead of having the key silently dropped (which left the child in
-        // the server's primary dir — see FILESYSTEM_REPORT.md).
+        // the server's primary dir).
         for key in [
             "working_directory",
             "workingDir",

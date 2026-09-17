@@ -184,7 +184,7 @@ impl FileSystemServer {
     #[tool(
         name = "win_focus",
         description = "Focus a window (target: {id}|{title}|{exe}) and VERIFY foreground\n\
-            (restore -> SetForegroundWindow -> ALT-trick fallback, PLAN2.md §6.1).\n\
+            (restore -> SetForegroundWindow -> ALT-trick fallback).\n\
             Requires arm. Returns {win: WinInfo}."
     )]
     async fn ctl_win_focus(
