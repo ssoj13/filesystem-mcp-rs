@@ -748,6 +748,8 @@ pub(crate) enum Lease {
 /// Separate from [`lease_due`] so the marker is written only once the work has actually succeeded;
 /// stamping on the way in would let a sweep that failed to list its directory silence the next
 /// hour's attempts.
+///
+/// Every failure leaves the state root as it found it - see [`discard`] for why that matters.
 pub(crate) fn lease_done(root: &Path, kind: &str, now: SystemTime) -> io::Result<()> {
     let marker = marker_path(root, kind).ok_or_else(|| {
         io::Error::new(
@@ -761,14 +763,28 @@ pub(crate) fn lease_done(root: &Path, kind: &str, now: SystemTime) -> io::Result
     // The rename is atomic on both platforms, so every reader sees either the old stamp or the
     // new one. Wave 3's compaction needs that same guarantee from this file.
     let pending = sidecar_name(&marker);
-    std::fs::write(&pending, unix_secs(now).to_string())?;
-    std::fs::rename(&pending, &marker).inspect_err(|_| {
-        // The stamp never landed, so the next process simply sweeps again. The scratch file is
-        // the only lasting trace and it sits in the state root, which nothing sweeps by age.
-        if let Err(e) = std::fs::remove_file(&pending) {
-            warn!("Housekeeping: left {} behind: {e}", pending.display());
-        }
-    })
+    // Both failure paths clean up after themselves, because the state root is not swept by age
+    // and a leaked sidecar would therefore be permanent - once per failure, per kind, per
+    // process. The `write` path is not hypothetical: the file is created before the first byte
+    // reaches it, so a full disk or a quota fails *after* it exists.
+    if let Err(e) = std::fs::write(&pending, unix_secs(now).to_string()) {
+        discard(&pending);
+        return Err(e);
+    }
+    // The stamp never landed, so the next process simply sweeps again; all this has to do is not
+    // leave the scratch file behind on the way out.
+    std::fs::rename(&pending, &marker).inspect_err(|_| discard(&pending))
+}
+
+/// Remove a sidecar that never made it into place. Best effort, and deliberately quiet about a
+/// file that is not there: the `write` path calls this after a failure that may well have been
+/// the create itself, and "there was nothing to clean up" is the good outcome, not a complaint.
+fn discard(pending: &Path) {
+    if let Err(e) = std::fs::remove_file(pending)
+        && e.kind() != io::ErrorKind::NotFound
+    {
+        warn!("Housekeeping: left {} behind: {e}", pending.display());
+    }
 }
 
 /// `marker` with `.<uuid>.tmp` appended: the private name [`lease_done`] writes before renaming.
@@ -1428,6 +1444,22 @@ mod tests {
             expired.is_file(),
             "with the date rule off an expired directory is untouchable, whatever its age"
         );
+    }
+
+    /// A stamp that could not even be written leaves nothing behind either.
+    ///
+    /// The sibling of `stamping_a_lease_leaves_no_scratch_file_behind`, for the other failure
+    /// path: a root that does not exist fails the `write` rather than the rename. Nothing sweeps
+    /// the state root by age, so a sidecar leaked here would stay for good.
+    #[test]
+    fn a_stamp_that_cannot_be_written_leaves_nothing_behind() {
+        let scratch = tempfile::TempDir::new().expect("scratch dir");
+        let root = scratch.path().join("never-created");
+        assert!(
+            lease_done(&root, "tmp", SystemTime::now()).is_err(),
+            "a marker under a missing root cannot be written"
+        );
+        assert!(!root.exists(), "and nothing is created on the way out");
     }
 
     /// Write `<logs>/<day>/<name>` of `size` bytes, stamped at `when`, creating the directory.
