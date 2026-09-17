@@ -15,3 +15,7 @@ apple_*
 .cursor
 .omc
 ag.cmd
+
+# Scratch workspaces for plan execution (ledgers, briefs, review packages)
+.superpowers/
+.omh/
