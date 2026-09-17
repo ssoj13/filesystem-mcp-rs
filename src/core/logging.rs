@@ -161,6 +161,9 @@ fn target_for_in(
 /// build, which under stdio is none at all. A subscriber already installed by someone else leaves
 /// this process with nothing of its own, which is [`Plan::Disabled`] too — the returned plan
 /// describes what this call did, not what it wanted.
+///
+/// Everything here that is a *decision* lives in [`outcome`]; what is left is the wiring that
+/// cannot be tested in-process, because a process can install a global subscriber only once.
 fn install(plan: Plan, level: Option<&str>) -> Plan {
     let (path, to_stderr) = sinks(&plan);
     let path = path.map(Path::to_path_buf);
@@ -174,23 +177,38 @@ fn install(plan: Plan, level: Option<&str>) -> Plan {
         },
         None => None,
     };
-    let to_file = file.is_some();
-    if !to_file && !to_stderr {
+    // Decided before anything is installed: a subscriber with no sinks left would claim the one
+    // global slot this process has and then write nowhere.
+    let outcome = outcome(path, file.is_some(), to_stderr);
+    if outcome == Plan::Disabled {
         return Plan::Disabled;
     }
-    let installed = tracing_subscriber::registry()
+    if tracing_subscriber::registry()
         .with(filter(level))
         .with(to_stderr.then(|| fmt::layer().with_writer(std::io::stderr)))
         .with(file.map(|f| fmt::layer().with_writer(f).with_ansi(false)))
         .try_init()
-        .is_ok();
-    if !installed {
-        note_degraded("a global tracing subscriber was already installed".to_string());
-        return Plan::Disabled;
+        .is_ok()
+    {
+        return outcome;
     }
+    note_degraded("a global tracing subscriber was already installed".to_string());
+    Plan::Disabled
+}
+
+/// The plan [`install`] ends up with, given which sinks survived: `to_file` is whether the log
+/// file actually opened, `to_stderr` whether the plan asked for stderr at all.
+///
+/// Pure, and therefore the whole of [`install`]'s judgement in one place that tests can reach.
+/// Left inline, this was three match arms and a two-negation early return that no test could
+/// exercise — the boolean logic deciding which sinks exist could be inverted with the suite
+/// still green, which is the same gap [`sinks`] was extracted to close on the other side.
+fn outcome(path: Option<PathBuf>, to_file: bool, to_stderr: bool) -> Plan {
     match (path, to_file, to_stderr) {
         (Some(p), true, true) => Plan::FileAndStderr(p),
         (Some(p), true, false) => Plan::File(p),
+        // No file: either it could not be opened or none was wanted. Stderr, if the plan allows
+        // it, is then the only channel left — and under stdio it never does, so this is silence.
         (_, false, true) => Plan::Stderr,
         _ => Plan::Disabled,
     }
@@ -606,6 +624,59 @@ mod tests {
         assert!(filter(Some("warn")).to_string().contains("warn"));
     }
 
+    /// [`outcome`] is the whole of what [`install`] decides once the file has either opened or
+    /// not — including the case where nothing is left to write to, which must not install a
+    /// subscriber at all. Every combination, so the logic cannot be inverted unnoticed.
+    #[test]
+    fn the_outcome_covers_every_combination_of_surviving_sinks() {
+        let p = PathBuf::from("x.log");
+        let with = |to_file, to_stderr| outcome(Some(p.clone()), to_file, to_stderr);
+        assert_eq!(with(true, true), Plan::FileAndStderr(p.clone()));
+        assert_eq!(with(true, false), Plan::File(p.clone()));
+        // The file was wanted but could not be opened: stream keeps stderr, stdio keeps nothing.
+        assert_eq!(with(false, true), Plan::Stderr);
+        assert_eq!(with(false, false), Plan::Disabled);
+        // No file was wanted in the first place.
+        assert_eq!(outcome(None, false, true), Plan::Stderr);
+        assert_eq!(
+            outcome(None, false, false),
+            Plan::Disabled,
+            "with no sink left there is nothing to install"
+        );
+    }
+
+    /// `--log some/where/x.log` creates the directories it names. The promise is in [`open`]'s
+    /// rustdoc, and an operator only discovers it was broken by finding no log at all.
+    #[test]
+    fn open_creates_the_parent_directory() {
+        let dir = scratch();
+        let nested = dir.path().join("some").join("where").join("x.log");
+        open(&nested).expect("open must create the parent directory");
+        assert!(nested.is_file(), "{}", nested.display());
+    }
+
+    /// The startup line an operator reads to find this process's log has to name the file.
+    #[test]
+    fn a_plan_says_where_the_log_went() {
+        let p = PathBuf::from("x.log");
+        assert!(Plan::File(p.clone()).to_string().contains("x.log"));
+        assert!(Plan::FileAndStderr(p).to_string().contains("x.log"));
+        assert_eq!(Plan::Stderr.to_string(), "stderr only");
+        assert_eq!(Plan::Disabled.to_string(), "disabled");
+    }
+
+    /// [`level`] is the registered key read through [`env_spec::get`] and nothing else: no
+    /// second key, no transformation of the value.
+    ///
+    /// Asserted by comparison rather than by setting `FS_MCP_LOG`, which would be UB for the
+    /// reason given on [`a_retention_knob_parses_clamps_or_falls_back`]. It cannot distinguish
+    /// this reader from one hardcoded to `None` while the key is unset in the test process —
+    /// that much is pinned structurally, by the reader being one line.
+    #[test]
+    fn level_is_exactly_the_registered_key() {
+        assert_eq!(level(), env_spec::get("FS_MCP_LOG"));
+    }
+
     /// A retention knob parses, keeps `0` — which means "switch this half of the sweep off",
     /// not "delete everything now" — clamps an absurd value, and survives a typo by applying
     /// the default instead of refusing to start.
@@ -624,6 +695,10 @@ mod tests {
             ("3", 3),
             ("0", 0),
             ("  5  ", 5),
+            // The bound itself is accepted, one over it is clamped. `>` and `>=` in the clamp
+            // are indistinguishable by the returned value at this boundary - clamping 100 to a
+            // maximum of 100 is 100 either way - so what these two rows pin is the policy, and
+            // the only thing the comparison still decides is whether a warning is logged.
             ("100", 100),
             ("101", 100),
             (&u64::MAX.to_string(), 100),
@@ -655,6 +730,15 @@ mod tests {
         // must leave that conversion far from overflowing even before it saturates.
         assert!(MAX_MB_MAX.checked_mul(1024 * 1024).is_some());
         assert!(KEEP_DAYS_MAX.checked_mul(24 * 3600).is_some());
+        // Each bound is written as arithmetic and its rustdoc states what that arithmetic is
+        // meant to come to; pin the two together, so a slip in either is a failure rather than
+        // a silently different policy that still reads as "ten years" and "one TiB".
+        assert_eq!(KEEP_DAYS_MAX, 10 * 365, "ten years, as documented");
+        assert_eq!(
+            MAX_MB_MAX * 1024 * 1024,
+            1u64 << 40,
+            "one TiB, as documented"
+        );
     }
 
     /// The level [`crate::env_spec`] advertises must be one this module would actually apply.
