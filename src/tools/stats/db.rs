@@ -39,7 +39,13 @@ use rusqlite::{Connection, OpenFlags, TransactionBehavior, ffi};
 ///
 /// A file carrying a *larger* number was written by a newer build whose columns may mean
 /// something else, and [`open`] refuses it rather than adding to counters it cannot interpret.
-pub const SCHEMA_VERSION: i32 = 1;
+///
+/// **Bumping this is not optional when a column changes name or meaning.** Version 1 spelled the
+/// payload column `bytes_out`; renaming it to `content_bytes` without a bump would have left
+/// every file created by an earlier build sitting at version 1 with the old column, passing the
+/// gate cleanly - `CREATE TABLE IF NOT EXISTS` is a no-op on a table that exists - and failing at
+/// the first upsert with "no such column: content_bytes". See [`gate`] for the migration.
+pub const SCHEMA_VERSION: i32 = 2;
 
 /// How long a writer waits for the single write lock before giving up.
 ///
@@ -151,6 +157,27 @@ CREATE TABLE IF NOT EXISTS sessions (
     last_seen      INTEGER,
     PRIMARY KEY (started_day, pid, instance_id, session_id)
 ) STRICT, WITHOUT ROWID;
+"#;
+
+/// The version 1 → 2 step: discard the two tables whose payload column was renamed.
+///
+/// **This is a pre-release shortcut and is written down as one.** No build carrying version 1 was
+/// ever released, so the only files that can hold it are on the machines of the people working on
+/// this wave, and what they hold is counters rather than anything a user typed. An
+/// `ALTER TABLE ... RENAME COLUMN` would be permanent code serving a version that never left this
+/// repository.
+///
+/// **A future version bump that meets real history must migrate, not drop.** By then these rows
+/// are an operator's months of usage data, and discarding them to a schema change would be the
+/// worst thing this subsystem could do - worse than not collecting anything, because it would
+/// look like the server had never been used.
+///
+/// Only the two tables the rename touched: `tool_catalog` and `sessions` are unchanged between
+/// the two versions, and dropping them as well would throw away rows for no reason at all.
+/// [`SCHEMA`] recreates what this removes, in the same transaction.
+const DISCARD_V1: &str = r#"
+DROP TABLE IF EXISTS tool_agg;
+DROP TABLE IF EXISTS tool_daily;
 "#;
 
 /// The only statement that writes `tool_agg`, merging a delta into whatever is already there.
@@ -305,10 +332,10 @@ pub fn open_read_only(path: &Path) -> rusqlite::Result<Connection> {
 ///
 /// Reading the version outside the transaction that acts on it would leave the decision and its
 /// consequence separated by a window: a process could read `1`, satisfy the newer-refuses check,
-/// and then be writing while another process migrated the file to `2` underneath it. Nothing
-/// exploits that today, because `SCHEMA_VERSION` is `1` and there is no migration to race with -
-/// but it is the shape that makes such a bug possible, and closing it is one line now versus a
-/// thing to reason about later.
+/// and then be writing while another process migrated the file to `2` underneath it. That is no
+/// longer hypothetical - there **is** a migration now, and it drops tables - so the `IMMEDIATE`
+/// transaction around the whole decision is what keeps a second process from binding against a
+/// table this one is in the middle of replacing.
 ///
 /// `IMMEDIATE` also means two servers starting at the same instant cannot half-apply the schema
 /// between them: the loser waits out [`BUSY_TIMEOUT`], then finds every `IF NOT EXISTS` already
@@ -320,12 +347,22 @@ fn gate(conn: &mut Connection, path: &Path) -> rusqlite::Result<()> {
     match found.cmp(&SCHEMA_VERSION) {
         std::cmp::Ordering::Equal => {}
         std::cmp::Ordering::Less => {
-            // Version 0 is "no schema at all" - a file SQLite has just created, or an empty one.
-            // There is no shipped version between 0 and 1, so this is the only step that exists
-            // today; a later version adds its own `if found < N { .. }` beneath this one.
-            if found <= 0 {
-                tx.execute_batch(SCHEMA)?;
+            // Version 0 is "no schema at all" - a file SQLite has just created, or an empty one -
+            // and needs no step of its own, because [`SCHEMA`] below builds it from nothing.
+            //
+            // Version 1 does need one: its `tool_agg` and `tool_daily` carry `bytes_out` where
+            // this build binds `content_bytes`, and every statement in [`SCHEMA`] is
+            // `IF NOT EXISTS`, so without this the old tables would survive untouched and the
+            // first upsert would fail on a column that is not there. See [`DISCARD_V1`] for why
+            // the step discards rather than renames, and for why a later one must not.
+            //
+            // A future version adds its own `if found < N { .. }` beneath this one, in order.
+            if found == 1 {
+                tx.execute_batch(DISCARD_V1)?;
             }
+            // Unconditional, and safe from any older version: every statement is `IF NOT EXISTS`,
+            // so this creates what is missing and leaves what is not.
+            tx.execute_batch(SCHEMA)?;
             tx.pragma_update(None, "user_version", SCHEMA_VERSION)?;
         }
         // Dropping `tx` unread rolls the (empty) transaction back and releases the lock.
@@ -531,6 +568,111 @@ mod tests {
             1410,
             "ns_total still sums while ns_max does not"
         );
+    }
+
+    /// The two tables as **version 1 really wrote them**, payload column and all, copied from
+    /// that schema rather than paraphrased. A paraphrase would test the migration against a file
+    /// no build ever produced, which is the one thing this test must not do.
+    const SCHEMA_V1: &str = r#"
+CREATE TABLE IF NOT EXISTS tool_agg (
+    bucket       INTEGER NOT NULL,
+    tool         TEXT    NOT NULL,
+    instance_id  TEXT    NOT NULL,
+    session_id   TEXT    NOT NULL,
+    ok           INTEGER NOT NULL,
+    err_flagged  INTEGER NOT NULL,
+    err_params   INTEGER NOT NULL,
+    err_internal INTEGER NOT NULL,
+    deferred     INTEGER NOT NULL,
+    ns_total     INTEGER NOT NULL,
+    ns_max       INTEGER NOT NULL,
+    bytes_out    INTEGER NOT NULL,
+    PRIMARY KEY (bucket, tool, instance_id, session_id)
+) STRICT, WITHOUT ROWID;
+
+CREATE TABLE IF NOT EXISTS tool_daily (
+    day          TEXT    NOT NULL,
+    tool         TEXT    NOT NULL,
+    ok           INTEGER NOT NULL,
+    err_flagged  INTEGER NOT NULL,
+    err_params   INTEGER NOT NULL,
+    err_internal INTEGER NOT NULL,
+    deferred     INTEGER NOT NULL,
+    ns_total     INTEGER NOT NULL,
+    ns_max       INTEGER NOT NULL,
+    bytes_out    INTEGER NOT NULL,
+    PRIMARY KEY (day, tool)
+) STRICT, WITHOUT ROWID;
+"#;
+
+    /// The column names of one table, as SQLite reports them.
+    fn columns(conn: &Connection, table: &str) -> Vec<String> {
+        let mut stmt = conn
+            .prepare(&format!("SELECT name FROM pragma_table_info('{table}')"))
+            .expect("prepare");
+        stmt.query_map([], |r| r.get::<_, String>(0))
+            .expect("query")
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .expect("collect")
+    }
+
+    /// A file left behind by a version-1 build is migrated, and can then actually be written.
+    ///
+    /// Unreachable in production - nothing carrying version 1 ever shipped - and reachable on
+    /// every machine this wave was developed on, which is where task 8 runs the server. Without
+    /// the bump, `CREATE TABLE IF NOT EXISTS` is a silent no-op on the old tables, the gate
+    /// passes, and the first upsert fails with "no such column: content_bytes". The final
+    /// `record_row` is the part that matters: it drives [`UPSERT_AGG`], so it fails exactly the
+    /// way the flush task would.
+    #[test]
+    fn a_version_1_file_is_migrated_and_can_then_be_written() {
+        let dir = tempfile::TempDir::new().expect("tempdir");
+        let db = dir.path().join("stats.db");
+        {
+            let old = Connection::open(&db).expect("raw");
+            old.execute_batch(SCHEMA_V1).expect("the old schema");
+            old.pragma_update(None, "user_version", 1)
+                .expect("stamp version 1");
+            old.execute(
+                "INSERT INTO tool_agg VALUES (1, 'read_text_file', 'old', '-', 1, 0, 0, 0, 0, 5, 5, 7)",
+                [],
+            )
+            .expect("a row an earlier build wrote");
+        }
+
+        let conn = open(&db).expect("a version-1 file must be migrated, not refused");
+        assert_eq!(
+            conn.pragma_query_value(None, "user_version", |r| r.get::<_, i32>(0))
+                .expect("version"),
+            SCHEMA_VERSION
+        );
+        for table in ["tool_agg", "tool_daily"] {
+            let cols = columns(&conn, table);
+            assert!(
+                cols.iter().any(|c| c == "content_bytes"),
+                "{table} was not migrated: {cols:?}"
+            );
+            assert!(
+                !cols.iter().any(|c| c == "bytes_out"),
+                "{table} still carries the version-1 column: {cols:?}"
+            );
+        }
+        assert_eq!(
+            rows(&conn),
+            0,
+            "the pre-release rows were discarded with the table; see DISCARD_V1"
+        );
+
+        record_row(
+            &conn,
+            1,
+            "read_text_file",
+            "inst",
+            "-",
+            [1, 0, 0, 0, 0, 5, 5, 9],
+        )
+        .expect("the production upsert must work against a migrated file");
+        assert_eq!(row_of(&conn, "read_text_file", "inst")[7], 9);
     }
 
     /// A database written by a NEWER build is not written into: its columns may mean something
