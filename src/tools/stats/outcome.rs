@@ -28,6 +28,13 @@ use rmcp::model::{CallToolResponse, ErrorCode};
 /// is_the_resolved_one` compares this constant against the version `Cargo.lock` actually
 /// resolves, so bumping rmcp fails the build until someone re-reads the catch-all arms and moves
 /// this string deliberately. One edit per bump, which is exactly the review that was lost.
+// A tripwire is read by the test it arms and by nobody else, which is exactly what makes it a
+// tripwire; `expect` rather than `allow` so that a future non-test reader retires the suppression
+// instead of leaving it to rot.
+#[cfg_attr(
+    not(test),
+    expect(dead_code, reason = "read by the version tripwire test below")
+)]
 const AUDITED_RMCP_VERSION: &str = "3.1.3";
 
 /// Which counter a finished tool call increments.

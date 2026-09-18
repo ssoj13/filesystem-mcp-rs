@@ -14,7 +14,9 @@
 //!    [`super::outcome::classify`] scores [`Outcome::ErrParams`], so those calls do reach this
 //!    map - and an un-interned key would grow it without bound from a single typo.
 //! 3. **[`Collector::record_interned`] cannot fail**: no `Result`, no I/O, no allocation beyond
-//!    the map entry. It takes a mutex, adds integers, releases.
+//!    the map entry. It takes a mutex, adds integers, releases. Every `FS_MCP_STATS_EVERY`
+//!    calls it also writes the table to the log, which is the only place these counters are
+//!    ever read.
 //!
 //! Used from `main.rs`'s `call_tool`, once per tool call, on the way out.
 
@@ -23,6 +25,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
 use rmcp::model::{ContentBlock, ResourceContents};
+use tracing::info;
 
 use super::outcome::Outcome;
 
@@ -129,11 +132,30 @@ pub struct Collector {
     calls: AtomicU64,
     /// See [`Health::unknown_shape`].
     unknown_shape: AtomicU64,
+    /// Calls between log dumps, or `0` to keep counting and never dump.
+    ///
+    /// Read once at construction rather than per call: the hot path may not touch the process
+    /// environment, and a knob that changed mid-process would make the interval unexplainable
+    /// from the log it produced.
+    dump_every: u64,
 }
 
 impl Collector {
-    /// Intern `names` - the router's tool list - and start with an empty table.
+    /// Intern `names` - the router's tool list - and start with an empty table, dumping on the
+    /// schedule `FS_MCP_STATS_EVERY` asks for.
     pub fn new<I, S>(names: I) -> Self
+    where
+        I: IntoIterator<Item = S>,
+        S: AsRef<str>,
+    {
+        Self::with_dump_every(names, super::dump_every())
+    }
+
+    /// The same, with the dump schedule given rather than read from the environment.
+    ///
+    /// Exists so the tests can pin a schedule without setting a process-wide variable that every
+    /// other test in this binary would then have to be serialised against.
+    pub fn with_dump_every<I, S>(names: I, dump_every: u64) -> Self
     where
         I: IntoIterator<Item = S>,
         S: AsRef<str>,
@@ -147,6 +169,7 @@ impl Collector {
             rows: Mutex::new(Table::new()),
             calls: AtomicU64::new(0),
             unknown_shape: AtomicU64::new(0),
+            dump_every,
         }
     }
 
@@ -168,7 +191,8 @@ impl Collector {
     /// from rather than unwrapped, because a panic somewhere else in the process is no reason for
     /// the *next* tool call to panic too.
     pub fn record_interned(&self, tool: Arc<str>, outcome: Outcome, ns: u64, content_bytes: u64) {
-        self.calls.fetch_add(1, Ordering::Relaxed);
+        // `fetch_add` returns the previous value, so the first call is call number 1.
+        let calls = self.calls.fetch_add(1, Ordering::Relaxed).saturating_add(1);
         if outcome == Outcome::UnknownShape {
             self.unknown_shape.fetch_add(1, Ordering::Relaxed);
         }
@@ -190,6 +214,24 @@ impl Collector {
         }
 
         self.lock().entry(tool).or_default().merge(one);
+
+        // After the merge, deliberately: the dump reads the same table, and the call that
+        // triggered it must already be in what it prints.
+        if due(calls, self.dump_every) {
+            self.dump();
+        }
+    }
+
+    /// Write the whole table to the log, one line per tool, busiest first.
+    ///
+    /// `info!` and not `debug!`: this is the entire visible output of the subsystem and the
+    /// default level is `info`, so anything quieter would mean counters collected by default and
+    /// seen by nobody. Formatting happens off the lock - [`Collector::snapshot`] copies - so a
+    /// large table does not hold up the tool calls arriving behind it.
+    pub fn dump(&self) {
+        for line in lines(&self.snapshot(), self.health()) {
+            info!("{line}");
+        }
     }
 
     /// A copy of the table, for a reader that must not hold the lock while it formats.
@@ -225,6 +267,55 @@ impl Collector {
     }
 }
 
+/// Is this the call a dump is owed on?
+///
+/// A free function so the schedule can be asserted without a log subscriber to read it back:
+/// `every == 0` is the documented "never dump", and the modulo is what makes the dumps land on
+/// 200, 400, 600 rather than drifting with whatever else the process is doing.
+fn due(calls: u64, every: u64) -> bool {
+    // `calls != 0` because zero is a multiple of everything: without it a caller counting from
+    // zero rather than from one would dump a table that has nothing in it yet.
+    calls != 0 && every != 0 && calls.is_multiple_of(every)
+}
+
+/// The dump, as text: a line naming the process totals, then one line per tool, busiest first.
+///
+/// Separated from [`Collector::dump`] so that the shape of the output - the ordering above all -
+/// is something the tests can hold, rather than something only a log subscriber could see.
+///
+/// Ordering is by call count descending and then by name, so that the interesting rows come first
+/// and two dumps of the same counters print the same lines: a `HashMap`'s own order is randomised
+/// per process, which would make two dumps impossible to diff.
+fn lines(table: &Table, health: Health) -> Vec<String> {
+    let mut rows: Vec<(&Arc<str>, &Counts)> = table.iter().collect();
+    rows.sort_by(|(a_name, a), (b_name, b)| {
+        b.calls().cmp(&a.calls()).then_with(|| a_name.cmp(b_name))
+    });
+
+    let mut out = Vec::with_capacity(rows.len() + 1);
+    out.push(format!(
+        "stats: {} calls over {} tools, {} of a shape this build does not know",
+        health.calls,
+        rows.len(),
+        health.unknown_shape
+    ));
+    out.extend(rows.into_iter().map(|(name, c)| {
+        format!(
+            "stats: {name} calls={} ok={} err_flagged={} err_params={} err_internal={} deferred={} ns_total={} ns_max={} content_bytes={}",
+            c.calls(),
+            c.ok,
+            c.err_flagged,
+            c.err_params,
+            c.err_internal,
+            c.deferred,
+            c.ns_total,
+            c.ns_max,
+            c.content_bytes
+        )
+    }));
+    out
+}
+
 /// Payload bytes of an already-materialised content list.
 ///
 /// Measured off the blocks the tool has *already* built, never by re-serialising the result: a
@@ -257,9 +348,13 @@ pub fn bytes_of(content: &[ContentBlock]) -> u64 {
 mod tests {
     use super::*;
 
-    /// A collector that serves two tools, which is all any of these tests needs.
+    /// The exact line one busy tool produces, spelled out once so that a change to the format is
+    /// a change a reader must make on purpose.
+    const EXPECTED_BUSIEST_LINE: &str = "stats: grep_files calls=3 ok=3 err_flagged=0 err_params=0 err_internal=0 deferred=0 ns_total=15 ns_max=5 content_bytes=3";
+
+    /// A collector that serves two tools and never dumps, which is all most of these tests need.
     fn collector() -> Collector {
-        Collector::new(["read_text_file", "grep_files"])
+        Collector::with_dump_every(["read_text_file", "grep_files"], 0)
     }
 
     /// Record by name, interning first: the seam holds the interned handle, the tests do not.
@@ -390,7 +485,7 @@ mod tests {
             "the router served no recognisable tool list"
         );
 
-        let c = Collector::new(&names);
+        let c = Collector::with_dump_every(&names, 0);
         for name in &names {
             assert_eq!(
                 &*c.intern(name),
@@ -407,6 +502,57 @@ mod tests {
             &*c.intern("read_text_fil"),
             UNKNOWN_TOOL,
             "and a name it does not serve must not become a key of its own"
+        );
+    }
+
+    /// The dump lands on multiples of the interval, and `0` never dumps at all.
+    #[test]
+    fn the_dump_schedule_is_every_nth_call_and_zero_is_never() {
+        assert!(!due(0, 200), "no call has been made yet");
+        assert!(!due(199, 200));
+        assert!(due(200, 200));
+        assert!(due(400, 200));
+        assert!(due(7, 1), "an interval of one dumps on every call");
+        for calls in [0, 1, 200, u64::MAX] {
+            assert!(!due(calls, 0), "zero must never dump ({calls})");
+        }
+    }
+
+    /// The busiest tool is printed first, ties break by name, and the header counts the process.
+    ///
+    /// Ordering is the property worth pinning: a `HashMap` iterates in an order randomised per
+    /// process, so without the sort two dumps of identical counters could not be diffed.
+    #[test]
+    fn the_dump_leads_with_the_process_then_the_busiest_tool() {
+        let c = collector();
+        for _ in 0..3 {
+            record(&c, "grep_files", Outcome::Ok, 5, 1);
+        }
+        record(&c, "read_text_file", Outcome::ErrFlagged, 9, 2);
+        record(&c, "definitely_not_a_tool", Outcome::ErrParams, 1, 0);
+
+        let out = lines(&c.snapshot(), c.health());
+        assert_eq!(out.len(), 4, "a header and one line per tool");
+        assert_eq!(
+            out[0],
+            "stats: 5 calls over 3 tools, 0 of a shape this build does not know"
+        );
+        assert_eq!(out[1], EXPECTED_BUSIEST_LINE);
+        // The two one-call rows tie, so the name decides: `__unknown` sorts before `read_...`.
+        assert!(out[2].contains(UNKNOWN_TOOL), "{}", out[2]);
+        assert!(out[3].contains("read_text_file"), "{}", out[3]);
+    }
+
+    /// An empty table still says something: a server that served nothing is a real answer, and a
+    /// dump that printed no lines at all would look like a broken subsystem instead.
+    #[test]
+    fn an_empty_table_still_reports_the_process() {
+        let c = collector();
+        let out = lines(&c.snapshot(), c.health());
+        assert_eq!(out.len(), 1);
+        assert_eq!(
+            out[0],
+            "stats: 0 calls over 0 tools, 0 of a shape this build does not know"
         );
     }
 

@@ -3,29 +3,14 @@
 //! Counters accumulate in memory, keyed by tool, for the life of the process and are never
 //! persisted: this subsystem answers "what is this server actually doing" from the log it
 //! already writes, and nothing else. [`collect`] holds the map, [`outcome`] decides which of
-//! the five outcome columns a finished call lands in.
+//! the five outcome columns a finished call lands in, and every `FS_MCP_STATS_EVERY` calls -
+//! and once more on the way out - the table is written to the log as one line per tool.
 //!
 //! This module holds the configuration readers, beside the subsystem they govern, the way
 //! [`crate::core::paths::tmp_keep_hours`] lives beside the directory it governs. They are the
 //! only readers of their keys, so no second caller can disagree about what blank or zero means.
 //! The keys themselves are registered once in [`crate::env_spec`], which asserts that the
 //! defaults it advertises are the constants below.
-
-// Not everything here has a non-test consumer yet: the dump that reads the table is the next
-// commit, and until it lands `Collector::health` and the counters it reports are exercised only
-// by the tests below.
-//
-// `expect`, deliberately, not `allow`: once the dump is wired up nothing here is dead any more,
-// the expectation goes unfulfilled, and `-D warnings` turns that into a build failure - so the
-// suppression cannot outlive the reason for it. Delete this attribute when it complains.
-//
-// Scoped to `not(test)` because the two builds disagree: the tests already exercise every item,
-// so under `cfg(test)` nothing is dead and an unconditional `expect` would be unfulfilled from
-// the day it was written, failing `cargo clippy --all-targets`.
-#![cfg_attr(
-    not(test),
-    expect(dead_code, reason = "read by the log dump; see the comment above")
-)]
 
 pub mod collect;
 pub mod outcome;
@@ -40,6 +25,21 @@ use crate::env_spec;
 /// cost is a mutex and some integer adds on the hot path. `env_spec` advertises this same default
 /// as the string `on`, and its tests assert the two agree.
 pub const ENABLED_DEFAULT: bool = true;
+
+/// Calls between log dumps when `FS_MCP_STATS_EVERY` is unset.
+///
+/// Small enough that a short session still says something before it exits, large enough that a
+/// busy server does not spend its log on itself: at 200, a table of ~250 tools costs one block of
+/// lines per few minutes of real use. `env_spec` advertises this same number, and its tests
+/// assert the two agree.
+pub const DUMP_EVERY_DEFAULT: u64 = 200;
+
+/// The largest dump interval accepted, a million calls.
+///
+/// Beyond this the dump is indistinguishable from off, which `0` already expresses honestly; the
+/// bound exists so that a fat-fingered value cannot silently mean "never" while the key still
+/// reads as enabled.
+pub const DUMP_EVERY_MAX: u64 = 1_000_000;
 
 /// Is the statistics subsystem switched on?
 ///
@@ -58,6 +58,31 @@ pub fn enabled() -> bool {
             ENABLED_DEFAULT
         }
     }
+}
+
+/// How many calls between log dumps; `0` means never dump, and the counters are still kept.
+///
+/// Unlike an interval in seconds, zero here is meaningful and is honoured: counting costs a mutex
+/// and some adds, while the dump costs a line of log per tool, so an operator may reasonably want
+/// the first without the second - `FS_MCP_STATS=off` is what switches off both.
+///
+/// An unparseable value is reported and the default applied: a malformed telemetry knob must
+/// never be a reason the server refuses to start.
+pub fn dump_every() -> u64 {
+    let value = match env_spec::get("FS_MCP_STATS_EVERY") {
+        None => DUMP_EVERY_DEFAULT,
+        Some(raw) => raw.parse().unwrap_or_else(|_| {
+            warn!("FS_MCP_STATS_EVERY is not a whole number ({raw}); using {DUMP_EVERY_DEFAULT}");
+            DUMP_EVERY_DEFAULT
+        }),
+    };
+    if value > DUMP_EVERY_MAX {
+        warn!(
+            "FS_MCP_STATS_EVERY={value} exceeds the maximum of {DUMP_EVERY_MAX}; using that instead"
+        );
+        return DUMP_EVERY_MAX;
+    }
+    value
 }
 
 #[cfg(test)]
@@ -84,6 +109,32 @@ mod tests {
                 None => std::env::remove_var(key),
             }
         }
+    }
+
+    /// Zero is honoured rather than clamped: it is the documented way to keep counting without
+    /// spending log lines on it, and a reader that quietly turned it into "every call" or "every
+    /// 200 calls" would make the key a lie.
+    #[test]
+    #[serial]
+    fn zero_disables_the_dump_without_disabling_the_counters() {
+        with_env("FS_MCP_STATS_EVERY", Some("0"), || {
+            assert_eq!(dump_every(), 0);
+            assert!(enabled(), "counting is a separate switch");
+        });
+    }
+
+    #[test]
+    #[serial]
+    fn absurd_and_malformed_dump_intervals_fall_back_rather_than_overflow() {
+        with_env("FS_MCP_STATS_EVERY", Some("18446744073709551615"), || {
+            assert_eq!(dump_every(), DUMP_EVERY_MAX)
+        });
+        with_env("FS_MCP_STATS_EVERY", Some("often"), || {
+            assert_eq!(dump_every(), DUMP_EVERY_DEFAULT)
+        });
+        with_env("FS_MCP_STATS_EVERY", None, || {
+            assert_eq!(dump_every(), DUMP_EVERY_DEFAULT)
+        });
     }
 
     #[test]

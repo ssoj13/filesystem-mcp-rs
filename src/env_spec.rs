@@ -89,11 +89,18 @@ fn log_vars() -> Vec<EnvVar> {
 /// `stats_keys_are_registered_and_agree_with_the_code` asserts these strings match.
 #[cfg(feature = "stats-tools")]
 fn stats_vars() -> Vec<EnvVar> {
-    vec![EnvVar {
-        key: "FS_MCP_STATS",
-        default: "on",
-        help: "Count tool calls, outcomes and latency per tool: on | off.",
-    }]
+    vec![
+        EnvVar {
+            key: "FS_MCP_STATS",
+            default: "on",
+            help: "Count tool calls, outcomes and latency per tool: on | off.",
+        },
+        EnvVar {
+            key: "FS_MCP_STATS_EVERY",
+            default: "200",
+            help: "Write the counters to this process's log every N tool calls, and once more at shutdown. 0 = never write them; counting continues.",
+        },
+    ]
 }
 
 // `vec![]` cannot express these: an element carrying `#[cfg(...)]` is not valid inside the
@@ -406,6 +413,26 @@ mod tests {
             switch.default == "on",
             stats::ENABLED_DEFAULT,
             "advertised default disagrees with tools::stats::enabled"
+        );
+
+        assert_eq!(
+            all.iter().filter(|v| v.key == "FS_MCP_STATS_EVERY").count(),
+            1,
+            "FS_MCP_STATS_EVERY must be registered exactly once"
+        );
+        let every = find("FS_MCP_STATS_EVERY");
+        assert_eq!(
+            every.default,
+            stats::DUMP_EVERY_DEFAULT.to_string(),
+            "advertised default disagrees with tools::stats::dump_every"
+        );
+        // `contains("0 =")`, not `contains('0')`: the latter is satisfied by the `0` in a number
+        // anywhere in the sentence, which is not the convention being pinned. Zero really is
+        // honoured here, unlike the log intervals, so it must be documented.
+        assert!(
+            every.help.contains("0 ="),
+            "a knob whose zero is meaningful must document it: {}",
+            every.help
         );
     }
 
