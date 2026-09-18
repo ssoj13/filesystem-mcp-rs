@@ -7296,22 +7296,15 @@ impl ServerHandler for FileSystemServer {
         //
         // - the tool name, interned while the request still owns it (an `Arc` clone of a name the
         //   router already holds, so the hot path allocates nothing);
-        // - the monotonic instant that measures how long the call took;
-        // - the wall-clock instant that decides which ten-minute bucket it is counted in. This is
-        //   the START of the call, deliberately: bucketed at completion, a 45-minute
-        //   `run_command` would report its whole latency - `ns_max` included - against a window
-        //   in which the server was in fact idle, and the window it really ran in would look
-        //   empty. Two clocks and not one because `Instant` cannot name a wall-clock window and
-        //   `SystemTime` is not monotonic, so neither can do the other's job.
+        // - the monotonic instant that measures how long the call took. `Instant` and not
+        //   `SystemTime`, because the latter is not monotonic and a clock adjustment mid-call
+        //   would make a duration negative or absurd.
         //
         // With statistics off this `map` over a `None` is the only work the seam does.
-        let measured = self.stats.as_ref().map(|stats| {
-            (
-                stats.intern(&request.name),
-                Instant::now(),
-                SystemTime::now(),
-            )
-        });
+        let measured = self
+            .stats
+            .as_ref()
+            .map(|stats| (stats.intern(&request.name), Instant::now()));
 
         let ctx = rmcp::handler::server::tool::ToolCallContext::new(self, request, context);
         // Deliberately not `?`: the `Err` arm is half of what `classify` scores, and propagating
@@ -7319,7 +7312,7 @@ impl ServerHandler for FileSystemServer {
         // uncounted - which is much of what an operator opens this table to find.
         let result = self.tool_router.call(ctx).await;
 
-        if let (Some(stats), Some((tool, timer, started_at))) = (self.stats.as_ref(), measured) {
+        if let (Some(stats), Some((tool, timer))) = (self.stats.as_ref(), measured) {
             // Measured against the router's own answer, before the session footer is stamped on
             // to it. The footer is a constant per call, so counting it would inflate the tools
             // that return least by the largest relative amount, for a reason that has nothing to
@@ -7338,7 +7331,6 @@ impl ServerHandler for FileSystemServer {
                 // A single call would have to run for 584 years to saturate this.
                 timer.elapsed().as_nanos().min(u128::from(u64::MAX)) as u64,
                 content_bytes,
-                started_at,
             );
         }
 
@@ -7654,47 +7646,6 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
         // Nothing to say: no stale entries, another process is handling it, or retention is off.
         Ok(_) => {}
         Err(e) => warn!("Housekeeping skipped: {e}"),
-    }
-
-    // Log retention, under the same lease with a different kind, and under the same rule: a
-    // failure is reported and the server starts anyway. Separate from the scratch sweep because
-    // the two hold independent leases - one must not silence the other for an hour.
-    match core::housekeeping::sweep_logs(std::time::SystemTime::now()) {
-        // `n > 0` is knowingly untested and `cargo mutants` reports it: reaching it means running
-        // `main` against a real state root, and all it decides is whether one info line is
-        // emitted. What the count means is pinned on `sweep_logs_in`.
-        Ok(core::housekeeping::Sweep::Ran(n)) if n > 0 => {
-            info!("Housekeeping: reclaimed {n} expired log entries")
-        }
-        Ok(_) => {}
-        Err(e) => warn!("Log retention skipped: {e}"),
-    }
-
-    // The statistics flush, last before the transport and on the same terms as housekeeping: a
-    // subsystem that observes may not decide whether the server runs. With statistics off there
-    // is no collector and nothing is spawned; if the database path cannot even be resolved the
-    // reason is reported once and the counters simply stay in memory, where they cost a few
-    // hundred kilobytes and nothing else.
-    if let Some(collector) = server.stats.clone() {
-        match tools::stats::db_file() {
-            Ok(path) => tools::stats::flush::spawn(
-                collector,
-                path,
-                tools::stats::flush::Identity {
-                    started_day: core::logging::utc_day(std::time::SystemTime::now()),
-                    pid: i64::from(core::instance::pid()),
-                    instance_id: core::instance::id().to_string(),
-                    // One process is one session: stdio carries no session id in the protocol at
-                    // all, and over HTTP the collector is shared by every connection this process
-                    // serves, so its rows cannot be attributed more finely than this anyway. The
-                    // process nonce is therefore the synthesized session id, and it is the same
-                    // value the `sessions` row is keyed by.
-                    session_id: core::instance::id().to_string(),
-                },
-                std::time::Duration::from_secs(tools::stats::flush_secs()),
-            ),
-            Err(e) => warn!("Statistics: the database path could not be resolved: {e}"),
-        }
     }
 
     // Run in selected mode
