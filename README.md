@@ -1219,7 +1219,7 @@ Note: Use forward slashes (`C:/path`) or double backslashes (`C:\\path`) in TOML
 - `src/tools/archive.rs` — ZIP/TAR/TAR.GZ archive handling
 - `src/tools/http_tools.rs` — HTTP/HTTPS tools (feature)
 - `src/tools/s3_tools.rs` — S3 tools (feature)
-- `src/tools/stats.rs` — file/directory statistics
+- `src/tools/file_stats.rs` — file/directory statistics
 - `src/tools/duplicates.rs` — duplicate file detection
 - `tests/integration.rs` — per-tool integration coverage
 

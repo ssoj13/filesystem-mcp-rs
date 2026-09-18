@@ -10,9 +10,17 @@
 //!    transaction that has already taken a read snapshot tries to upgrade to a write lock, and
 //!    `busy_timeout` does not retry it. A TEXT payload (a latency histogram blob, say) would
 //!    force a SELECT-parse-UPDATE cycle and bring the whole failure mode back.
-//! 2. **`instance_id` is part of every primary key.** Two concurrent processes can then never
-//!    target the same row, so cross-process double counting is structurally impossible and the
-//!    only interaction left between writers is the file write lock.
+//! 2. **`instance_id` is part of the primary key of every table two processes write
+//!    concurrently** - which is `tool_agg`, the one the flush path touches. Two concurrent
+//!    flushes can then never target the same row, so cross-process double counting is
+//!    structurally impossible and the only interaction left between writers is the file write
+//!    lock.
+//!
+//!    `tool_daily` and `tool_catalog` deliberately do *not* carry it, and the difference is not
+//!    cosmetic: their keys are shared by every process, so additive merges into them are safe
+//!    **only** while something outside the database guarantees a single writer. For `tool_daily`
+//!    that guarantee is the housekeeping lease (see [`SCHEMA`]); nothing may compact into it
+//!    without holding one.
 //!
 //! [`open`] is the single door: nothing else in the crate opens this file, so the pragmas, the
 //! schema and the version check cannot be applied by one caller and skipped by another.
@@ -63,6 +71,13 @@ const JOURNAL_SIZE_LIMIT: i64 = 16 * 1024 * 1024;
 /// persistent key must be the same triple the log file name carries
 /// (`<YYYY-MM-DD>/fsmcp-<pid>-<instance>.log`) or a session row cannot name the log file it
 /// describes. `tool_agg` needs no such correction: its `bucket` already scopes the key in time.
+///
+/// `tool_daily`'s key is `(day, tool)` with no `instance_id`, which makes it the one table whose
+/// rows every process shares. Its counters are additive like every other, so two sweeps
+/// compacting the same day would double it - permanently, because compaction deletes the detail
+/// rows it read. **It is safe only because the housekeeping lease serialises the writer**, and
+/// nothing may write it without holding one. `tool_catalog` shares its key too but stores no
+/// counters: its rows are idempotent facts about a build, so a repeated insert is a no-op.
 ///
 /// There is no `housekeeping` table - the retention lease is wave 1's marker file, which
 /// [`crate::core::housekeeping`] owns for every kind of sweep.
@@ -160,6 +175,13 @@ ON CONFLICT (bucket, tool, instance_id, session_id) DO UPDATE SET
 ///
 /// The pragmas, in the order they are applied and for the reason each is applied:
 ///
+/// - `busy_timeout` - **first**, and the order is load-bearing. rusqlite installs no busy
+///   handler by default, so anything before this line runs with zero retry. The very first
+///   `journal_mode = WAL` on a fresh state root *converts* the file, which needs an exclusive
+///   lock; with dozens of servers launching together everyone arriving mid-conversion would take
+///   an immediate `SQLITE_BUSY` and lose statistics for the whole process - reported as "could
+///   not be put into WAL mode", which names the wrong cause. It bites once per machine and looks
+///   exactly like flakiness. See [`BUSY_TIMEOUT`].
 /// - `journal_mode = WAL` - persisted in the file header, so it is really set once and merely
 ///   re-confirmed afterwards. Without it every writer serialises on one global lock. If it
 ///   cannot be established (a network share, a sync-backed directory) the caller is told, not
@@ -169,11 +191,10 @@ ON CONFLICT (bucket, tool, instance_id, session_id) DO UPDATE SET
 ///   failure this subsystem actually meets, at one fsync fewer per commit. `memory_v2` keeps the
 ///   default `FULL` and should: losing a memory item to a power cut is a real loss, whereas
 ///   losing the last few seconds of counters is not.
-/// - `busy_timeout` - per connection; see [`BUSY_TIMEOUT`].
 /// - `journal_size_limit` - per connection; see [`JOURNAL_SIZE_LIMIT`].
 ///
-/// Then `user_version` decides: equal proceeds, older migrates, newer is refused with an error
-/// naming both versions.
+/// Then [`gate`] decides on `user_version`: equal proceeds, older migrates, newer is refused with
+/// an error naming both versions.
 pub fn open(path: &Path) -> rusqlite::Result<Connection> {
     if let Some(parent) = path.parent()
         && let Err(e) = std::fs::create_dir_all(parent)
@@ -188,6 +209,10 @@ pub fn open(path: &Path) -> rusqlite::Result<Connection> {
     }
 
     let mut conn = Connection::open(path)?;
+
+    // Before anything that can contend - see the rustdoc above; this line is not where it is for
+    // tidiness.
+    conn.busy_timeout(BUSY_TIMEOUT)?;
 
     // `PRAGMA journal_mode = ...` answers with the mode actually in force, which is the only way
     // to learn that the request did not take; a plain `pragma_update` would also fail on the
@@ -205,44 +230,50 @@ pub fn open(path: &Path) -> rusqlite::Result<Connection> {
         ));
     }
     conn.pragma_update(None, "synchronous", "NORMAL")?;
-    conn.busy_timeout(BUSY_TIMEOUT)?;
     conn.pragma_update_and_check(None, "journal_size_limit", JOURNAL_SIZE_LIMIT, |r| {
         r.get::<_, i64>(0)
     })?;
 
-    let found: i32 = conn.pragma_query_value(None, "user_version", |r| r.get(0))?;
-    match found.cmp(&SCHEMA_VERSION) {
-        std::cmp::Ordering::Equal => {}
-        std::cmp::Ordering::Less => migrate(&mut conn, found)?,
-        std::cmp::Ordering::Greater => {
-            return Err(fail(
-                ffi::SQLITE_ERROR,
-                format!(
-                    "the statistics database {} is at schema version {found}, newer than the \
-                     {SCHEMA_VERSION} this build understands; refusing to write, because its \
-                     columns may mean something else",
-                    path.display()
-                ),
-            ));
-        }
-    }
-
+    gate(&mut conn, path)?;
     Ok(conn)
 }
 
 /// Open the statistics database for reading only.
 ///
 /// The read tools use this so that a query can never take the write lock, however long it runs.
-/// `SQLITE_OPEN_READ_ONLY` also means no pragma here may write: `journal_mode` and `synchronous`
-/// belong to [`open`], and a reader simply inherits the WAL mode recorded in the file header.
+/// Only `busy_timeout` is set here, and not because the flags forbid the rest: `journal_mode` is
+/// already recorded in the file header and is simply inherited, `synchronous` governs how a
+/// *write* is flushed and so means nothing on a connection that never writes, and
+/// `journal_size_limit` is applied by whoever checkpoints the `-wal` - which a reader never does,
+/// so setting it here would be a no-op rather than a safeguard.
 ///
 /// A database at a newer schema version is refused here too - reading columns whose meaning may
 /// have changed produces a confident wrong answer, which is worse than no answer. Blocking.
+///
+/// **A failure to open is not necessarily a broken subsystem.** A read-only connection to a WAL
+/// database still has to create the `-shm` file, so a directory with no `stats.db` yet (or one
+/// nothing has written) comes back as `SQLITE_CANTOPEN` or `SQLITE_READONLY_CANTINIT`. Both mean
+/// "there are no statistics yet", and a caller must report that as an empty result, never as a
+/// fault.
 pub fn open_read_only(path: &Path) -> rusqlite::Result<Connection> {
     let conn = Connection::open_with_flags(
         path,
         OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
-    )?;
+    )
+    // SQLite's own message names no file ("unable to open database file"), which leaves an
+    // operator with nothing to check. The extended code is carried through unchanged so a caller
+    // can still distinguish "not there yet" from a real fault.
+    .map_err(|e| match e {
+        rusqlite::Error::SqliteFailure(inner, detail) => fail(
+            inner.extended_code,
+            format!(
+                "the statistics database {} could not be opened for reading: {}",
+                path.display(),
+                detail.unwrap_or_else(|| inner.to_string())
+            ),
+        ),
+        other => other,
+    })?;
     conn.busy_timeout(BUSY_TIMEOUT)?;
 
     let found: i32 = conn.pragma_query_value(None, "user_version", |r| r.get(0))?;
@@ -260,21 +291,46 @@ pub fn open_read_only(path: &Path) -> rusqlite::Result<Connection> {
     Ok(conn)
 }
 
-/// Bring a database at version `from` up to [`SCHEMA_VERSION`].
+/// Read `user_version` and act on it, both **inside one `IMMEDIATE` transaction**.
 ///
-/// One `IMMEDIATE` transaction, so two servers starting at the same moment cannot half-apply it
-/// between them: the loser waits, then finds every `IF NOT EXISTS` already satisfied. The
-/// version bump is inside the transaction because `user_version` lives in the database header
-/// and is rolled back with everything else.
-fn migrate(conn: &mut Connection, from: i32) -> rusqlite::Result<()> {
+/// Reading the version outside the transaction that acts on it would leave the decision and its
+/// consequence separated by a window: a process could read `1`, satisfy the newer-refuses check,
+/// and then be writing while another process migrated the file to `2` underneath it. Nothing
+/// exploits that today, because `SCHEMA_VERSION` is `1` and there is no migration to race with -
+/// but it is the shape that makes such a bug possible, and closing it is one line now versus a
+/// thing to reason about later.
+///
+/// `IMMEDIATE` also means two servers starting at the same instant cannot half-apply the schema
+/// between them: the loser waits out [`BUSY_TIMEOUT`], then finds every `IF NOT EXISTS` already
+/// satisfied. The version bump is inside the transaction too, because `user_version` lives in
+/// the database header and is rolled back with everything else.
+fn gate(conn: &mut Connection, path: &Path) -> rusqlite::Result<()> {
     let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
-    // Version 0 is "no schema at all" - a file SQLite has just created, or an empty one. There
-    // is no shipped version between 0 and 1, so this is the only step that exists today; a later
-    // version adds its own `if from < N { .. }` beneath this one.
-    if from <= 0 {
-        tx.execute_batch(SCHEMA)?;
+    let found: i32 = tx.pragma_query_value(None, "user_version", |r| r.get(0))?;
+    match found.cmp(&SCHEMA_VERSION) {
+        std::cmp::Ordering::Equal => {}
+        std::cmp::Ordering::Less => {
+            // Version 0 is "no schema at all" - a file SQLite has just created, or an empty one.
+            // There is no shipped version between 0 and 1, so this is the only step that exists
+            // today; a later version adds its own `if found < N { .. }` beneath this one.
+            if found <= 0 {
+                tx.execute_batch(SCHEMA)?;
+            }
+            tx.pragma_update(None, "user_version", SCHEMA_VERSION)?;
+        }
+        // Dropping `tx` unread rolls the (empty) transaction back and releases the lock.
+        std::cmp::Ordering::Greater => {
+            return Err(fail(
+                ffi::SQLITE_ERROR,
+                format!(
+                    "the statistics database {} is at schema version {found}, newer than the \
+                     {SCHEMA_VERSION} this build understands; refusing to write, because its \
+                     columns may mean something else",
+                    path.display()
+                ),
+            ));
+        }
     }
-    tx.pragma_update(None, "user_version", SCHEMA_VERSION)?;
     tx.commit()
 }
 
@@ -288,6 +344,14 @@ fn fail(code: std::ffi::c_int, msg: String) -> rusqlite::Error {
 mod tests {
     use super::*;
 
+    /// The eight counters of one delta row, in the order [`UPSERT_AGG`] binds them:
+    /// `ok, err_flagged, err_params, err_internal, deferred, ns_total, ns_max, bytes_out`.
+    ///
+    /// A fixed-width array rather than eight arguments so that a test can state the whole
+    /// expected row in one literal and compare it in one assertion - which is what makes a
+    /// swapped pair of merge lines visible.
+    type Counts = [i64; 8];
+
     /// Bind one delta row through the production statement. The tests drive [`UPSERT_AGG`]
     /// itself rather than a copy of it, so a change to the merge semantics is caught here.
     fn record_row(
@@ -296,7 +360,7 @@ mod tests {
         tool: &str,
         instance_id: &str,
         session_id: &str,
-        ok: i64,
+        c: Counts,
     ) -> rusqlite::Result<usize> {
         conn.execute(
             UPSERT_AGG,
@@ -305,16 +369,39 @@ mod tests {
                 tool,
                 instance_id,
                 session_id,
-                ok,
-                0,
-                0,
-                0,
-                0,
-                0,
-                0,
-                0
+                c[0],
+                c[1],
+                c[2],
+                c[3],
+                c[4],
+                c[5],
+                c[6],
+                c[7]
             ],
         )
+    }
+
+    /// Every counter of one row, so an assertion can cover all eight rather than the one that
+    /// happened to be non-zero.
+    fn row_of(conn: &Connection, tool: &str, instance_id: &str) -> Counts {
+        conn.query_row(
+            "SELECT ok, err_flagged, err_params, err_internal, deferred, ns_total, ns_max, \
+             bytes_out FROM tool_agg WHERE tool = ?1 AND instance_id = ?2",
+            [tool, instance_id],
+            |r| {
+                Ok([
+                    r.get(0)?,
+                    r.get(1)?,
+                    r.get(2)?,
+                    r.get(3)?,
+                    r.get(4)?,
+                    r.get(5)?,
+                    r.get(6)?,
+                    r.get(7)?,
+                ])
+            },
+        )
+        .expect("row")
     }
 
     fn total_ok(conn: &Connection, tool: &str) -> i64 {
@@ -332,18 +419,108 @@ mod tests {
     }
 
     /// Two processes never target the same row: `instance_id` is in the primary key, so the only
-    /// cross-process interaction left is the file write lock.
+    /// cross-process interaction left is the file write lock. And each of the eight counters
+    /// merges into *its own* column.
+    ///
+    /// Every value here is distinct, and distinct again between the two writes, which is the
+    /// point: with zeroes in seven columns the seven identically-shaped `x = x + excluded.x`
+    /// lines of [`UPSERT_AGG`] are interchangeable, and swapping two of them - or turning one
+    /// into a plain `= excluded.x` - would leave the assertions green. `ns_max` is deliberately
+    /// *smaller* on the second write, so the one merge that is a `max(..)` rather than a sum is
+    /// pinned in the direction a careless rewrite gets wrong.
     #[test]
     fn upsert_accumulates_per_instance() {
         let dir = tempfile::TempDir::new().expect("tempdir");
         let db = dir.path().join("stats.db");
         let a = open(&db).expect("open a");
         let b = open(&db).expect("open b");
-        record_row(&a, 100, "read_text_file", "inst-a", "-", 3).expect("a writes");
-        record_row(&b, 100, "read_text_file", "inst-b", "-", 5).expect("b writes");
-        record_row(&a, 100, "read_text_file", "inst-a", "-", 2).expect("a writes again");
-        assert_eq!(total_ok(&a, "read_text_file"), 10, "sums across instances");
+
+        let tool = "read_text_file";
+        record_row(&a, 100, tool, "inst-a", "-", [3, 5, 7, 11, 13, 17, 900, 23]).expect("a writes");
+        record_row(
+            &b,
+            100,
+            tool,
+            "inst-b",
+            "-",
+            [100, 200, 300, 400, 500, 600, 7000, 800],
+        )
+        .expect("b writes");
+        record_row(
+            &a,
+            100,
+            tool,
+            "inst-a",
+            "-",
+            [2, 40, 60, 80, 120, 160, 90, 240],
+        )
+        .expect("a writes again");
+
+        assert_eq!(
+            row_of(&a, tool, "inst-a"),
+            [5, 45, 67, 91, 133, 177, 900, 263],
+            "each counter accumulates into its own column, and ns_max keeps the larger"
+        );
+        assert_eq!(
+            row_of(&a, tool, "inst-b"),
+            [100, 200, 300, 400, 500, 600, 7000, 800],
+            "one process's writes never reach another's row"
+        );
+        assert_eq!(total_ok(&a, tool), 105, "sums across instances");
         assert_eq!(rows(&a), 2, "one row per instance, not per write");
+    }
+
+    /// `ns_max` is the only counter that is not a sum, and both directions matter: a later call
+    /// that was slower must raise it, one that was faster must not lower it. Tested apart from
+    /// the accumulation above so that neither direction can be lost in a rewrite of that test.
+    #[test]
+    fn ns_max_rises_but_never_falls() {
+        let dir = tempfile::TempDir::new().expect("tempdir");
+        let conn = open(&dir.path().join("stats.db")).expect("open");
+        let ns_max = |c: &Connection| row_of(c, "grep_files", "inst")[6];
+
+        record_row(
+            &conn,
+            7,
+            "grep_files",
+            "inst",
+            "-",
+            [1, 0, 0, 0, 0, 500, 500, 0],
+        )
+        .expect("first");
+        assert_eq!(ns_max(&conn), 500);
+
+        record_row(
+            &conn,
+            7,
+            "grep_files",
+            "inst",
+            "-",
+            [1, 0, 0, 0, 0, 10, 10, 0],
+        )
+        .expect("a faster call");
+        assert_eq!(
+            ns_max(&conn),
+            500,
+            "a faster call must not lower the maximum"
+        );
+
+        record_row(
+            &conn,
+            7,
+            "grep_files",
+            "inst",
+            "-",
+            [1, 0, 0, 0, 0, 900, 900, 0],
+        )
+        .expect("a slower call");
+        assert_eq!(ns_max(&conn), 900, "a slower call must raise it");
+
+        assert_eq!(
+            row_of(&conn, "grep_files", "inst")[5],
+            1410,
+            "ns_total still sums while ns_max does not"
+        );
     }
 
     /// A database written by a NEWER build is not written into: its columns may mean something
