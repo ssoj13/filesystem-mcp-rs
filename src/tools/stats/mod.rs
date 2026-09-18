@@ -1,23 +1,36 @@
 //! Tool-call statistics: which of this server's tools are used, which fail and how.
 //!
-//! Counters accumulate in memory, keyed by tool, for the life of the process and are never
-//! persisted: this subsystem answers "what is this server actually doing" from the log it
-//! already writes, and nothing else. [`collect`] holds the map, [`outcome`] decides which of
-//! the five outcome columns a finished call lands in, and every `FS_MCP_STATS_EVERY` calls -
-//! and once more on the way out - the table is written to the log as one line per tool.
+//! The whole subsystem is three steps. At startup [`collect::Collector`] is built from the
+//! router's own tool list with **every tool at zero**, which is what makes the unused tail fall
+//! out for free: a tool nobody called is a row of zeros, not a row that is missing. During the
+//! run each finished call adds integers to that map, on a path that cannot fail. At exit the map
+//! is written once, as JSON, to `<state>/stats/<YYYY-MM-DD>/<machine>_<stamp>.json`.
 //!
-//! This module holds the configuration readers, beside the subsystem they govern, the way
-//! [`crate::core::paths::tmp_keep_hours`] lives beside the directory it governs. They are the
-//! only readers of their keys, so no second caller can disagree about what blank or zero means.
-//! The keys themselves are registered once in [`crate::env_spec`], which asserts that the
-//! defaults it advertises are the constants below.
+//! Nothing is aggregated here and nothing is deleted here. Reading a week of runs is reading that
+//! directory, which this server's own `grep_files` and `read_json` already do better than a
+//! bespoke query tool would.
+//!
+//! [`collect`] holds the map, [`outcome`] decides which of the five outcome columns a finished
+//! call lands in, and this module owns the one file the run leaves behind.
 
 pub mod collect;
 pub mod outcome;
 
+use std::io;
+use std::path::PathBuf;
+use std::sync::{Arc, OnceLock};
+use std::time::SystemTime;
+
+use serde_json::{Value, json};
 use tracing::warn;
 
+use crate::core::paths::{self, SubDir};
 use crate::env_spec;
+use collect::Collector;
+
+/// The JSON layout version, so a reader can tell a file written by this build from one written
+/// by a build that moved a field. Bumped when a field changes meaning, not when one is added.
+const SCHEMA: u32 = 1;
 
 /// Whether statistics are collected when `FS_MCP_STATS` is unset.
 ///
@@ -25,21 +38,6 @@ use crate::env_spec;
 /// cost is a mutex and some integer adds on the hot path. `env_spec` advertises this same default
 /// as the string `on`, and its tests assert the two agree.
 pub const ENABLED_DEFAULT: bool = true;
-
-/// Calls between log dumps when `FS_MCP_STATS_EVERY` is unset.
-///
-/// Small enough that a short session still says something before it exits, large enough that a
-/// busy server does not spend its log on itself: at 200, a table of ~250 tools costs one block of
-/// lines per few minutes of real use. `env_spec` advertises this same number, and its tests
-/// assert the two agree.
-pub const DUMP_EVERY_DEFAULT: u64 = 200;
-
-/// The largest dump interval accepted, a million calls.
-///
-/// Beyond this the dump is indistinguishable from off, which `0` already expresses honestly; the
-/// bound exists so that a fat-fingered value cannot silently mean "never" while the key still
-/// reads as enabled.
-pub const DUMP_EVERY_MAX: u64 = 1_000_000;
 
 /// Is the statistics subsystem switched on?
 ///
@@ -60,37 +58,179 @@ pub fn enabled() -> bool {
     }
 }
 
-/// How many calls between log dumps; `0` means never dump, and the counters are still kept.
+/// Everything about the run that is not a counter, fixed at startup.
 ///
-/// Unlike an interval in seconds, zero here is meaningful and is honoured: counting costs a mutex
-/// and some adds, while the dump costs a line of log per tool, so an operator may reasonably want
-/// the first without the second - `FS_MCP_STATS=off` is what switches off both.
-///
-/// An unparseable value is reported and the default applied: a malformed telemetry knob must
-/// never be a reason the server refuses to start.
-pub fn dump_every() -> u64 {
-    let value = match env_spec::get("FS_MCP_STATS_EVERY") {
-        None => DUMP_EVERY_DEFAULT,
-        Some(raw) => raw.parse().unwrap_or_else(|_| {
-            warn!("FS_MCP_STATS_EVERY is not a whole number ({raw}); using {DUMP_EVERY_DEFAULT}");
-            DUMP_EVERY_DEFAULT
-        }),
-    };
-    if value > DUMP_EVERY_MAX {
-        warn!(
-            "FS_MCP_STATS_EVERY={value} exceeds the maximum of {DUMP_EVERY_MAX}; using that instead"
-        );
-        return DUMP_EVERY_MAX;
+/// Carried beside the counters because a table of call counts with no idea which server, which
+/// client or which working directory produced it cannot be compared with anything.
+#[derive(Debug, Clone)]
+pub struct Identity {
+    /// This process's id. Together with `instance` it identifies the run inside its log line too.
+    pub pid: u32,
+    /// The process nonce, the same one the log file name and `panic.log` carry.
+    pub instance: String,
+    /// `stdio` or `stream`: the two are used by different clients for different work, and a
+    /// latency that looks alarming under one is normal under the other.
+    pub transport: &'static str,
+    /// This build's version, so a change in the numbers can be attributed to a release.
+    pub version: &'static str,
+    /// The directory the server was started in, which is what most relative paths resolved
+    /// against and therefore what the run was actually about.
+    pub cwd: Option<PathBuf>,
+    /// When the process began serving.
+    pub started: SystemTime,
+}
+
+/// How the run ended, which is the one thing about the file that cannot be known at startup.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Ending {
+    /// The transport returned and the process is leaving normally.
+    Exit,
+    /// The panic hook is writing: the process is on its way down with a backtrace in
+    /// `<state>/panics/`, and this file is what says what it had been doing.
+    Panic,
+}
+
+impl Ending {
+    fn as_str(self) -> &'static str {
+        match self {
+            Ending::Exit => "exit",
+            Ending::Panic => "panic",
+        }
     }
-    value
+}
+
+/// The counters and identity of the run in progress, or nothing when statistics are off.
+///
+/// A process-global because the panic hook is a `'static` closure that is handed no server: the
+/// alternative is a crash report with no record of what the server had been doing, which is
+/// exactly the case this subsystem is most wanted for. Written once, at startup, before any tool
+/// call can arrive.
+static ACTIVE: OnceLock<Active> = OnceLock::new();
+
+/// What [`ACTIVE`] holds.
+struct Active {
+    collector: Arc<Collector>,
+    identity: Identity,
+    /// The client that completed the handshake, learned after [`install`] and therefore not part
+    /// of [`Identity`]. Absent under the HTTP transport, where one process serves many clients
+    /// and no single name would be true.
+    client: OnceLock<(String, String)>,
+}
+
+/// Adopt this run's collector and identity, so that the exit path and the panic hook can both
+/// write the file.
+///
+/// Called once, from `run`, and ignored on a second call: a second installation would mean two
+/// tables disagreeing about the same process, and the first one is the one every tool call is
+/// already counting into.
+pub fn install(collector: Arc<Collector>, identity: Identity) {
+    let _already_installed = ACTIVE.set(Active {
+        collector,
+        identity,
+        client: OnceLock::new(),
+    });
+}
+
+/// Record which client completed the handshake.
+///
+/// Separate from [`install`] because it is only knowable afterwards, and a `OnceLock` because
+/// under stdio there is exactly one client per process; the first answer is the true one and a
+/// later call cannot improve on it.
+pub fn note_client(name: String, version: String) {
+    if let Some(active) = ACTIVE.get() {
+        let _first_client_wins = active.client.set((name, version));
+    }
+}
+
+/// Write this run's counters to `<state>/stats/<YYYY-MM-DD>/<machine>_<stamp>.json`.
+///
+/// Returns the path so the caller can log it. Does nothing and reports nothing when statistics
+/// are off, because then there is no [`ACTIVE`] to write.
+///
+/// **A `SIGKILL` takes the counters with it and nothing here can change that**: the process is
+/// gone before any code of ours runs, so there is no file, and inventing a periodic write to
+/// narrow that window would be reintroducing the flush this design exists without.
+pub fn write(ending: Ending, ended: SystemTime) -> io::Result<Option<PathBuf>> {
+    let Some(active) = ACTIVE.get() else {
+        return Ok(None);
+    };
+    let path = paths::run_file(SubDir::Stats, "json")?;
+    std::fs::write(&path, report(active, ending, ended).to_string())?;
+    Ok(Some(path))
+}
+
+/// The file's contents.
+///
+/// Split from [`write`] so that the shape is a thing the tests can assert without a state root to
+/// write into.
+fn report(active: &Active, ending: Ending, ended: SystemTime) -> Value {
+    let id = &active.identity;
+    // `try_snapshot`, not a blocking read: on the panic path this runs on the thread that
+    // panicked, which may be the thread holding the counter lock, and a blocking read there would
+    // hang the process instead of reporting the crash. An empty table is a worse answer than the
+    // real one and a far better one than no file at all, so `locked` says which was written.
+    let table = active.collector.try_snapshot();
+    let health = active.collector.health();
+
+    let tools: serde_json::Map<String, Value> = table
+        .iter()
+        .flat_map(|t| t.iter())
+        .map(|(name, c)| {
+            (
+                name.to_string(),
+                json!({
+                    "calls": c.calls(),
+                    "ok": c.ok,
+                    "err_flagged": c.err_flagged,
+                    "err_params": c.err_params,
+                    "err_internal": c.err_internal,
+                    "deferred": c.deferred,
+                    "ns_total": c.ns_total,
+                    "ns_max": c.ns_max,
+                    "content_bytes": c.content_bytes,
+                }),
+            )
+        })
+        .collect();
+
+    json!({
+        "schema": SCHEMA,
+        "run": {
+            "pid": id.pid,
+            "instance": id.instance,
+            "transport": id.transport,
+            "version": id.version,
+            "cwd": id.cwd.as_ref().map(|p| p.to_string_lossy().into_owned()),
+            "client": active.client.get().map(|(name, version)| json!({
+                "name": name,
+                "version": version,
+            })),
+            "started": rfc3339(id.started),
+            "ended": rfc3339(ended),
+            "ending": ending.as_str(),
+        },
+        "totals": {
+            "calls": health.calls,
+            "unknown_shape": health.unknown_shape,
+            "tools": tools.len(),
+            "locked": table.is_none(),
+        },
+        "tools": tools,
+    })
+}
+
+/// An instant as RFC 3339, the spelling `panic.log` already uses for the same job.
+fn rfc3339(when: SystemTime) -> String {
+    humantime::format_rfc3339(when).to_string()
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use outcome::Outcome;
     use serial_test::serial;
 
-    /// Set a key for the duration of `body`, then restore it. The readers go through the real
+    /// Set a key for the duration of `body`, then restore it. The reader goes through the real
     /// process environment, so these tests must be serialised against each other.
     fn with_env(key: &str, value: Option<&str>, body: impl FnOnce()) {
         let previous = std::env::var(key).ok();
@@ -111,32 +251,6 @@ mod tests {
         }
     }
 
-    /// Zero is honoured rather than clamped: it is the documented way to keep counting without
-    /// spending log lines on it, and a reader that quietly turned it into "every call" or "every
-    /// 200 calls" would make the key a lie.
-    #[test]
-    #[serial]
-    fn zero_disables_the_dump_without_disabling_the_counters() {
-        with_env("FS_MCP_STATS_EVERY", Some("0"), || {
-            assert_eq!(dump_every(), 0);
-            assert!(enabled(), "counting is a separate switch");
-        });
-    }
-
-    #[test]
-    #[serial]
-    fn absurd_and_malformed_dump_intervals_fall_back_rather_than_overflow() {
-        with_env("FS_MCP_STATS_EVERY", Some("18446744073709551615"), || {
-            assert_eq!(dump_every(), DUMP_EVERY_MAX)
-        });
-        with_env("FS_MCP_STATS_EVERY", Some("often"), || {
-            assert_eq!(dump_every(), DUMP_EVERY_DEFAULT)
-        });
-        with_env("FS_MCP_STATS_EVERY", None, || {
-            assert_eq!(dump_every(), DUMP_EVERY_DEFAULT)
-        });
-    }
-
     #[test]
     #[serial]
     fn the_switch_reads_both_spellings_and_survives_a_typo() {
@@ -147,5 +261,124 @@ mod tests {
         with_env("FS_MCP_STATS", Some("maybe"), || {
             assert_eq!(enabled(), ENABLED_DEFAULT, "a typo must not switch it off")
         });
+    }
+
+    /// An `Active` of our own, so that no test depends on - or installs - the process-global one.
+    fn active(tools: &[&str]) -> Active {
+        Active {
+            collector: Arc::new(Collector::new(tools)),
+            identity: Identity {
+                pid: 4321,
+                instance: "0123456789abcdef".to_owned(),
+                transport: "stdio",
+                version: "9.9.9",
+                cwd: Some(PathBuf::from("/work")),
+                started: SystemTime::UNIX_EPOCH,
+            },
+            client: OnceLock::new(),
+        }
+    }
+
+    /// A tool nobody called is a row of zeros, not a missing row.
+    ///
+    /// This is the property the whole feature is for: the file has to answer "what does nobody
+    /// use", and a table that only grew rows on first use could never answer it.
+    #[test]
+    fn every_tool_appears_even_when_it_was_never_called() {
+        let a = active(&["read_text_file", "grep_files", "write_file"]);
+        a.collector
+            .record_interned(a.collector.intern("grep_files"), Outcome::Ok, 7, 3);
+
+        let v = report(&a, Ending::Exit, SystemTime::UNIX_EPOCH);
+        let tools = v["tools"].as_object().expect("tools");
+        assert_eq!(
+            tools.len(),
+            3,
+            "all three, not just the one that was called"
+        );
+        assert_eq!(tools["write_file"]["calls"], 0);
+        assert_eq!(tools["write_file"]["ns_total"], 0);
+        assert_eq!(tools["grep_files"]["calls"], 1);
+        assert_eq!(tools["grep_files"]["ok"], 1);
+        assert_eq!(tools["grep_files"]["ns_total"], 7);
+        assert_eq!(tools["grep_files"]["ns_max"], 7);
+        assert_eq!(tools["grep_files"]["content_bytes"], 3);
+        assert_eq!(v["totals"]["tools"], 3);
+        assert_eq!(v["totals"]["calls"], 1);
+        assert_eq!(v["totals"]["locked"], false);
+    }
+
+    /// The identity reaches the file, and an unknown client is absent rather than invented.
+    #[test]
+    fn the_run_names_itself_and_says_how_it_ended() {
+        let a = active(&["read_text_file"]);
+        let v = report(&a, Ending::Panic, SystemTime::UNIX_EPOCH);
+
+        assert_eq!(v["schema"], SCHEMA);
+        assert_eq!(v["run"]["pid"], 4321);
+        assert_eq!(v["run"]["instance"], "0123456789abcdef");
+        assert_eq!(v["run"]["transport"], "stdio");
+        assert_eq!(v["run"]["version"], "9.9.9");
+        assert_eq!(v["run"]["cwd"], "/work");
+        assert_eq!(v["run"]["ending"], "panic");
+        assert_eq!(v["run"]["started"], "1970-01-01T00:00:00Z");
+        assert!(
+            v["run"]["client"].is_null(),
+            "a client nobody announced must not be guessed at"
+        );
+
+        a.client
+            .set(("claude-code".to_owned(), "2.1.0".to_owned()))
+            .expect("first client");
+        let v = report(&a, Ending::Exit, SystemTime::UNIX_EPOCH);
+        assert_eq!(v["run"]["client"]["name"], "claude-code");
+        assert_eq!(v["run"]["client"]["version"], "2.1.0");
+        assert_eq!(v["run"]["ending"], "exit");
+    }
+
+    /// A table that cannot be read - the panic-on-the-locking-thread case - still produces a
+    /// file, and that file says the counters are missing rather than reporting zeros as fact.
+    #[test]
+    fn a_locked_table_is_reported_as_locked_rather_than_as_empty() {
+        let a = active(&["read_text_file"]);
+        let held = a.collector.hold_for_test();
+
+        let v = report(&a, Ending::Panic, SystemTime::UNIX_EPOCH);
+        assert_eq!(v["totals"]["locked"], true);
+        assert_eq!(v["tools"].as_object().expect("tools").len(), 0);
+        assert_eq!(v["run"]["pid"], 4321, "the identity is still written");
+
+        drop(held);
+        assert_eq!(
+            report(&a, Ending::Panic, SystemTime::UNIX_EPOCH)["totals"]["locked"],
+            false
+        );
+    }
+
+    /// The file lands under a dated directory named for this run, and is valid JSON on disk.
+    #[test]
+    #[serial]
+    fn the_file_is_written_under_the_state_root_and_parses_back() {
+        let dir = tempfile::TempDir::new().expect("tempdir");
+        with_env(
+            "FS_MCP_STATE_DIR",
+            Some(&dir.path().to_string_lossy()),
+            || {
+                let a = active(&["grep_files"]);
+                let path = paths::run_file(SubDir::Stats, "json").expect("path");
+                std::fs::write(
+                    &path,
+                    report(&a, Ending::Exit, SystemTime::UNIX_EPOCH).to_string(),
+                )
+                .expect("write");
+
+                assert!(path.starts_with(dir.path()), "{}", path.display());
+                assert_eq!(path.extension().and_then(|e| e.to_str()), Some("json"));
+                let back: Value =
+                    serde_json::from_str(&std::fs::read_to_string(&path).expect("read"))
+                        .expect("the file must parse as JSON");
+                assert_eq!(back["tools"]["grep_files"]["calls"], 0);
+            },
+        );
     }
 }

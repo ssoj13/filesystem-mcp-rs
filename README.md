@@ -83,6 +83,7 @@ keys below are listed first because the locations named further down resolve rel
 |----------|---------|-------------|
 | `FS_MCP_STATE_DIR` | *(unset)* | State directory for every file this server owns; must be absolute. Unset = `~/.filesystem-mcp-rs` |
 | `FS_MCP_LOG` | `info` | Level for this server's log under `<state>/logs`: `trace`\|`debug`\|`info`\|`warn`\|`error`, or `off`. Bare words are levels; a target filter needs `=` or `,` (`info,hyper=warn`) |
+| `FS_MCP_STATS` | `on` | Count tool calls, outcomes and latency per tool, and write them once at exit: `on` \| `off` |
 | `FS_MCP_TMP_KEEP_HOURS` | `24` | Delete scratch under `<state>/tmp` older than this many hours. `0` = never sweep |
 
 #### Logs
@@ -103,9 +104,28 @@ Under stdio the file is the *only* sink — anything on stderr during the MCP ha
 connection — so a log file that cannot be opened leaves that run silent rather than breaking the
 transport. Stream mode also writes to stderr, which nobody is parsing.
 
-**Nothing ever deletes a log file.** There is no retention for `<state>/logs`: clear the
-directory by hand when you want it clear. (`<state>/tmp` is a different matter — it is swept by
-age, see `FS_MCP_TMP_KEEP_HOURS`.)
+A panic writes its own crash report, `<state>/panics/<YYYY-MM-DD>/<machine>_<timestamp>.log` —
+named the same way, one file per panic, so you can tell which run produced which backtrace.
+
+#### Tool-call counters
+Each run counts its own tool calls — how many, how they ended, how long they took — and writes
+them once, on the way out, to `<state>/stats/<YYYY-MM-DD>/<machine>_<timestamp>.json`. Same naming
+as the logs, for the same reason: nothing is shared between processes, so nothing has to be
+arbitrated between them.
+
+Every tool the router knows starts at zero, so a tool nobody called is a row of zeros rather than
+a missing row — which is what makes the unused tail of the surface visible at all. The five
+outcome columns partition the calls: `ok`, `err_flagged` (the call answered with `is_error`),
+`err_params`, `err_internal`, `deferred`.
+
+Counters live in memory for the life of the process and are written exactly once: there is no
+database, no periodic flush and no aggregation. A run killed outright (`SIGKILL`) loses them; a
+panic still files them, beside the crash report. Reading a week of runs is reading that directory
+— this server's own `grep_files` and `read_json` do that better than a bespoke query tool would.
+
+**Nothing ever deletes a log file or a crash report.** There is no retention for `<state>/logs`
+or `<state>/panics`: clear those directories by hand when you want them clear. (`<state>/tmp` is
+a different matter — it is swept by age, see `FS_MCP_TMP_KEEP_HOURS`.)
 
 ### Core
 | Variable | Default | Description |

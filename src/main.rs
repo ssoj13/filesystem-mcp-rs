@@ -7365,6 +7365,14 @@ impl ServerHandler for FileSystemServer {
 async fn run_stdio_mode(server: FileSystemServer) -> Result<(), Box<dyn std::error::Error>> {
     let transport = stdio();
     let svc = server.serve(transport).await?;
+    // rmcp completes the handshake before handing back the service, so the peer is known here.
+    // Taken from this one place rather than from the `call_tool` seam, which stays untouched.
+    if let Some(info) = svc.peer_info() {
+        tools::stats::note_client(
+            info.client_info.name.clone(),
+            info.client_info.version.clone(),
+        );
+    }
     svc.waiting().await?;
     Ok(())
 }
@@ -7405,13 +7413,21 @@ async fn run_stream_mode(
     Ok(())
 }
 
-/// Install panic hook that writes to file (stderr breaks stdio MCP transport)
+/// Install panic hook that writes one file per panic (stderr breaks stdio MCP transport).
+///
+/// `<state>/panics/<YYYY-MM-DD>/<machine>_<timestamp>.log`, through the same
+/// [`core::paths::run_file`] that names the log, so the two directories read alike. One file per
+/// panic rather than one appended `panic.log` for the whole machine: dozens of these servers run
+/// at once, and a shared file cannot say which run produced which backtrace.
+///
+/// **Every step here gives up quietly instead of failing.** This runs in a process that is
+/// already going down, a panic inside a panic hook aborts with no diagnostic at all, and a crash
+/// report is best-effort by definition. `run_file` resolves the path with plain filesystem calls
+/// and no cached state, and no arm of it can panic, so nothing already poisoned is in the way.
+/// Nothing ever deletes what lands here, as with the logs; the operator clears it by hand.
 fn install_panic_hook() {
     std::panic::set_hook(Box::new(|panic_info| {
-        // A panic hook that panics aborts the process with no diagnostic at all, so an
-        // unresolvable state root means the hook gives up quietly rather than reporting.
-        // `db_path` has already created the root, so nothing else needs creating here.
-        let Ok(panic_log) = core::paths::db_path("panic.log") else {
+        let Ok(panic_log) = core::paths::run_file(core::paths::SubDir::Panics, "log") else {
             return;
         };
 
@@ -7435,11 +7451,12 @@ fn install_panic_hook() {
         let backtrace = std::backtrace::Backtrace::force_capture();
 
         let log_entry = format!(
-            "\n=== PANIC at {} ===\nLocation: {}\nMessage: {}\nBacktrace:\n{}\n",
+            "=== PANIC at {} ===\nLocation: {}\nMessage: {}\nBacktrace:\n{}\n",
             timestamp, location, message, backtrace
         );
 
-        // Append to panic log file
+        // Append rather than create-new: two threads panicking inside the same millisecond would
+        // otherwise lose the second report, and two reports in one file beats none.
         if let Ok(mut file) = std::fs::OpenOptions::new()
             .create(true)
             .append(true)
@@ -7447,6 +7464,13 @@ fn install_panic_hook() {
         {
             use std::io::Write;
             let _ = file.write_all(log_entry.as_bytes());
+        }
+
+        // The crash report says where it broke; this says what the server had been doing up to
+        // that point. `write` reads the table with `try_lock`, so it cannot deadlock even when
+        // this is the very thread that was holding the counter lock when it panicked.
+        if tools::stats::write(tools::stats::Ending::Panic, std::time::SystemTime::now()).is_err() {
+            // Nowhere left to report that the counters could not be filed.
         }
     }));
 }
@@ -7648,18 +7672,36 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
         Err(e) => warn!("Housekeeping skipped: {e}"),
     }
 
-    // One last dump when the transport returns, so that a short-lived process - which is most of
-    // them - still leaves its counters behind even though it never reached the Nth call. Held as
-    // a clone because the transport consumes the server. This is every shutdown path there is
-    // from inside the process; a `SIGKILL` takes the counters with it, and no amount of
-    // machinery here would change that.
-    let stats_at_exit = server.stats.clone();
+    // Adopt the counters process-wide so that the exit path below and the panic hook can both
+    // write the one file this run leaves behind. Before the transport, so no call is counted into
+    // a table nothing will write. The clone is needed either way: the transport consumes the
+    // server.
+    if let Some(collector) = server.stats.clone() {
+        tools::stats::install(
+            collector,
+            tools::stats::Identity {
+                pid: core::instance::pid(),
+                instance: core::instance::id().to_string(),
+                transport: match mode {
+                    TransportMode::Stdio => "stdio",
+                    TransportMode::Stream => "stream",
+                },
+                version: env!("CARGO_PKG_VERSION"),
+                cwd: std::env::current_dir().ok(),
+                started: std::time::SystemTime::now(),
+            },
+        );
+    }
     let served = match mode {
         TransportMode::Stdio => run_stdio_mode(server).await,
         TransportMode::Stream => run_stream_mode(server, &args.bind, args.port).await,
     };
-    if let Some(collector) = stats_at_exit {
-        collector.dump();
+    // This is every shutdown path there is from inside the process; a `SIGKILL` takes the
+    // counters with it, and no machinery here would change that.
+    match tools::stats::write(tools::stats::Ending::Exit, std::time::SystemTime::now()) {
+        Ok(Some(path)) => info!("tool-call counters written to {}", path.display()),
+        Ok(None) => {}
+        Err(e) => warn!("Statistics: the counters could not be written: {e}"),
     }
     served
 }

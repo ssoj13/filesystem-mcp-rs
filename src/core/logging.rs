@@ -140,11 +140,11 @@ pub fn init_logging(mode: TransportMode, log_file: Option<String>) -> Logging {
     Logging { plan, degraded }
 }
 
-/// The marker file, directly in the state root beside `panic.log`.
+/// The marker file, directly in the state root.
 ///
 /// The state root and not `<state>/logs`: this marker exists precisely when `logs/` may be what
-/// is broken, so it must not be placed inside it. `panic.log` already sets the precedent for an
-/// out-of-band record left by a process that could not report through its usual channel.
+/// is broken, so it must not be placed inside it. It is the out-of-band record left by a process
+/// that could not report through its usual channel; `<state>/panics/` is the other one.
 ///
 /// One fixed name, overwritten by whichever process degraded last. The question it answers is
 /// "why is this machine's server logging nothing", which is not per process, and a per-process
@@ -194,8 +194,8 @@ fn degraded_line(reason: &str) -> String {
 /// file already sitting at that name, a permission set on that one directory. `paths`'
 /// `a_usable_root_can_still_have_an_unusable_subdir` pins that this can happen at all.
 pub fn target_for(mode: TransportMode, log_file: Option<String>, level: Option<&str>) -> Plan {
-    let root = crate::core::paths::sub_dir(crate::core::paths::SubDir::Logs);
-    target_for_in(root.as_deref().ok(), mode, log_file, level)
+    let default = crate::core::paths::run_file(crate::core::paths::SubDir::Logs, "log").ok();
+    target_for_in(default, mode, log_file, level)
 }
 
 /// Decide the plan. `root` is `<state>/logs`, or `None` when that directory cannot be made (see
@@ -205,7 +205,7 @@ pub fn target_for(mode: TransportMode, log_file: Option<String>, level: Option<&
 /// decision can be tested against a `TempDir` instead of creating directories under the real
 /// state root on every `cargo test`.
 fn target_for_in(
-    root: Option<&Path>,
+    default_file: Option<PathBuf>,
     mode: TransportMode,
     log_file: Option<String>,
     level: Option<&str>,
@@ -217,12 +217,12 @@ fn target_for_in(
     // per-process file is only the default location, not a rule about where logs may go.
     let file = match log_file {
         Some(p) => PathBuf::from(p),
-        None => match root.map(|r| log_path_in(r, &today())) {
-            Some(Ok(p)) => p,
+        None => match default_file {
+            Some(p) => p,
             // `<state>/logs` cannot be made, or the dated directory under it cannot be.
             // stdio still must not touch stderr, so it runs without logs rather than breaking
             // the handshake; stream can still say so.
-            Some(Err(_)) | None => {
+            None => {
                 return match mode {
                     TransportMode::Stdio => Plan::Disabled,
                     TransportMode::Stream => Plan::Stderr,
@@ -329,23 +329,6 @@ static DEGRADED: OnceLock<String> = OnceLock::new();
 /// `logging_keys_are_registered_and_agree_with_the_code` asserts the two agree.
 pub const LEVEL_DEFAULT: &str = "info";
 
-/// The value [`keep_days`] reports when `FS_MCP_LOG_KEEP_DAYS` is unset.
-///
-/// Vestigial, like its reader: nothing deletes a log file any more. It stays only because the
-/// key is still registered in [`crate::env_spec`], which asserts that the advertised default is
-/// the one the code applies.
-pub const KEEP_DAYS_DEFAULT: u64 = 14;
-
-/// The largest `FS_MCP_LOG_KEEP_DAYS` accepted, ten years. Vestigial, see [`KEEP_DAYS_DEFAULT`].
-pub const KEEP_DAYS_MAX: u64 = 365 * 10;
-
-/// The value [`max_mb`] reports when `FS_MCP_LOG_MAX_MB` is unset. Vestigial, see
-/// [`KEEP_DAYS_DEFAULT`].
-pub const MAX_MB_DEFAULT: u64 = 512;
-
-/// The largest `FS_MCP_LOG_MAX_MB` accepted, one TiB. Vestigial, see [`KEEP_DAYS_DEFAULT`].
-pub const MAX_MB_MAX: u64 = 1024 * 1024;
-
 /// The configured `FS_MCP_LOG` value, or `None` when it is unset or blank.
 ///
 /// The one reader of the key, so no second caller can disagree about what blank means. It
@@ -354,50 +337,6 @@ pub const MAX_MB_MAX: u64 = 1024 * 1024;
 /// eagerly would quietly take that step away.
 pub fn level() -> Option<String> {
     env_spec::get("FS_MCP_LOG")
-}
-
-/// How many days of dated log directories to keep; `0` means never sweep by age.
-///
-/// **Nothing acts on this any more.** Log retention was removed — the server never deletes a log
-/// file — and this reader is kept only so that `FS_MCP_LOG_KEEP_DAYS`, still registered in
-/// [`crate::env_spec`], has the reader the registry's own test requires. It goes when the
-/// registry entry does; the `allow` is what keeps that pairing visible instead of silent.
-#[allow(dead_code)]
-pub fn keep_days() -> u64 {
-    retention("FS_MCP_LOG_KEEP_DAYS", KEEP_DAYS_DEFAULT, KEEP_DAYS_MAX)
-}
-
-/// The total MiB budget for `<state>/logs`; `0` means no budget.
-///
-/// **Nothing acts on this any more**, for the same reason as [`keep_days`], and it is kept on
-/// the same terms.
-#[allow(dead_code)]
-pub fn max_mb() -> u64 {
-    retention("FS_MCP_LOG_MAX_MB", MAX_MB_DEFAULT, MAX_MB_MAX)
-}
-
-/// Read a retention knob: a whole number, `0` meaning "off", bounded by `max`.
-///
-/// One function for both knobs so the two cannot drift in how they treat a typo or an absurd
-/// value, and so the whole path is testable against an injected key rather than by mutating a
-/// production variable the rest of the suite reads.
-///
-/// Neither failure stops the server: refusing to start over a mistyped retention interval would
-/// be a worse outcome than applying the standard one, and the complaint reaches the log file,
-/// which by this point exists.
-fn retention(key: &str, default: u64, max: u64) -> u64 {
-    let value = match env_spec::get(key) {
-        None => return default,
-        Some(raw) => raw.parse().unwrap_or_else(|_| {
-            tracing::warn!("{key} is not a whole number ({raw}); using {default}");
-            default
-        }),
-    };
-    if value > max {
-        tracing::warn!("{key}={value} exceeds the maximum of {max}; using that instead");
-        return max;
-    }
-    value
 }
 
 /// What is wrong with an `FS_MCP_LOG` value, if anything, phrased for the operator who set it.
@@ -462,87 +401,14 @@ fn open(path: &Path) -> std::io::Result<std::fs::File> {
         .open(path)
 }
 
-/// `<root>/<YYYY-MM-DD>/<machine>_<timestamp>.log`, directory created.
-///
-/// The name says which host wrote it and when that run started, which is what an operator
-/// sorting a shared state directory actually wants. The stamp carries milliseconds because two
-/// servers launched together by one client start inside the same second routinely, and the name
-/// is the only thing keeping their files apart.
-///
-/// The dated directory is made here rather than at open time so that a root which cannot hold it
-/// is discovered while the plan is still being decided, instead of after the plan has promised a
-/// file it cannot place.
-fn log_path_in(root: &Path, day: &str) -> std::io::Result<PathBuf> {
-    let dir = root.join(day);
-    std::fs::create_dir_all(&dir)?;
-    Ok(dir.join(format!(
-        "{}_{}.log",
-        machine(),
-        stamp(std::time::SystemTime::now())
-    )))
-}
-
-/// This host's name, reduced to characters every filesystem accepts.
-///
-/// `unknown` rather than an error when the name cannot be read, or survives sanitising as
-/// nothing: a log file that cannot be named is a log that does not exist, and logging must never
-/// be the reason the server fails to start. `_` is folded away with everything else, so the
-/// separator in the file name stays unambiguous.
-fn machine() -> String {
-    let safe: String = sysinfo::System::host_name()
-        .unwrap_or_default()
-        .chars()
-        .map(|c| {
-            if c.is_ascii_alphanumeric() || c == '-' || c == '.' {
-                c
-            } else {
-                '-'
-            }
-        })
-        .collect();
-    if safe.is_empty() {
-        "unknown".to_owned()
-    } else {
-        safe
-    }
-}
-
-/// `when` in UTC as `YYYYMMDD-HHMMSS-mmm`.
-///
-/// UTC and hand-formatted for the same reasons as [`utc_day`], and fixed-width in every field so
-/// that a plain lexical sort of a directory listing is a sort by time.
-fn stamp(when: std::time::SystemTime) -> String {
-    let t = time::OffsetDateTime::from(when);
-    let d = t.date();
-    format!(
-        "{:04}{:02}{:02}-{:02}{:02}{:02}-{:03}",
-        d.year(),
-        u8::from(d.month()),
-        d.day(),
-        t.hour(),
-        t.minute(),
-        t.second(),
-        t.millisecond()
-    )
-}
-
 /// Today in UTC as `YYYY-MM-DD`: the directory this process's log file belongs in.
+///
+/// The one caller left is [`degraded_line`], which names the day the missing log would have been
+/// filed under. The log file's own name comes from [`crate::core::paths::run_file`], which owns
+/// the host name, the timestamp and the dated directory for the log, the crash report and the
+/// counters alike.
 fn today() -> String {
-    utc_day(std::time::SystemTime::now())
-}
-
-/// `when` in UTC as `YYYY-MM-DD`, the name of the directory a log written then belongs in.
-///
-/// UTC, matching wave 1's rule that stored time is UTC: a directory named in local time would
-/// jump around under a machine that travels or changes offset twice a year. Formatted by hand
-/// rather than through `time`'s format descriptions, which would need a feature this crate does
-/// not enable for three integers.
-///
-/// Takes the instant rather than reading the clock so that the format is testable against a
-/// fixed time.
-fn utc_day(when: std::time::SystemTime) -> String {
-    let d = time::OffsetDateTime::from(when).date();
-    format!("{:04}-{:02}-{:02}", d.year(), u8::from(d.month()), d.day())
+    crate::core::paths::utc_day(std::time::SystemTime::now())
 }
 
 #[cfg(test)]
@@ -555,48 +421,16 @@ mod tests {
         tempfile::TempDir::new().expect("tempdir")
     }
 
-    /// The name is `<machine>_<timestamp>.log` under a dated directory.
-    #[test]
-    fn file_name_carries_the_machine_and_the_time_and_is_dated() {
-        let dir = scratch();
-        let p = log_path_in(dir.path(), "2026-09-17").expect("path");
-        let parent = p.parent().expect("parent");
-        assert_eq!(parent.file_name().expect("name"), "2026-09-17");
-        let name = p.file_name().expect("name").to_string_lossy().into_owned();
-        let rest = name
-            .strip_prefix(&format!("{}_", machine()))
-            .unwrap_or_else(|| panic!("{name} must be named for this machine"));
-        assert_eq!(
-            rest.len(),
-            "20260917-000000-000.log".len(),
-            "{name} must carry a fixed-width stamp"
-        );
-        assert!(name.ends_with(".log"), "{name}");
-    }
-
-    /// The host name is usable as a file name component, whatever the machine is called.
-    #[test]
-    fn the_machine_name_is_never_empty_and_never_carries_the_separator() {
-        let m = machine();
-        assert!(!m.is_empty());
-        assert!(!m.contains('_'), "{m}");
-        assert!(
-            m.chars()
-                .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '.'),
-            "{m}"
-        );
-    }
-
-    /// The stamp is UTC, fixed-width, and resolves to the millisecond — the resolution that
-    /// keeps two servers started in the same second apart.
-    #[test]
-    fn the_stamp_resolves_to_the_millisecond() {
-        let when = std::time::UNIX_EPOCH + std::time::Duration::from_millis(1_789_000_000_123);
-        assert_eq!(stamp(when), "20260910-002640-123");
-        assert_ne!(
-            stamp(when),
-            stamp(when + std::time::Duration::from_millis(1))
-        );
+    /// The per-process file `target_for` would have resolved, stood up inside `dir`.
+    ///
+    /// The naming itself belongs to [`crate::core::paths::run_file`] and is tested there; what
+    /// these tests are about is which sinks a plan gets, so they only need *a* default file.
+    fn default_in(dir: &tempfile::TempDir) -> Option<PathBuf> {
+        Some(
+            dir.path()
+                .join("2026-09-17")
+                .join("host_20260917-000000-000.log"),
+        )
     }
 
     /// `FS_MCP_LOG=off` means no subscriber and no file — the only way to opt out.
@@ -604,13 +438,13 @@ mod tests {
     fn off_disables_everything() {
         let dir = scratch();
         for mode in [TransportMode::Stdio, TransportMode::Stream] {
-            let plan = target_for_in(Some(dir.path()), mode, None, Some("off"));
+            let plan = target_for_in(default_in(&dir), mode, None, Some("off"));
             assert!(matches!(plan, Plan::Disabled), "{plan:?}");
             assert_eq!(sinks(&plan), (None, false));
         }
         // Not even an explicit `--log` reopens the door.
         let plan = target_for_in(
-            Some(dir.path()),
+            default_in(&dir),
             TransportMode::Stream,
             Some("x.log".into()),
             Some("OFF"),
@@ -628,14 +462,14 @@ mod tests {
     fn stdio_never_writes_to_stderr() {
         let dir = scratch();
         let stdio = [
-            target_for_in(Some(dir.path()), TransportMode::Stdio, None, None),
+            target_for_in(default_in(&dir), TransportMode::Stdio, None, None),
             target_for_in(
-                Some(dir.path()),
+                default_in(&dir),
                 TransportMode::Stdio,
                 Some("x.log".into()),
                 None,
             ),
-            target_for_in(Some(dir.path()), TransportMode::Stdio, None, Some("off")),
+            target_for_in(default_in(&dir), TransportMode::Stdio, None, Some("off")),
             // The degraded branch: no usable state directory at all.
             target_for_in(None, TransportMode::Stdio, None, None),
         ];
@@ -646,7 +480,7 @@ mod tests {
         assert!(matches!(stdio[1], Plan::File(_)), "{:?}", stdio[1]);
 
         // Stream is the only mode that may, and does.
-        let stream = target_for_in(Some(dir.path()), TransportMode::Stream, None, None);
+        let stream = target_for_in(default_in(&dir), TransportMode::Stream, None, None);
         assert!(matches!(stream, Plan::FileAndStderr(_)), "{stream:?}");
         assert!(sinks(&stream).1);
     }
@@ -683,7 +517,7 @@ mod tests {
         let dir = scratch();
         let named = dir.path().join("explicit.log");
         match target_for_in(
-            Some(dir.path()),
+            default_in(&dir),
             TransportMode::Stdio,
             Some(named.to_string_lossy().into_owned()),
             None,
@@ -821,70 +655,6 @@ mod tests {
     #[test]
     fn level_is_exactly_the_registered_key() {
         assert_eq!(level(), env_spec::get("FS_MCP_LOG"));
-    }
-
-    /// A retention knob parses, keeps `0` — which means "off", not "delete everything now" —
-    /// clamps an absurd value, and survives a typo by applying the default instead of refusing
-    /// to start.
-    ///
-    /// Driven through a probe key, never a real `FS_MCP_LOG_*` one. `set_var` is unsafe in
-    /// edition 2024 because a concurrent `std::env::var` is undefined behaviour, and cargo runs
-    /// these tests on parallel threads while other tests call [`env_spec::get`] — so mutating a
-    /// production key here would be UB by the language's own definition, and would clobber a
-    /// value the developer running the suite had exported. Both public readers are one-line
-    /// applications of this function, so what is proven here is what they do.
-    #[test]
-    fn a_retention_knob_parses_clamps_or_falls_back() {
-        let key = "FS_MCP_LOGGING_RETENTION_PROBE";
-        assert_eq!(retention(key, 7, 100), 7, "unset means the default");
-        for (raw, want) in [
-            ("3", 3),
-            ("0", 0),
-            ("  5  ", 5),
-            // The bound itself is accepted, one over it is clamped. `>` and `>=` in the clamp
-            // are indistinguishable by the returned value at this boundary - clamping 100 to a
-            // maximum of 100 is 100 either way - so what these two rows pin is the policy, and
-            // the only thing the comparison still decides is whether a warning is logged.
-            ("100", 100),
-            ("101", 100),
-            (&u64::MAX.to_string(), 100),
-            ("", 7),
-            ("soon", 7),
-            ("-1", 7),
-        ] {
-            // SAFETY: a variable private to this test, which nothing else reads.
-            unsafe { std::env::set_var(key, raw) };
-            assert_eq!(retention(key, 7, 100), want, "{raw:?}");
-        }
-        unsafe { std::env::remove_var(key) };
-    }
-
-    /// Each public reader applies its own default and its own bound — the pairing a copy-paste
-    /// between the two would break, and which the probe test above cannot see.
-    #[test]
-    fn each_reader_carries_its_own_default_and_bound() {
-        // Reads, never writes: a set_var on a production key would be UB here (see above).
-        // These two therefore assume the key is unset in this process - exporting
-        // FS_MCP_LOG_KEEP_DAYS or FS_MCP_LOG_MAX_MB before `cargo test` is expected to fail them.
-        assert_eq!(keep_days(), KEEP_DAYS_DEFAULT);
-        assert_eq!(max_mb(), MAX_MB_DEFAULT);
-        assert_ne!(
-            KEEP_DAYS_MAX, MAX_MB_MAX,
-            "the two bounds must stay distinguishable for the assertion above to mean anything"
-        );
-        // A budget in MiB is compared against a byte count, so the sweep multiplies: the bound
-        // must leave that conversion far from overflowing even before it saturates.
-        assert!(MAX_MB_MAX.checked_mul(1024 * 1024).is_some());
-        assert!(KEEP_DAYS_MAX.checked_mul(24 * 3600).is_some());
-        // Each bound is written as arithmetic and its rustdoc states what that arithmetic is
-        // meant to come to; pin the two together, so a slip in either is a failure rather than
-        // a silently different policy that still reads as "ten years" and "one TiB".
-        assert_eq!(KEEP_DAYS_MAX, 10 * 365, "ten years, as documented");
-        assert_eq!(
-            MAX_MB_MAX * 1024 * 1024,
-            1u64 << 40,
-            "one TiB, as documented"
-        );
     }
 
     /// The level [`crate::env_spec`] advertises must be one this module would actually apply.

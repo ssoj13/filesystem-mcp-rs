@@ -23,8 +23,8 @@ types.** Everything else is noise that makes the signal harder to find.
 
 Keep, always — these are the facts that cause wrong calls when missing:
 
-- **Units and their boundaries.** `FS_MCP_LOG_KEEP_DAYS` is days; `max_mb` is MiB while the sum it
-  is compared against is bytes.
+- **Units and their boundaries.** `FS_MCP_TMP_KEEP_HOURS` is hours; `maxSize` is bytes while the
+  budget the caller is thinking in is usually MiB.
 - **Conventions that invert the obvious reading.** `0 = never sweep` (not "sweep everything now"),
   blank = unset (not the empty string), a relative `FS_MCP_STATE_DIR` is rejected.
 - **Precedence** when more than one input can set the same thing: flag > env > default.

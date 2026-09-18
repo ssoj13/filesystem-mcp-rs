@@ -115,8 +115,8 @@ other policy this once listed, no longer exists: nothing deletes a log file.)
 ~/.filesystem-mcp-rs/
   stats.db        tool-call statistics (wave 3)
   memory2.db      memory store (migrated)
-  panic.log
   logs/           per-process log files (wave 2)
+  panics/         one crash report per panic, named like the logs (wave 2)
   ocrs/           OCR models
   layouts/        window layouts
   safety/         ctl safety state

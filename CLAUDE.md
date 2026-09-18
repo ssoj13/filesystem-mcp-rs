@@ -44,9 +44,13 @@ crate is behind `#[cfg(windows)]` and a Linux-only pass never sees the driver.
   driver/mod.rs = OS seam (imp backend selection, portable types, Caps), safety/input/win/capture/
   steps/wait/uia/ocr/ocrs_local/find/clip/notify + server_*.rs (per-domain #[tool_router] impls).
 - v0.2.1: BUG.md resolved (tolerant ContentRef, line/column errors, 64 KiB inline/chunk limits).
-- State lives under ONE root, `~/.filesystem-mcp-rs/`, same on every OS: `memory2.db`, `panic.log`,
-  `stats.db` (wave 3), plus `tmp/` (captures, run_command stream logs, temp scripts - swept by age,
-  `FS_MCP_TMP_KEEP_HOURS`, default 24), `ocrs/`, `layouts/`, `safety/`, `logs/` (wave 2).
+- State lives under ONE root, `~/.filesystem-mcp-rs/`, same on every OS: `memory2.db`, plus
+  `tmp/` (captures, run_command stream logs, temp scripts - swept by age,
+  `FS_MCP_TMP_KEEP_HOURS`, default 24), `ocrs/`, `layouts/`, `safety/`, and three that are written
+  once per run and never swept: `logs/`, `panics/` (one crash report per panic) and `stats/` (the
+  tool-call counters as JSON, wave 3). All three are named
+  `<YYYY-MM-DD>/<machine>_<timestamp>.<ext>` by the one helper `core::paths::run_file(kind, ext)`
+  - the only place the host name, the timestamp format and the dated directory exist.
   `FS_MCP_STATE_DIR` moves the root and must be absolute. The OS temp dir is no longer used.
 - `src/core/paths.rs` is the ONLY resolver. `paths_are_centralized` (src/core/paths_guard.rs) fails
   the build on `dirs::*` / `temp_dir(` / `env::home_dir` outside its ALLOWED list, and on any `///`

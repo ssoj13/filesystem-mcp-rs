@@ -62,45 +62,26 @@ fn paths_vars() -> Vec<EnvVar> {
 /// a constant in [`crate::core::logging`], which
 /// `logging_keys_are_registered_and_agree_with_the_code` asserts these strings match.
 fn log_vars() -> Vec<EnvVar> {
-    vec![
-        EnvVar {
-            key: "FS_MCP_LOG",
-            default: crate::core::logging::LEVEL_DEFAULT,
-            help: "Level for this server's log under <state>/logs: trace|debug|info|warn|error, or `off`. Bare words are levels; a target filter needs `=` or `,` (info,hyper=warn).",
-        },
-        EnvVar {
-            key: "FS_MCP_LOG_KEEP_DAYS",
-            default: "14",
-            help: "Delete dated log directories under <state>/logs older than this many days. 0 = never sweep by date; FS_MCP_LOG_MAX_MB still applies.",
-        },
-        EnvVar {
-            key: "FS_MCP_LOG_MAX_MB",
-            default: "512",
-            help: "Total size budget (MiB) for <state>/logs; oldest files are deleted first once it is exceeded. 0 = no budget.",
-        },
-    ]
+    vec![EnvVar {
+        key: "FS_MCP_LOG",
+        default: crate::core::logging::LEVEL_DEFAULT,
+        help: "Level for this server's log under <state>/logs: trace|debug|info|warn|error, or `off`. Bare words are levels; a target filter needs `=` or `,` (info,hyper=warn).",
+    }]
 }
 
-/// What this server records about its own tool calls, and how often it says so.
+/// What this server records about its own tool calls.
 ///
-/// Immediately after [`log_vars`] because both describe what the server writes about itself: the
-/// counters are never persisted, so the only place they are ever seen is the log those keys
-/// govern. The default is owned by a constant in [`crate::tools::stats`], which
+/// Immediately after [`log_vars`] because both describe what the server writes about itself: one
+/// file per run, the log under `<state>/logs` and the counters under `<state>/stats`. The default
+/// is owned by a constant in [`crate::tools::stats`], which
 /// `stats_keys_are_registered_and_agree_with_the_code` asserts these strings match.
 #[cfg(feature = "stats-tools")]
 fn stats_vars() -> Vec<EnvVar> {
-    vec![
-        EnvVar {
-            key: "FS_MCP_STATS",
-            default: "on",
-            help: "Count tool calls, outcomes and latency per tool: on | off.",
-        },
-        EnvVar {
-            key: "FS_MCP_STATS_EVERY",
-            default: "200",
-            help: "Write the counters to this process's log every N tool calls, and once more at shutdown. 0 = never write them; counting continues.",
-        },
-    ]
+    vec![EnvVar {
+        key: "FS_MCP_STATS",
+        default: "on",
+        help: "Count tool calls, outcomes and latency per tool: on | off.",
+    }]
 }
 
 // `vec![]` cannot express these: an element carrying `#[cfg(...)]` is not valid inside the
@@ -329,15 +310,17 @@ mod tests {
     /// implied, documents the only opt-out and the `0 = never sweep` convention, and every
     /// advertised default is the one the code actually applies.
     ///
-    /// The same drift guard as the tmp key above, for the three knobs wave 2 adds: a table that
+    /// The same drift guard as the tmp key above, for the one knob wave 2 leaves: a table that
     /// promises `warn` while the code logs at `info` sends an operator hunting for a record that
     /// is there all along.
     #[test]
     fn logging_keys_are_registered_and_agree_with_the_code() {
         let all = vars();
-        for key in ["FS_MCP_LOG", "FS_MCP_LOG_KEEP_DAYS", "FS_MCP_LOG_MAX_MB"] {
-            assert_eq!(all.iter().filter(|v| v.key == key).count(), 1, "{key}");
-        }
+        assert_eq!(
+            all.iter().filter(|v| v.key == "FS_MCP_LOG").count(),
+            1,
+            "FS_MCP_LOG must be registered exactly once"
+        );
 
         let level = all
             .iter()
@@ -358,24 +341,6 @@ mod tests {
         // The trap an operator finds the hard way: a bare word is read as a LEVEL, so a
         // RUST_LOG-style target needs `=` or `,` to be taken as one.
         assert!(level.help.contains('='), "{}", level.help);
-
-        for (key, default) in [
-            (
-                "FS_MCP_LOG_KEEP_DAYS",
-                crate::core::logging::KEEP_DAYS_DEFAULT,
-            ),
-            ("FS_MCP_LOG_MAX_MB", crate::core::logging::MAX_MB_DEFAULT),
-        ] {
-            let v = all.iter().find(|v| v.key == key).expect(key);
-            assert_eq!(v.default, default.to_string(), "{key}");
-            // `contains("0 =")`, not `contains('0')`: the latter is satisfied by the `0` in a
-            // number anywhere in the sentence, which is not the convention being pinned.
-            assert!(
-                v.help.contains("0 ="),
-                "a retention knob must document that 0 disables it: {}",
-                v.help
-            );
-        }
     }
 
     /// The statistics key is registered once and its advertised default is the meaning the code
@@ -413,26 +378,6 @@ mod tests {
             switch.default == "on",
             stats::ENABLED_DEFAULT,
             "advertised default disagrees with tools::stats::enabled"
-        );
-
-        assert_eq!(
-            all.iter().filter(|v| v.key == "FS_MCP_STATS_EVERY").count(),
-            1,
-            "FS_MCP_STATS_EVERY must be registered exactly once"
-        );
-        let every = find("FS_MCP_STATS_EVERY");
-        assert_eq!(
-            every.default,
-            stats::DUMP_EVERY_DEFAULT.to_string(),
-            "advertised default disagrees with tools::stats::dump_every"
-        );
-        // `contains("0 =")`, not `contains('0')`: the latter is satisfied by the `0` in a number
-        // anywhere in the sentence, which is not the convention being pinned. Zero really is
-        // honoured here, unlike the log intervals, so it must be documented.
-        assert!(
-            every.help.contains("0 ="),
-            "a knob whose zero is meaningful must document it: {}",
-            every.help
         );
     }
 

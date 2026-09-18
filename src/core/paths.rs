@@ -37,6 +37,14 @@ pub enum SubDir {
     Layouts,
     /// Computer-control safety state.
     Safety,
+    /// Crash reports, one file per panic under a dated directory (see `install_panic_hook`).
+    Panics,
+    /// Tool-call counters, one file per run under a dated directory
+    /// (see [`crate::tools::stats`]).
+    ///
+    /// Apart from [`SubDir::Logs`] deliberately: the counters are a table written once, and
+    /// mixing them into the running narrative of a log would mean grepping one out of the other.
+    Stats,
     /// Scratch: captures, `run_command` output, temporary scripts. Swept by age.
     Tmp,
 }
@@ -49,6 +57,8 @@ impl SubDir {
             SubDir::Ocrs => "ocrs",
             SubDir::Layouts => "layouts",
             SubDir::Safety => "safety",
+            SubDir::Panics => "panics",
+            SubDir::Stats => "stats",
             SubDir::Tmp => "tmp",
         }
     }
@@ -59,7 +69,7 @@ pub fn state_dir() -> io::Result<PathBuf> {
     resolve_root(env_spec::get("FS_MCP_STATE_DIR").map(PathBuf::from))
 }
 
-/// Path of a file directly in the state root (`stats.db`, `memory2.db`, `panic.log`).
+/// Path of a file directly in the state root (`stats.db`, `memory2.db`).
 /// The root is created; the file is not.
 pub fn db_path(name: &str) -> io::Result<PathBuf> {
     Ok(state_dir()?.join(name))
@@ -68,6 +78,126 @@ pub fn db_path(name: &str) -> io::Result<PathBuf> {
 /// A subdirectory of the state root, created if missing.
 pub fn sub_dir(kind: SubDir) -> io::Result<PathBuf> {
     resolve_sub(env_spec::get("FS_MCP_STATE_DIR").map(PathBuf::from), kind)
+}
+
+/// Path for a file this run writes once: `<state>/<kind>/<YYYY-MM-DD>/<machine>_<stamp>.<ext>`.
+///
+/// The dated directory is created; the file is not. Three subsystems write such a file - the log
+/// ([`SubDir::Logs`]), a crash report ([`SubDir::Panics`]) and the tool-call counters
+/// ([`SubDir::Stats`]) - and they all come through here, so the host name, the timestamp format
+/// and the directory layout exist once. A change to any of them cannot reach two of the three and
+/// miss the third.
+///
+/// **Uniqueness comes from the timestamp, not from coordination.** The name carries milliseconds,
+/// so two servers starting in the same second on one host still differ, and servers on different
+/// hosts differ by the host name even when their clocks agree. Nothing consults a lock, a pid or
+/// another process's files. This is what replaced wave 2's retention layer: that layer existed
+/// only to decide whether another process's file was safe to delete, a question nobody now asks.
+pub fn run_file(kind: SubDir, ext: &str) -> io::Result<PathBuf> {
+    run_file_at(
+        env_spec::get("FS_MCP_STATE_DIR").map(PathBuf::from),
+        kind,
+        ext,
+        std::time::SystemTime::now(),
+    )
+}
+
+/// [`run_file`] against an explicit root and instant, so the naming can be tested against a
+/// `TempDir` and a fixed clock instead of the real state root and the real time of day.
+fn run_file_at(
+    root: Option<PathBuf>,
+    kind: SubDir,
+    ext: &str,
+    when: std::time::SystemTime,
+) -> io::Result<PathBuf> {
+    let dated = resolve_sub(root, kind)?.join(utc_day(when));
+    mkdir(&dated)?;
+    Ok(dated.join(format!("{}_{}.{ext}", machine(), stamp(when))))
+}
+
+/// This host's name, reduced to characters every filesystem accepts.
+///
+/// `unknown` rather than an error when the name cannot be read, or survives sanitising as
+/// nothing: a file that cannot be named is a file that does not exist, and neither logging nor a
+/// crash report may be the reason the server fails. `_` is folded away with everything else, so
+/// the separator in the file name stays unambiguous.
+fn machine() -> String {
+    let safe: String = sysinfo::System::host_name()
+        .unwrap_or_default()
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '-' || c == '.' {
+                c
+            } else {
+                '-'
+            }
+        })
+        .collect();
+    if safe.is_empty() {
+        "unknown".to_owned()
+    } else {
+        safe
+    }
+}
+
+/// `when` in UTC as `YYYYMMDD-HHMMSS-mmm`.
+///
+/// UTC and hand-formatted for the same reasons as [`utc_day`], and fixed-width in every field so
+/// that a plain lexical sort of a directory listing is a sort by time.
+///
+/// A clock no calendar can describe falls back to the raw nanosecond count rather than to a
+/// fixed word: the stamp is the only thing keeping two files apart, so it must stay unique.
+fn stamp(when: std::time::SystemTime) -> String {
+    let Some(t) = calendar(when) else {
+        return epoch_nanos(when).to_string();
+    };
+    let d = t.date();
+    format!(
+        "{:04}{:02}{:02}-{:02}{:02}{:02}-{:03}",
+        d.year(),
+        u8::from(d.month()),
+        d.day(),
+        t.hour(),
+        t.minute(),
+        t.second(),
+        t.millisecond()
+    )
+}
+
+/// `when` in UTC as `YYYY-MM-DD`, the name of the directory a file written then belongs in.
+///
+/// UTC, matching wave 1's rule that stored time is UTC: a directory named in local time would
+/// jump around under a machine that travels or changes offset twice a year. Formatted by hand
+/// rather than through `time`'s format descriptions, which would need a feature this crate does
+/// not enable for three integers.
+pub(crate) fn utc_day(when: std::time::SystemTime) -> String {
+    let Some(t) = calendar(when) else {
+        return "unknown-date".to_owned();
+    };
+    let d = t.date();
+    format!("{:04}-{:02}-{:02}", d.year(), u8::from(d.month()), d.day())
+}
+
+/// `when` as a calendar date and time in UTC, or `None` for a clock so far from the epoch that
+/// no calendar describes it.
+///
+/// Fallible on purpose, where the obvious `OffsetDateTime::from(SystemTime)` is not: that one
+/// adds a `Duration` to the epoch and **panics** on overflow. [`run_file`] is reachable from the
+/// panic hook, and a panic inside a panic hook aborts the process with no diagnostic at all - the
+/// one failure mode a crash report exists to prevent.
+fn calendar(when: std::time::SystemTime) -> Option<time::OffsetDateTime> {
+    time::OffsetDateTime::from_unix_timestamp_nanos(epoch_nanos(when)).ok()
+}
+
+/// `when` as nanoseconds from the Unix epoch, negative before it, saturating instead of failing.
+///
+/// Saturation is unreachable from a real `SystemTime` - it would take a clock 10^22 years out -
+/// and is written this way only so that no arm of this can panic.
+fn epoch_nanos(when: std::time::SystemTime) -> i128 {
+    match when.duration_since(std::time::UNIX_EPOCH) {
+        Ok(since) => i128::try_from(since.as_nanos()).unwrap_or(i128::MAX),
+        Err(before) => i128::try_from(before.duration().as_nanos()).map_or(i128::MIN, |n| -n),
+    }
 }
 
 /// How long a file under [`SubDir::Tmp`] may survive before the housekeeping sweep deletes it.
@@ -609,6 +739,100 @@ pub fn memory_db_decision(m: Migrated) -> MemoryDbDecision {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A run file is `<state>/<kind>/<YYYY-MM-DD>/<machine>_<stamp>.<ext>`, dated directory made.
+    ///
+    /// Against a `TempDir` and a fixed instant, so the assertion is about the naming rule rather
+    /// than about today's date, and so no test creates anything under the real state root.
+    #[test]
+    fn a_run_file_is_named_for_the_machine_and_the_time_under_a_dated_directory() {
+        let base = tempfile::TempDir::new().expect("scratch dir");
+        let when = std::time::UNIX_EPOCH + std::time::Duration::from_millis(1_789_000_000_123);
+        let p = run_file_at(Some(base.path().to_path_buf()), SubDir::Logs, "log", when)
+            .expect("run file");
+
+        let dated = p.parent().expect("dated dir");
+        assert_eq!(dated.file_name().expect("name"), "2026-09-10");
+        assert!(dated.is_dir(), "the dated directory must be created");
+        assert_eq!(
+            dated.parent().expect("kind dir").file_name().expect("name"),
+            "logs",
+            "the kind names the directory"
+        );
+        assert!(!p.exists(), "the file itself is the caller's to create");
+
+        let name = p.file_name().expect("name").to_string_lossy().into_owned();
+        assert_eq!(name, format!("{}_20260910-002640-123.log", machine()));
+    }
+
+    /// The kind is the only thing that changes between the three writers, and the extension is
+    /// the caller's. A regression that ignored either would put crash reports in with the logs.
+    #[test]
+    fn the_kind_and_the_extension_are_the_only_things_the_caller_chooses() {
+        let base = tempfile::TempDir::new().expect("scratch dir");
+        let when = std::time::SystemTime::now();
+        let root = base.path().to_path_buf();
+        let log = run_file_at(Some(root.clone()), SubDir::Logs, "log", when).expect("log");
+        let panic = run_file_at(Some(root.clone()), SubDir::Panics, "log", when).expect("panic");
+        let stats = run_file_at(Some(root), SubDir::Stats, "json", when).expect("stats");
+
+        assert_eq!(log.file_name(), panic.file_name(), "same run, same stem");
+        assert_ne!(
+            log.parent(),
+            panic.parent(),
+            "different kind, different dir"
+        );
+        assert!(
+            stats.extension().expect("ext") == "json" && log.extension().expect("ext") == "log"
+        );
+    }
+
+    /// The host name is usable as a file name component, whatever the machine is called.
+    #[test]
+    fn the_machine_name_is_never_empty_and_never_carries_the_separator() {
+        let m = machine();
+        assert!(!m.is_empty());
+        assert!(!m.contains('_'), "{m}");
+        assert!(
+            m.chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '.'),
+            "{m}"
+        );
+    }
+
+    /// A clock no calendar can describe still names a file, and neither helper panics doing it.
+    ///
+    /// Both are reachable from the panic hook, where a second panic aborts the process with no
+    /// diagnostic at all, so this pins the fallible conversion that
+    /// `OffsetDateTime::from(SystemTime)` would not have given us.
+    #[test]
+    fn an_impossible_clock_is_named_rather_than_panicked_on() {
+        // ~8712 years past the epoch: outside `time`'s ±9999-year range, inside what a platform
+        // `SystemTime` can hold. A platform that cannot hold it has nothing to prove here.
+        let Some(far) = std::time::UNIX_EPOCH.checked_add(std::time::Duration::from_secs(1 << 38))
+        else {
+            return;
+        };
+        assert_eq!(utc_day(far), "unknown-date");
+        assert_eq!(stamp(far), epoch_nanos(far).to_string());
+        assert_ne!(
+            stamp(far),
+            stamp(far + std::time::Duration::from_millis(1)),
+            "the fallback must still tell two instants apart"
+        );
+    }
+
+    /// The stamp is UTC, fixed-width, and resolves to the millisecond - the resolution that
+    /// keeps two servers started in the same second apart.
+    #[test]
+    fn the_stamp_resolves_to_the_millisecond() {
+        let when = std::time::UNIX_EPOCH + std::time::Duration::from_millis(1_789_000_000_123);
+        assert_eq!(stamp(when), "20260910-002640-123");
+        assert_ne!(
+            stamp(when),
+            stamp(when + std::time::Duration::from_millis(1))
+        );
+    }
 
     /// The override wins over the home directory, and the root is created on demand.
     /// This is also the seam every other test uses to avoid touching the real home dir.
