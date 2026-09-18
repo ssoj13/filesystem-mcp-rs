@@ -85,7 +85,7 @@ use crate::tools::screenshot;
 use crate::tools::search::{FileTypeFilter, SearchParams, search_files_extended};
 use crate::tools::thinking::{ThinkingState, ThoughtInput};
 use crate::tools::{
-    archive, compare, duplicates, grep, hash, json_reader, pdf_reader, process, search, stats,
+    archive, compare, duplicates, file_stats, grep, hash, json_reader, pdf_reader, process, search,
     watch,
 };
 #[cfg(feature = "screenshot-tools")]
@@ -5946,7 +5946,7 @@ USE CASES: Patch executables, fix binary data, search-replace in non-text files.
     ) -> Result<CallToolResult, McpError> {
         let path = self.resolve(&args.path).await?;
 
-        let result = stats::file_stats(&path, *args.recursive, 10)
+        let result = file_stats::file_stats(&path, *args.recursive, 10)
             .await
             .map_err(|e| McpError::internal_error(e.to_string(), None))?;
 

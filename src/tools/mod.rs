@@ -7,6 +7,9 @@ pub mod docx;
 pub mod duplicates;
 pub mod edit;
 pub mod fast_grep;
+// The `file_stats` tool. Named for the tool rather than for `stats`, which this wave gives to
+// the tool-call statistics subsystem below.
+pub mod file_stats;
 pub mod fs_ops;
 pub mod grep;
 pub mod hash;
@@ -36,6 +39,8 @@ pub mod screenshot;
 pub mod computer;
 pub mod search;
 pub mod spooky;
+/// Tool-call statistics: which of this server's tools are used, which fail and how.
+#[cfg(feature = "stats-tools")]
 pub mod stats;
 pub mod thinking;
 pub mod watch;

@@ -28,6 +28,8 @@ pub struct EnvVar {
 pub fn vars() -> Vec<EnvVar> {
     let mut v = paths_vars();
     v.extend(log_vars());
+    #[cfg(feature = "stats-tools")]
+    v.extend(stats_vars());
     v.extend(net_vars());
     v.extend(memory_vars());
     v.extend(ctl_vars());
@@ -75,6 +77,44 @@ fn log_vars() -> Vec<EnvVar> {
             key: "FS_MCP_LOG_MAX_MB",
             default: "512",
             help: "Total size budget (MiB) for <state>/logs; oldest files are deleted first once it is exceeded. 0 = no budget.",
+        },
+    ]
+}
+
+/// What this server records about its own tool calls, and how long that detail stays.
+///
+/// Immediately after [`log_vars`] because both describe what the server writes about itself
+/// beneath the state root, and because `FS_MCP_STATS_DETAIL_DAYS` deliberately mirrors
+/// `FS_MCP_LOG_KEEP_DAYS`: a log file and the detail rows describing the same run expire
+/// together. Each default is owned by a constant in [`crate::tools::stats`], which
+/// `stats_keys_are_registered_and_agree_with_the_code` asserts these strings match.
+#[cfg(feature = "stats-tools")]
+fn stats_vars() -> Vec<EnvVar> {
+    vec![
+        EnvVar {
+            key: "FS_MCP_STATS",
+            default: "on",
+            help: "Count tool calls, outcomes and latency per tool: on | off.",
+        },
+        EnvVar {
+            key: "FS_MCP_STATS_DB",
+            default: "",
+            help: "SQLite file the counters are written to. Blank = <state>/stats.db.",
+        },
+        EnvVar {
+            key: "FS_MCP_STATS_FLUSH_SEC",
+            default: "5",
+            help: "How often in-memory counters are written out (seconds); a crash loses at most this much. Minimum 1.",
+        },
+        EnvVar {
+            key: "FS_MCP_STATS_DETAIL_DAYS",
+            default: "14",
+            help: "Keep 10-minute detail in <state>/stats.db for this many days, then compact it into daily totals. 0 = never compact.",
+        },
+        EnvVar {
+            key: "FS_MCP_STATS_LABEL",
+            default: "",
+            help: "Free-text label recorded on this process's session row. Blank = none.",
         },
     ]
 }
@@ -352,6 +392,84 @@ mod tests {
                 v.help
             );
         }
+    }
+
+    /// Each statistics key is registered once, its advertised default is the constant the code
+    /// actually applies, the retention knob documents the `0 = disabled` convention, and the one
+    /// key naming a file anchors it to the state root.
+    ///
+    /// The same drift guard as the two above. `FS_MCP_STATS` is the interesting one: its default
+    /// is advertised as a word and applied as a `bool`, so the assertion runs the word through
+    /// the meaning the reader gives it rather than comparing two spellings.
+    #[cfg(feature = "stats-tools")]
+    #[test]
+    fn stats_keys_are_registered_and_agree_with_the_code() {
+        use crate::tools::stats;
+
+        let all = vars();
+        for key in [
+            "FS_MCP_STATS",
+            "FS_MCP_STATS_DB",
+            "FS_MCP_STATS_FLUSH_SEC",
+            "FS_MCP_STATS_DETAIL_DAYS",
+            "FS_MCP_STATS_LABEL",
+        ] {
+            assert_eq!(all.iter().filter(|v| v.key == key).count(), 1, "{key}");
+        }
+
+        let find = |key: &str| {
+            all.iter()
+                .find(|v| v.key == key)
+                .unwrap_or_else(|| panic!("{key} is not registered"))
+        };
+
+        for (key, default) in [
+            ("FS_MCP_STATS_FLUSH_SEC", stats::FLUSH_SECS_DEFAULT),
+            ("FS_MCP_STATS_DETAIL_DAYS", stats::DETAIL_DAYS_DEFAULT),
+        ] {
+            assert_eq!(find(key).default, default.to_string(), "{key}");
+        }
+
+        // The advertised word must be one the switch understands, not merely a word that happens
+        // to look affirmative.
+        let switch = find("FS_MCP_STATS");
+        assert!(
+            matches!(switch.default, "on" | "off"),
+            "the switch must advertise a word its reader understands: {}",
+            switch.default
+        );
+        assert_eq!(
+            switch.default == "on",
+            stats::ENABLED_DEFAULT,
+            "advertised default disagrees with tools::stats::enabled"
+        );
+
+        // `contains("0 =")`, not `contains('0')`: the latter is satisfied by the `0` in a number
+        // anywhere in the sentence, which is not the convention being pinned.
+        let detail = find("FS_MCP_STATS_DETAIL_DAYS");
+        assert!(
+            detail.help.contains("0 ="),
+            "a retention knob must document that 0 disables it: {}",
+            detail.help
+        );
+
+        // The flush interval is NOT a retention knob and must not claim the same convention:
+        // zero there is clamped up to one second, because an interval of zero would spin.
+        let flush = find("FS_MCP_STATS_FLUSH_SEC");
+        assert!(
+            !flush.help.contains("0 ="),
+            "an interval is not a retention knob: {}",
+            flush.help
+        );
+
+        // The location invariant above would also be satisfied by deleting the path from the
+        // help; pin the one key that names the database file.
+        let db = find("FS_MCP_STATS_DB");
+        assert!(
+            db.help.contains("<state>/stats.db"),
+            "stale help: {}",
+            db.help
+        );
     }
 
     #[test]

@@ -116,8 +116,13 @@ serial_test = "4.0"
 rust_xlsxwriter = "0.98"
 
 [features]
-default = ["http-tools", "s3-tools", "screenshot-tools", "computer-tools"]
+default = ["http-tools", "s3-tools", "screenshot-tools", "computer-tools", "stats-tools"]
 http-tools = []
+# Tool-call statistics: `src/tools/stats/`, one shared SQLite file under the state root. On by
+# default, because a server whose usage nobody can see is the problem it exists to fix, and it
+# adds no dependency surface at all - `rusqlite` is already unconditional for the memory tools,
+# so there is no new platform build risk to weigh against it.
+stats-tools = []
 s3-tools = ["dep:aws-config", "dep:aws-sdk-s3", "dep:aws-credential-types", "dep:aws-types"]
 screenshot-tools = ["dep:image", "dep:xcap", "dep:arboard"]
 
