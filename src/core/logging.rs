@@ -183,9 +183,16 @@ fn degraded_line(reason: &str) -> String {
 
 /// Decide the plan against the real state directory.
 ///
-/// Resolves `<state>/logs` (creating it) and hands the rest to [`target_for_in`], which sees
-/// `None` when it cannot be made. The directory is resolved even when `--log` names a file
-/// elsewhere, which costs one empty directory and keeps this wrapper to one behaviour.
+/// Resolves this run's log file through [`crate::core::paths::run_file`] - which creates the
+/// dated directory - and hands the rest to [`target_for_in`], which sees `None` when it cannot be
+/// made.
+///
+/// **Resolution is skipped entirely when logging is off.** `run_file` has a side effect, the
+/// dated directory, and nothing ever deletes one: a server run with `FS_MCP_LOG=off` would
+/// otherwise leave an empty directory per day, forever, in a tree with no retention. So the one
+/// branch that needs no file at all is answered before the resolution rather than after it. An
+/// explicit `--log` still resolves the default it will not use, which costs that run - a run that
+/// *is* logging - one directory it would have made anyway on its next start without `--log`.
 ///
 /// **`None` is not "the state root is unusable".** `main` validates the root before logging is
 /// initialised and refuses to start without it, because every other consumer of it - the memory
@@ -194,16 +201,21 @@ fn degraded_line(reason: &str) -> String {
 /// file already sitting at that name, a permission set on that one directory. `paths`'
 /// `a_usable_root_can_still_have_an_unusable_subdir` pins that this can happen at all.
 pub fn target_for(mode: TransportMode, log_file: Option<String>, level: Option<&str>) -> Plan {
+    if level.is_some_and(|v| v.eq_ignore_ascii_case("off")) {
+        return Plan::Disabled;
+    }
     let default = crate::core::paths::run_file(crate::core::paths::SubDir::Logs, "log").ok();
     target_for_in(default, mode, log_file, level)
 }
 
-/// Decide the plan. `root` is `<state>/logs`, or `None` when that directory cannot be made (see
-/// [`target_for`]); `level` is the raw `FS_MCP_LOG` value (already blank-filtered).
+/// Decide the plan. `default_file` is this run's log file, or `None` when it could not be placed
+/// (see [`target_for`]); `level` is the raw `FS_MCP_LOG` value (already blank-filtered).
 ///
-/// Takes the log directory as an argument, like [`crate::core::paths`]'s own resolvers, so the
-/// decision can be tested against a `TempDir` instead of creating directories under the real
-/// state root on every `cargo test`.
+/// Takes the resolved file as an argument, like [`crate::core::paths`]'s own resolvers take a
+/// root, so the decision can be tested against a `TempDir` instead of creating directories under
+/// the real state root on every `cargo test`. It keeps its own `off` check even though
+/// [`target_for`] answers that case first: this function is the one the tests exercise, and a
+/// decision that depended on which wrapper you came through would be a trap.
 fn target_for_in(
     default_file: Option<PathBuf>,
     mode: TransportMode,
@@ -648,8 +660,9 @@ mod tests {
     /// [`level`] is the registered key read through [`env_spec::get`] and nothing else: no
     /// second key, no transformation of the value.
     ///
-    /// Asserted by comparison rather than by setting `FS_MCP_LOG`, which would be UB for the
-    /// reason given on [`a_retention_knob_parses_clamps_or_falls_back`]. It cannot distinguish
+    /// Asserted by comparison rather than by setting `FS_MCP_LOG`: `std::env::set_var` is unsafe
+    /// in edition 2024 and the test binary runs its tests on many threads, so writing a key the
+    /// rest of the suite reads would be UB rather than merely flaky. It cannot distinguish
     /// this reader from one hardcoded to `None` while the key is unset in the test process —
     /// that much is pinned structurally, by the reader being one line.
     #[test]
@@ -674,8 +687,6 @@ mod tests {
         );
     }
 
-    /// The dated directory is the one the rest of the design keys on, so its shape is pinned:
-    /// ten characters, `YYYY-MM-DD`.
     /// The marker line carries the three things the filesystem does not: the day, the pid and
     /// the instance, which together name the log file that is missing.
     #[test]

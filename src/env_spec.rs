@@ -28,7 +28,6 @@ pub struct EnvVar {
 pub fn vars() -> Vec<EnvVar> {
     let mut v = paths_vars();
     v.extend(log_vars());
-    #[cfg(feature = "stats-tools")]
     v.extend(stats_vars());
     v.extend(net_vars());
     v.extend(memory_vars());
@@ -75,7 +74,6 @@ fn log_vars() -> Vec<EnvVar> {
 /// file per run, the log under `<state>/logs` and the counters under `<state>/stats`. The default
 /// is owned by a constant in [`crate::tools::stats`], which
 /// `stats_keys_are_registered_and_agree_with_the_code` asserts these strings match.
-#[cfg(feature = "stats-tools")]
 fn stats_vars() -> Vec<EnvVar> {
     vec![EnvVar {
         key: "FS_MCP_STATS",
@@ -349,7 +347,6 @@ mod tests {
     /// The same drift guard as the keys above. `FS_MCP_STATS` is the interesting one: its default
     /// is advertised as a word and applied as a `bool`, so the assertion runs the word through
     /// the meaning the reader gives it rather than comparing two spellings.
-    #[cfg(feature = "stats-tools")]
     #[test]
     fn stats_keys_are_registered_and_agree_with_the_code() {
         use crate::tools::stats;
@@ -395,18 +392,27 @@ mod tests {
     /// A registered key that no source reads is a typo or a leftover. (The reverse direction —
     /// a key read but unregistered — cannot be checked here: sources gated out of this build
     /// still contain their literals.)
+    ///
+    /// **This file is excluded from the search rather than discounted by a threshold.** The
+    /// earlier form counted mentions across all of `src/` and demanded two, on the reasoning that
+    /// one of them is the declaration here. That is only true for a key mentioned exactly once in
+    /// this file: `FS_MCP_STATS` appears five times in it - the declaration, a rustdoc, and three
+    /// lines of a neighbouring test - so it cleared the bar with room to spare and would have
+    /// gone on clearing it if its reader had been deleted outright. Excluding this file makes the
+    /// count mean what the test name says: at least one reader somewhere else.
     #[test]
     fn every_registered_key_is_read_somewhere_in_the_sources() {
         let src = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
         let mut haystack = String::new();
         collect(&src, &mut haystack);
         for v in vars() {
-            // env_spec.rs itself is where the literal is declared; require a second mention.
             let hits = haystack.matches(v.key).count();
-            assert!(hits >= 2, "{} is registered but never read", v.key);
+            assert!(hits >= 1, "{} is registered but never read", v.key);
         }
     }
 
+    /// Every `.rs` file under `dir`, concatenated, **except this one** - the registry is where
+    /// the key literals are declared, so counting them would be counting the declaration.
     fn collect(dir: &std::path::Path, out: &mut String) {
         let Ok(entries) = std::fs::read_dir(dir) else {
             return;
@@ -416,6 +422,7 @@ mod tests {
             if p.is_dir() {
                 collect(&p, out);
             } else if p.extension().is_some_and(|x| x == "rs")
+                && p.file_name().is_some_and(|n| n != "env_spec.rs")
                 && let Ok(text) = std::fs::read_to_string(&p)
             {
                 out.push_str(&text);

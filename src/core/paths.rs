@@ -88,17 +88,29 @@ pub fn sub_dir(kind: SubDir) -> io::Result<PathBuf> {
 /// and the directory layout exist once. A change to any of them cannot reach two of the three and
 /// miss the third.
 ///
-/// **Uniqueness comes from the timestamp, not from coordination.** The name carries milliseconds,
-/// so two servers starting in the same second on one host still differ, and servers on different
-/// hosts differ by the host name even when their clocks agree. Nothing consults a lock, a pid or
-/// another process's files. This is what replaced wave 2's retention layer: that layer existed
-/// only to decide whether another process's file was safe to delete, a question nobody now asks.
+/// **The stamp names the run, not the moment of the call.** It comes from
+/// [`crate::core::instance::started`], fixed once per process, so a run's log, crash report and
+/// counters share one stem and differ only in their directory and extension - which is what makes
+/// the three correlatable at all. A helper reading the clock per call would hand the log the
+/// startup instant, the crash report the panic instant and the counters the exit instant, and
+/// nothing in the name would tie them together.
+///
+/// It also means the counters have **one** path per run: the panic hook writes a partial file and
+/// the exit path overwrites it with the final one, so no latch is needed to keep a run to one
+/// counters file.
+///
+/// **Uniqueness comes from that stamp, not from coordination.** It carries milliseconds, so two
+/// servers starting in the same millisecond on one host are the only collision, and servers on
+/// different hosts differ by the host name even when their clocks agree. Nothing consults a lock,
+/// a pid or another process's files. This is what replaced wave 2's retention layer: that layer
+/// existed only to decide whether another process's file was safe to delete, a question nobody
+/// now asks.
 pub fn run_file(kind: SubDir, ext: &str) -> io::Result<PathBuf> {
     run_file_at(
         env_spec::get("FS_MCP_STATE_DIR").map(PathBuf::from),
         kind,
         ext,
-        std::time::SystemTime::now(),
+        crate::core::instance::started(),
     )
 }
 
@@ -767,10 +779,16 @@ mod tests {
 
     /// The kind is the only thing that changes between the three writers, and the extension is
     /// the caller's. A regression that ignored either would put crash reports in with the logs.
+    ///
+    /// The shared stem is a real property and not an artefact of passing one `when`: production
+    /// callers reach [`run_file`], which takes its instant from
+    /// [`crate::core::instance::started`] - fixed once per process and pinned stable by that
+    /// module's `the_start_instant_never_moves`. The three writers therefore see the same value
+    /// this test hands them here.
     #[test]
     fn the_kind_and_the_extension_are_the_only_things_the_caller_chooses() {
         let base = tempfile::TempDir::new().expect("scratch dir");
-        let when = std::time::SystemTime::now();
+        let when = crate::core::instance::started();
         let root = base.path().to_path_buf();
         let log = run_file_at(Some(root.clone()), SubDir::Logs, "log", when).expect("log");
         let panic = run_file_at(Some(root.clone()), SubDir::Panics, "log", when).expect("panic");

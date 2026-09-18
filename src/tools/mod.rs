@@ -40,7 +40,6 @@ pub mod computer;
 pub mod search;
 pub mod spooky;
 /// Tool-call statistics: which of this server's tools are used, which fail and how.
-#[cfg(feature = "stats-tools")]
 pub mod stats;
 pub mod thinking;
 pub mod watch;

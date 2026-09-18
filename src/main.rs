@@ -224,8 +224,9 @@ struct FileSystemServer {
     ///
     /// An `Option` rather than an always-present collector with a disabled flag inside it,
     /// because that is what makes "off" cost the hot path one branch: with `None` there is no
-    /// mutex to take, no name to intern and no map to grow. Shared with the flush task, hence
-    /// the `Arc` - the server is cloned per connection.
+    /// mutex to take, no name to intern and no map to grow. The `Arc` is because the server is
+    /// cloned per connection under HTTP, and because `stats::install` adopts the same counters
+    /// for the exit path and the panic hook to write.
     stats: Option<Arc<tools::stats::collect::Collector>>,
 }
 

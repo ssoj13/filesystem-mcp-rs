@@ -40,9 +40,11 @@ const AUDITED_RMCP_VERSION: &str = "3.1.3";
 /// Which counter a finished tool call increments.
 ///
 /// Six outcomes, not two, because a bare success/failure split cannot tell an operator whether
-/// *they* are calling the tool wrongly ([`Outcome::ErrParams`]) or the tool itself is broken
-/// ([`Outcome::ErrInternal`]), and cannot tell either of those from the tool running to
-/// completion and reporting its own failure ([`Outcome::ErrFlagged`]).
+/// they are calling a name this build does not serve ([`Outcome::ErrParams`]), the tool itself is
+/// broken ([`Outcome::ErrInternal`]), or the tool ran and reported its own failure
+/// ([`Outcome::ErrFlagged`]). Note that a malformed *argument* is the third of those and not the
+/// first - see [`Outcome::ErrParams`], which is the one column whose name reads as more than it
+/// means.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Outcome {
     /// The call completed and reported no failure of its own.
@@ -50,15 +52,23 @@ pub enum Outcome {
     /// The call completed but flagged itself failed: `is_error == Some(true)`. A killed or
     /// timed-out `run_command` lands here, which is why this variant exists at all.
     ErrFlagged,
-    /// rmcp rejected the request (`-32602`): the caller got the request wrong - bad parameters,
-    /// or a tool name this build does not have - and the tool never ran.
+    /// rmcp rejected the request with `-32602` and the tool never ran. **In this build that means
+    /// the tool name is not one it serves**, not that the arguments were malformed.
     ///
-    /// The two readings share a counter but not a remedy: bad parameters mean fix the call, an
-    /// unknown name means the tool was renamed or removed. rmcp raises the same
-    /// `invalid_params("tool not found")` for the second case
-    /// (`rmcp-3.1.3/src/handler/server/router/tool.rs:566,571`), which is also why task 3 must
-    /// decide what tool name such a call is attributed to: there is no registered tool to name,
-    /// so it is attributed to the interned `__unknown`.
+    /// The obvious reading - "callers are getting my parameters wrong" - is the wrong one, and
+    /// the difference matters because the remedies are opposite. rmcp answers an unknown or
+    /// disabled name with `invalid_params("tool not found")`
+    /// (`rmcp-3.1.3/src/handler/server/router/tool.rs:566,571`), which lands here. But a request
+    /// whose *arguments* fail to deserialise does not: `into_tool_argument_error`
+    /// (`tool.rs:145-153`) turns that into `Ok(CallToolResult::error(..))`, so it arrives as
+    /// `is_error = true` and is counted as [`Outcome::ErrFlagged`] instead - in the same column
+    /// as a `run_command` that timed out.
+    ///
+    /// So: a rising count here means a client is calling a name this build was renamed out of or
+    /// never had, and the call is attributed to the interned `__unknown`, there being no
+    /// registered tool to name. Schema mistakes have to be read out of `err_flagged`, where they
+    /// are not separable from a tool's own reported failures. Pinned by
+    /// `an_argument_error_is_flagged_not_counted_as_bad_params`.
     ErrParams,
     /// The call failed below the handler (`-32603`, and every other protocol code): the tool
     /// broke rather than the caller.
@@ -134,6 +144,33 @@ mod tests {
     use rmcp::model::{
         CallToolResult, CreateTaskResult, InputRequiredResult, ResultType, Task, TaskStatus,
     };
+
+    /// A malformed argument is counted as flagged, NOT as bad parameters — the one place where
+    /// the column name reads as more than it means.
+    ///
+    /// rmcp's `into_tool_argument_error` (`tool.rs:145-153`) turns a deserialisation failure into
+    /// `Ok(CallToolResult::error(..))`, so it never reaches the `Err` arm. This reproduces that
+    /// shape rather than calling the private helper, and asserts the two land in *different*
+    /// columns: if a future rmcp routed argument errors through `Err(invalid_params)` instead,
+    /// the meaning of `err_params` would silently change under an operator reading old files, and
+    /// this test is what fails first. See [`AUDITED_RMCP_VERSION`].
+    #[test]
+    fn an_argument_error_is_flagged_not_counted_as_bad_params() {
+        // The shape rmcp produces for "failed to deserialize parameters: ...".
+        let argument_error = CallToolResult::error(vec![]);
+        assert_eq!(
+            classify(&Ok(CallToolResponse::Complete(argument_error))),
+            Outcome::ErrFlagged,
+            "a bad argument arrives as a flagged result, not as a protocol error"
+        );
+        assert_ne!(
+            classify(&Ok(CallToolResponse::Complete(CallToolResult::error(
+                vec![]
+            )))),
+            classify(&Err(McpError::invalid_params("tool not found", None))),
+            "bad arguments and an unknown tool name must not share a column"
+        );
+    }
 
     /// Every shape a finished call can take, scored in one table.
     ///
