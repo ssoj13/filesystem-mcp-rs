@@ -9,6 +9,8 @@ use rmcp::{
     serde::Deserialize, tool, tool_router,
 };
 use schemars::JsonSchema;
+// Used by the notify and clipboard-file tools below; the OCR tool in this file does not.
+#[cfg(any(feature = "ctl-notify", feature = "ctl-clip-files"))]
 use serde_json::json;
 
 #[cfg(feature = "ctl-ocr")]
@@ -84,6 +86,7 @@ impl FileSystemServer {
     }
 }
 
+#[cfg(feature = "ctl-notify")]
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct NotifyArgs {
     pub title: Option<String>,
@@ -121,6 +124,7 @@ impl FileSystemServer {
     }
 }
 
+#[cfg(feature = "ctl-clip-files")]
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct FilesArgs {
     pub files: Vec<String>,

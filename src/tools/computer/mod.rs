@@ -22,13 +22,12 @@
 // reach the machine only through `driver`, so they compile on every platform
 // and simply surface the backend's `unsupported` errors where a domain is
 // missing. (The OS-specific code lives under `driver/<backend>/`.)
-// Stays on for every domain, unlike `driver::portable`: this module holds two things, and only
-// one of them is about the desktop. The arm gate is - `ctl-notify` and `ctl-clip-files` never
-// arm anything - but `CtlError` and the `ctl_err` mapping below are what *every* domain turns
-// its failures into, toasts and clipboard file lists included. Narrowing the module would mean
-// splitting the error type away from the gate it mostly describes, or gating variants of a
-// public error enum per build, which would make the wire shape depend on the feature set.
-#[cfg(feature = "ctl-any")]
+// Desktop domains only. The whole module is about acting on a desktop: the arm gate, its audit
+// trail, and a `CtlError` whose four variants are "not armed", "op cap exceeded", "no window
+// match" and "focus failed". A toast or a clipboard file list can produce none of them, so a
+// build without a desktop domain is not missing an error it could otherwise have raised - which
+// is why gating this does not make the wire shape depend on the feature set.
+#[cfg(feature = "ctl-input")]
 pub mod safety;
 #[cfg(feature = "ctl-input")]
 pub mod steps;
@@ -59,11 +58,15 @@ pub mod ocrs_local;
 /// not_armed / op_cap / no_match / focus_failed). Shared by all server files.
 #[cfg(feature = "ctl-any")]
 pub(crate) fn ctl_err(e: anyhow::Error) -> rmcp::ErrorData {
+    // A `CtlError` is the caller's fault - they did not arm, they asked for a window that is not
+    // there - so it maps to `invalid_params` and carries its stable code. Only a desktop domain
+    // can raise one; without one, this arm is not merely unused but unreachable, so it compiles
+    // away rather than being suppressed.
+    #[cfg(feature = "ctl-input")]
     if let Some(ctl) = e.downcast_ref::<safety::CtlError>() {
-        rmcp::ErrorData::invalid_params(format!("{}: {ctl}", ctl.code()), None)
-    } else {
-        rmcp::ErrorData::internal_error(e.to_string(), None)
+        return rmcp::ErrorData::invalid_params(format!("{}: {ctl}", ctl.code()), None);
     }
+    rmcp::ErrorData::internal_error(e.to_string(), None)
 }
 
 /// MCP tool routing: per-domain routers merged into the host router (S1 spike

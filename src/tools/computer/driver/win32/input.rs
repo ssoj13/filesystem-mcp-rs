@@ -8,7 +8,6 @@
 use std::sync::Mutex;
 
 use anyhow::Context as _;
-use windows::Win32::Foundation::POINT;
 use windows::Win32::UI::Input::KeyboardAndMouse::{
     INPUT, INPUT_0, INPUT_KEYBOARD, INPUT_MOUSE, KEYBD_EVENT_FLAGS, KEYBDINPUT, KEYEVENTF_KEYUP,
     KEYEVENTF_UNICODE, MOUSE_EVENT_FLAGS, MOUSEEVENTF_ABSOLUTE, MOUSEEVENTF_HWHEEL,
@@ -18,7 +17,7 @@ use windows::Win32::UI::Input::KeyboardAndMouse::{
     VK_END, VK_ESCAPE, VK_F1, VK_HOME, VK_INSERT, VK_LEFT, VK_LWIN, VK_MENU, VK_NEXT, VK_PRIOR,
     VK_RETURN, VK_RIGHT, VK_SHIFT, VK_SPACE, VK_TAB, VK_UP,
 };
-use windows::Win32::UI::WindowsAndMessaging::{GetCursorPos, GetForegroundWindow, WHEEL_DELTA};
+use windows::Win32::UI::WindowsAndMessaging::{GetForegroundWindow, WHEEL_DELTA};
 
 // Platform-neutral types: defined in the driver, re-exported for callers that
 // historically imported them from input (input::Btn etc.).
@@ -204,15 +203,6 @@ pub fn focus() -> FocusInfo {
     }
 }
 
-/// Post-move cursor verification (drift is a warning, not an error —
-/// rounding across the 65535 normalization can shift by a pixel).
-/// Cursor position (None when unavailable).
-pub(crate) fn cursor_pos() -> Option<(i32, i32)> {
-    let mut p = POINT::default();
-    // SAFETY: out-pointer only.
-    unsafe { GetCursorPos(&mut p) }.ok().map(|_| (p.x, p.y))
-}
-
 /// Move-only hover (absolute virtual-screen coords).
 pub fn move_cursor(x: i32, y: i32) -> anyhow::Result<FocusInfo> {
     let (nx, ny) = to_abs(x, y);
@@ -223,7 +213,7 @@ pub fn move_cursor(x: i32, y: i32) -> anyhow::Result<FocusInfo> {
         0,
     )];
     send_batch(&batch)?;
-    if let Some((cx, cy)) = cursor_pos()
+    if let Some((cx, cy)) = super::win::cursor_pos()
         && (cx, cy) != (x, y)
     {
         tracing::warn!("cursor drift: wanted {x},{y} got {cx},{cy}");
@@ -274,28 +264,6 @@ pub fn click(
         serde_json::json!({ "btn": btn, "clicks": clicks, "mods": mods.len(), "pos": [pos.hwnd, pos.title] }),
     )?;
     Ok(focus())
-}
-
-/// Screen pixel color at virtual-screen coords. GetPixel returns 0x00BBGGRR;
-/// CLR_INVALID (0xFFFFFFFF) means the coords are outside the screen.
-pub fn color_at(x: i32, y: i32) -> anyhow::Result<(u8, u8, u8)> {
-    use windows::Win32::Foundation::COLORREF;
-    use windows::Win32::Graphics::Gdi::{GetDC, GetPixel, ReleaseDC};
-    // SAFETY: screen DC acquired and released symmetrically.
-    let hdc = unsafe { GetDC(None) };
-    if hdc.is_invalid() {
-        return Err(anyhow::anyhow!("GetDC(screen) failed"));
-    }
-    let px = unsafe { GetPixel(hdc, x, y) };
-    unsafe { ReleaseDC(None, hdc) };
-    if px == COLORREF(0xFFFF_FFFF) {
-        return Err(anyhow::anyhow!("({x},{y}) is outside the visible screen"));
-    }
-    Ok((
-        (px.0 & 0xFF) as u8,
-        ((px.0 >> 8) & 0xFF) as u8,
-        ((px.0 >> 16) & 0xFF) as u8,
-    ))
 }
 
 /// Temporized drag: press at `from` (`hold_ms` settle with button down),

@@ -3,24 +3,80 @@
 //! Enumeration runs top-to-bottom in z-order (EnumWindows order), which becomes
 //! our `z` field. `id` is the HWND (xcap parity: `Window::id() == hwnd`).
 
-use windows::Win32::Foundation::{CloseHandle, HWND, LPARAM, RECT, WPARAM};
+use windows::Win32::Foundation::{CloseHandle, HWND, LPARAM, RECT};
 use windows::Win32::Graphics::Dwm::{DWMWA_CLOAKED, DwmGetWindowAttribute};
 use windows::Win32::System::Threading::{
     OpenProcess, PROCESS_NAME_WIN32, PROCESS_QUERY_LIMITED_INFORMATION, QueryFullProcessImageNameW,
 };
+use windows::Win32::UI::WindowsAndMessaging::{
+    EnumWindows, GetForegroundWindow, GetSystemMetrics, GetWindowRect, GetWindowTextW,
+    GetWindowThreadProcessId, IsIconic, IsWindow, IsWindowVisible, IsZoomed, SM_CXVIRTUALSCREEN,
+    SM_CYVIRTUALSCREEN, SM_XVIRTUALSCREEN, SM_YVIRTUALSCREEN,
+};
+
+// Everything below is used only by the driving half of this module: raising, moving and closing a
+// window, and the synthetic ALT tap that makes `SetForegroundWindow` stick.
+#[cfg(feature = "ctl-input")]
+use windows::Win32::Foundation::WPARAM;
+#[cfg(feature = "ctl-input")]
 use windows::Win32::UI::Input::KeyboardAndMouse::{
     INPUT, INPUT_0, INPUT_KEYBOARD, KEYBDINPUT, KEYEVENTF_KEYUP, SendInput, VK_MENU,
 };
+#[cfg(feature = "ctl-input")]
 use windows::Win32::UI::WindowsAndMessaging::{
-    EnumWindows, GetForegroundWindow, GetSystemMetrics, GetWindowRect, GetWindowTextW,
-    GetWindowThreadProcessId, IsIconic, IsWindow, IsWindowVisible, IsZoomed, MoveWindow,
-    PostMessageW, SM_CXVIRTUALSCREEN, SM_CYVIRTUALSCREEN, SM_XVIRTUALSCREEN, SM_YVIRTUALSCREEN,
-    SW_MAXIMIZE, SW_MINIMIZE, SW_RESTORE, SetForegroundWindow, ShowWindow, WM_CLOSE,
+    MoveWindow, PostMessageW, SW_MAXIMIZE, SW_MINIMIZE, SW_RESTORE, SetForegroundWindow,
+    ShowWindow, WM_CLOSE,
 };
 use windows::core::BOOL;
 
-pub use crate::tools::computer::driver::{WinInfo, WinQuery, WinTarget};
+pub use crate::tools::computer::driver::{WinInfo, WinQuery};
+// Re-exported for `uia`, which resolves a window target before walking its tree.
+#[cfg(feature = "ctl-uia")]
+pub use crate::tools::computer::driver::WinTarget;
+#[cfg(feature = "ctl-input")]
 use crate::tools::computer::safety::CtlError;
+
+/// Reading a pixel is a screen query, not input synthesis - it is `GetDC`/`GetPixel`/`ReleaseDC`
+/// and touches nothing else. It lived in `input.rs` by accident, and that accident tied the
+/// `color` tool to `ctl-input`: a build with OCR but no input compiled and then answered
+/// "unsupported" at runtime, because the whole `ScreenDrv` impl had to follow it.
+/// Screen pixel color at virtual-screen coords. GetPixel returns 0x00BBGGRR;
+/// CLR_INVALID (0xFFFFFFFF) means the coords are outside the screen.
+pub fn color_at(x: i32, y: i32) -> anyhow::Result<(u8, u8, u8)> {
+    use windows::Win32::Foundation::COLORREF;
+    use windows::Win32::Graphics::Gdi::{GetDC, GetPixel, ReleaseDC};
+    // SAFETY: screen DC acquired and released symmetrically.
+    let hdc = unsafe { GetDC(None) };
+    if hdc.is_invalid() {
+        return Err(anyhow::anyhow!("GetDC(screen) failed"));
+    }
+    let px = unsafe { GetPixel(hdc, x, y) };
+    unsafe { ReleaseDC(None, hdc) };
+    if px == COLORREF(0xFFFF_FFFF) {
+        return Err(anyhow::anyhow!("({x},{y}) is outside the visible screen"));
+    }
+    Ok((
+        (px.0 & 0xFF) as u8,
+        ((px.0 >> 8) & 0xFF) as u8,
+        ((px.0 >> 16) & 0xFF) as u8,
+    ))
+}
+
+/// Where the pointer is, in virtual-screen coordinates.
+///
+/// A query (`GetCursorPos`), not a synthetic move, so it belongs with the other screen
+/// queries. It sat in `input.rs` and was reached through `InputDrv`, which is why a build
+/// with OCR but no input could not take a cursor-anchored capture.
+///
+/// `input` still calls it, to verify a move landed: drift there is a warning rather than an
+/// error, because rounding through the 65535-step normalisation can shift the result by a pixel.
+pub(crate) fn cursor_pos() -> Option<(i32, i32)> {
+    use windows::Win32::Foundation::POINT;
+    use windows::Win32::UI::WindowsAndMessaging::GetCursorPos;
+    let mut p = POINT::default();
+    // SAFETY: out-pointer only.
+    unsafe { GetCursorPos(&mut p) }.ok().map(|_| (p.x, p.y))
+}
 
 /// Virtual screen metrics: (x, y, width, height) in physical pixels.
 pub fn virtual_screen() -> (i32, i32, i32, i32) {
@@ -153,6 +209,7 @@ pub fn list_windows(query: Option<WinQuery>) -> anyhow::Result<Vec<WinInfo>> {
     Ok(out)
 }
 
+#[cfg(feature = "ctl-input")]
 fn alt_input(up: bool) -> INPUT {
     INPUT {
         r#type: INPUT_KEYBOARD,
@@ -172,16 +229,19 @@ fn alt_input(up: bool) -> INPUT {
     }
 }
 
+#[cfg(feature = "ctl-input")]
 fn send(batch: &mut [INPUT]) {
     // SAFETY: SendInput with correct struct size; partial delivery is checked by callers.
     unsafe { SendInput(batch, std::mem::size_of::<INPUT>() as i32) };
 }
 
+#[cfg(feature = "ctl-input")]
 fn foreground_is(hwnd: HWND) -> bool {
     let fg = unsafe { GetForegroundWindow() };
     fg == hwnd
 }
 
+#[cfg(feature = "ctl-input")]
 /// Bring `hwnd` to the foreground and VERIFY it.
 /// Chain: restore-if-minimized → plain SetForegroundWindow → ALT-key trick.
 /// Both failure paths are loud ([`CtlError::FocusFailed`]); no silent fallback.
@@ -222,6 +282,7 @@ pub fn focus_window(hwnd: HWND) -> anyhow::Result<()> {
     }))
 }
 
+#[cfg(feature = "ctl-input")]
 /// Move/resize and/or set window state (`min` | `max` | `restore`).
 /// State applies first, then geometry (all four of x/y/w/h must be given).
 /// Returns fresh geometry after the operation.
@@ -254,6 +315,7 @@ pub fn geom(
     Ok(info_of(hwnd, 0))
 }
 
+#[cfg(feature = "ctl-input")]
 /// Graceful close: post WM_CLOSE, then VERIFY the window is gone within 1 s.
 /// Still alive -> loud error (no force-kill here; that is run_command territory).
 pub fn close(hwnd: HWND) -> anyhow::Result<()> {

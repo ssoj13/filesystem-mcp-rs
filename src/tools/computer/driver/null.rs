@@ -18,6 +18,7 @@ impl Backend for Null {
     }
 
     /// Nothing to verify: it refuses everything by design.
+    #[cfg(feature = "ctl-desktop")]
     fn verified_on_hardware(&self) -> bool {
         false
     }

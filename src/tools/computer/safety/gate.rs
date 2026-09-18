@@ -1,56 +1,20 @@
-//! Safety gate: TTL arming, ops-per-minute runaway cap, JSONL audit.
+//! The arm gate itself: TTL arming, the ops-per-minute runaway cap, and the JSONL audit trail.
 //!
-//! Every input-injecting and bulk-mutating tool must call [`SafetyGate::check`]
-//! before acting and [`SafetyGate::record`] after each executed action. The gate
-//! lives in the lib (not the MCP layer) so non-MCP consumers inherit it.
+//! Split from [`super`] because the two have different audiences. Every synthetic click and
+//! keystroke passes through here, so this half exists only for `ctl-input` - the domain that
+//! injects input. `CtlError` next door is wider: `ctl-ocr` reads windows without ever arming
+//! anything, and still needs a way to say "no window match".
+//!
+//! Every input-injecting and bulk-mutating tool must call [`SafetyGate::check`] before acting and
+//! [`SafetyGate::record`] after each executed action. The gate lives in the lib (not the MCP
+//! layer) so non-MCP consumers inherit it.
 
 use std::collections::VecDeque;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-/// Domain errors surfaced to MCP as typed codes.
-///
-/// Every message carries its payload: these strings are what an agent reads to
-/// decide what to do next, so "no window match" without the candidates, or an
-/// op-cap error without the back-off, forces blind retries.
-#[derive(Debug, thiserror::Error)]
-pub enum CtlError {
-    /// Input attempted while the gate is not armed. `remaining_ms` is always 0
-    /// while disarmed; the field keeps the wire shape stable for future pre-warn.
-    #[error("not armed (arm first; {remaining_ms} ms left on the current window)")]
-    NotArmed { remaining_ms: u64 },
-
-    /// Runaway protection tripped: too many input ops in the sliding window.
-    #[error("op cap exceeded, retry after {retry_after_ms} ms")]
-    OpCapExceeded { retry_after_ms: u64 },
-
-    /// Window target resolved to zero or several windows.
-    #[error("no window match: {reason}")]
-    NoMatch { reason: String },
-
-    /// Foreground change did not verify within the settle window.
-    ///
-    /// Every backend that can focus a window is expected to raise it; today
-    /// only win32 implements focusing, so a non-Windows build genuinely never
-    /// constructs this variant. Remove the attribute when the second backend
-    /// lands — it is a dated note, not blanket permission.
-    #[cfg_attr(not(windows), allow(dead_code))]
-    #[error("focus failed for window {hwnd}")]
-    FocusFailed { hwnd: u32 },
-}
-
-impl CtlError {
-    /// Stable wire code for MCP error mapping.
-    pub fn code(&self) -> &'static str {
-        match self {
-            CtlError::NotArmed { .. } => "not_armed",
-            CtlError::OpCapExceeded { .. } => "op_cap",
-            CtlError::NoMatch { .. } => "no_match",
-            CtlError::FocusFailed { .. } => "focus_failed",
-        }
-    }
-}
+use super::CtlError;
 
 /// Process-global gate handle (set once from main/test setup, read everywhere).
 static GATE: OnceLock<Arc<SafetyGate>> = OnceLock::new();

@@ -66,6 +66,7 @@ pub struct RectArgs {
     pub h: u32,
 }
 
+#[cfg(feature = "ctl-input")]
 /// Default cursor-square side.
 pub fn default_cursor_size() -> u32 {
     400
@@ -243,6 +244,7 @@ pub fn dhash64(img: &RgbaImage) -> u64 {
     hash
 }
 
+#[cfg(feature = "ctl-input")]
 /// Hamming distance between two dhashes; `<= eps` means "same screen".
 pub fn hash_dist(a: u64, b: u64) -> u32 {
     (a ^ b).count_ones()

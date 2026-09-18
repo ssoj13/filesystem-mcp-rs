@@ -36,10 +36,10 @@ pub enum SubDir {
     #[cfg(feature = "ctl-ocr")]
     Ocrs,
     /// Saved window layouts.
-    #[cfg(feature = "ctl-desktop")]
+    #[cfg(feature = "ctl-input")]
     Layouts,
     /// Computer-control safety state.
-    #[cfg(feature = "ctl-any")]
+    #[cfg(feature = "ctl-input")]
     Safety,
     /// Crash reports, one file per panic under a dated directory (see `install_panic_hook`).
     Panics,
@@ -60,9 +60,9 @@ impl SubDir {
             SubDir::Logs => "logs",
             #[cfg(feature = "ctl-ocr")]
             SubDir::Ocrs => "ocrs",
-            #[cfg(feature = "ctl-desktop")]
+            #[cfg(feature = "ctl-input")]
             SubDir::Layouts => "layouts",
-            #[cfg(feature = "ctl-any")]
+            #[cfg(feature = "ctl-input")]
             SubDir::Safety => "safety",
             SubDir::Panics => "panics",
             SubDir::Stats => "stats",
@@ -718,7 +718,7 @@ pub fn legacy_local_dir() -> Option<PathBuf> {
 ///
 /// Returns the file, not the directory it sits in, so no caller can hand a directory to
 /// [`migrate`], which refuses those.
-#[cfg(feature = "ctl-any")]
+#[cfg(feature = "ctl-input")]
 pub fn legacy_ctl_audit() -> Option<PathBuf> {
     dirs::data_dir().map(|d| d.join("computer-mcp-rs").join("audit.jsonl"))
 }

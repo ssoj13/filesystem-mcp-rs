@@ -31,7 +31,7 @@
 /// Desktop domains only. `ctl-notify` and `ctl-clip-files` reach this module for their own
 /// backends and never touch a window, so they no longer compile the layout, target-resolution
 /// and monitor-placement helpers - nor the arm gate those helpers use.
-#[cfg(feature = "ctl-desktop")]
+#[cfg(feature = "ctl-input")]
 pub mod portable;
 
 #[cfg(windows)]
@@ -39,7 +39,7 @@ pub mod win32;
 
 mod null;
 
-#[cfg(feature = "ctl-desktop")]
+#[cfg(feature = "ctl-input")]
 pub use portable::{layout_load, layout_save, resolve_target, to_monitor};
 
 /// Modifier keys, platform-neutral (wire + macro steps use these names).
@@ -47,6 +47,7 @@ pub use portable::{layout_load, layout_save, resolve_target, to_monitor};
     Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize, schemars::JsonSchema,
 )]
 #[serde(rename_all = "lowercase")]
+#[cfg(feature = "ctl-input")]
 pub enum KeyMod {
     Ctrl,
     Alt,
@@ -55,6 +56,7 @@ pub enum KeyMod {
 }
 
 /// Parse modifier names (loud error on unknown, never silent).
+#[cfg(feature = "ctl-input")]
 pub fn parse_keymods(mods: Option<&[String]>) -> anyhow::Result<Vec<KeyMod>> {
     let Some(names) = mods else {
         return Ok(Vec::new());
@@ -78,6 +80,7 @@ pub fn parse_keymods(mods: Option<&[String]>) -> anyhow::Result<Vec<KeyMod>> {
     Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize, schemars::JsonSchema,
 )]
 #[serde(rename_all = "lowercase")]
+#[cfg(feature = "ctl-input")]
 pub enum Btn {
     Left,
     Right,
@@ -89,6 +92,7 @@ pub enum Btn {
     Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize, schemars::JsonSchema,
 )]
 #[serde(rename_all = "lowercase")]
+#[cfg(feature = "ctl-input")]
 pub enum Ease {
     Linear,
     Out,
@@ -97,6 +101,7 @@ pub enum Ease {
 /// Focus snapshot returned with input actions (hwnd = platform window id:
 /// HWND on Windows, opaque elsewhere).
 #[derive(Debug, Clone, serde::Serialize)]
+#[cfg(feature = "ctl-input")]
 pub struct FocusInfo {
     pub hwnd: u32,
     pub title: String,
@@ -104,6 +109,7 @@ pub struct FocusInfo {
 
 /// Result of typing: which path ran, clipboard outcome, post-type focus.
 #[derive(Debug, serde::Serialize)]
+#[cfg(feature = "ctl-input")]
 pub struct TypeResult {
     pub mode: &'static str,
     pub chars: usize,
@@ -114,6 +120,7 @@ pub struct TypeResult {
 
 /// One visible top-level window (agent-facing shape).
 #[derive(Debug, Clone, serde::Serialize)]
+#[cfg(feature = "ctl-desktop")]
 pub struct WinInfo {
     pub id: u32,
     pub title: String,
@@ -131,11 +138,13 @@ pub struct WinInfo {
 
 /// Window filter (case-insensitive substrings).
 #[derive(Debug, Clone, Default, serde::Deserialize, schemars::JsonSchema)]
+#[cfg(feature = "ctl-desktop")]
 pub struct WinQuery {
     pub title: Option<String>,
     pub exe: Option<String>,
 }
 
+#[cfg(feature = "ctl-desktop")]
 impl WinQuery {
     /// Does a window pass this filter? Lives here so every backend applies the
     /// SAME rule (absent field = no constraint, present = case-insensitive
@@ -153,6 +162,7 @@ impl WinQuery {
 /// How to address a window: {"id":n} | {"title":s} | {"exe":s}.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, schemars::JsonSchema)]
 #[serde(untagged)]
+#[cfg(feature = "ctl-input")]
 pub enum WinTarget {
     Id { id: u32 },
     Title { title: String },
@@ -161,6 +171,7 @@ pub enum WinTarget {
 
 /// Saved window position (layout snapshot entry; portable shape).
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[cfg(feature = "ctl-input")]
 pub struct LayoutEntry {
     pub id: u32,
     pub title: String,
@@ -176,6 +187,7 @@ pub struct LayoutEntry {
 /// on Unix the same binary reports different capabilities under X11, Wayland
 /// or a headless session.
 #[derive(Debug, Clone, Copy, serde::Serialize)]
+#[cfg(feature = "ctl-desktop")]
 pub struct Caps {
     /// Which backend answered: "win32" | "x11" | "wayland" | "mac" | "null".
     pub backend: &'static str,
@@ -206,9 +218,14 @@ pub fn unsupported(what: &str) -> anyhow::Error {
 // Split by domain so a backend implements only what its OS provides. Keep them
 // object-safe: the registry hands out `&dyn`.
 
+// The input and window seams are desktop-only, and so is the gate their methods take: every
+// synthetic click and keystroke passes through it. A build whose only domain is toasts or
+// clipboard file lists has no such seam to implement.
+#[cfg(feature = "ctl-input")]
 use crate::tools::computer::safety::SafetyGate;
 
 /// Mouse + keyboard synthesis and the focus/cursor queries that go with it.
+#[cfg(feature = "ctl-input")]
 pub trait InputDrv: Send + Sync {
     fn move_cursor(&self, x: i32, y: i32) -> anyhow::Result<FocusInfo>;
     fn click(
@@ -241,7 +258,6 @@ pub trait InputDrv: Send + Sync {
         interval_ms: u32,
         expect: Option<u32>,
     ) -> anyhow::Result<TypeResult>;
-    fn cursor_pos(&self) -> anyhow::Result<(i32, i32)>;
     fn focus(&self) -> anyhow::Result<FocusInfo>;
 }
 
@@ -252,9 +268,15 @@ pub trait InputDrv: Send + Sync {
 /// after an action. A third way to ask the same question is a third thing that
 /// can disagree. `resolve_target`, `to_monitor` and the
 /// layout snapshots are NOT here — they are portable logic over these calls.
+#[cfg(feature = "ctl-desktop")]
 pub trait WinDrv: Send + Sync {
+    /// Reading the window list is a query: `ctl-ocr` resolves a window to recognise text in it
+    /// without ever moving one, so this half is as wide as the seam itself.
     fn list(&self, query: Option<WinQuery>) -> anyhow::Result<Vec<WinInfo>>;
+    // Driving a window is `ctl-input`'s business, and only its tools call these.
+    #[cfg(feature = "ctl-input")]
     fn focus_window(&self, id: u32) -> anyhow::Result<()>;
+    #[cfg(feature = "ctl-input")]
     fn geom(
         &self,
         id: u32,
@@ -264,13 +286,18 @@ pub trait WinDrv: Send + Sync {
         h: Option<i32>,
         state: Option<&str>,
     ) -> anyhow::Result<WinInfo>;
+    #[cfg(feature = "ctl-input")]
     fn close(&self, id: u32) -> anyhow::Result<()>;
     /// Does this id still address a live window? (layout restore checks it.)
+    #[cfg(feature = "ctl-input")]
     fn alive(&self, id: u32) -> bool;
 }
 
 /// Screen geometry and pixel probing. Capture itself is portable (xcap).
+#[cfg(feature = "ctl-desktop")]
 pub trait ScreenDrv: Send + Sync {
+    /// Where the pointer is. A query, like the two below - no gate, nothing synthesised.
+    fn cursor_pos(&self) -> anyhow::Result<(i32, i32)>;
     /// Virtual screen metrics (x, y, width, height) in physical pixels;
     /// the origin may be negative on multi-monitor setups.
     fn virtual_screen(&self) -> anyhow::Result<(i32, i32, i32, i32)>;
@@ -278,14 +305,21 @@ pub trait ScreenDrv: Send + Sync {
 }
 
 /// Clipboard file lists plus the change counter `wait` polls.
+#[cfg(any(feature = "ctl-input", feature = "ctl-clip-files"))]
 pub trait ClipDrv: Send + Sync {
+    // The file-list half belongs to `ctl-clip-files`; `ctl-input` reaches this trait only for
+    // `seq`, which `wait` polls to notice the clipboard changing.
+    #[cfg(feature = "ctl-clip-files")]
     fn get_files(&self) -> anyhow::Result<Vec<String>>;
+    #[cfg(feature = "ctl-clip-files")]
     fn set_files(&self, files: &[String]) -> anyhow::Result<()>;
-    /// Monotonic clipboard sequence number, for change detection.
+    /// Monotonic clipboard sequence number, for change detection. Polled by `wait`.
+    #[cfg(feature = "ctl-input")]
     fn seq(&self) -> anyhow::Result<u32>;
 }
 
 /// Desktop notifications ("needs a human" signal).
+#[cfg(feature = "ctl-notify")]
 pub trait NotifyDrv: Send + Sync {
     fn notify(&self, title: Option<&str>, msg: &str) -> anyhow::Result<()>;
 }
@@ -294,27 +328,37 @@ pub trait NotifyDrv: Send + Sync {
 pub trait Backend: Send + Sync {
     fn name(&self) -> &'static str;
     /// False until someone has actually run this backend on real hardware.
+    ///
+    /// Read only by [`caps`], the `ctl_caps` tool's answer, which is a desktop-domain tool.
+    #[cfg(feature = "ctl-desktop")]
     fn verified_on_hardware(&self) -> bool;
+    #[cfg(feature = "ctl-input")]
     fn input(&self) -> Option<&dyn InputDrv> {
         None
     }
+    #[cfg(feature = "ctl-desktop")]
     fn win(&self) -> Option<&dyn WinDrv> {
         None
     }
+    #[cfg(feature = "ctl-desktop")]
     fn screen(&self) -> Option<&dyn ScreenDrv> {
         None
     }
+    #[cfg(any(feature = "ctl-input", feature = "ctl-clip-files"))]
     fn clip(&self) -> Option<&dyn ClipDrv> {
         None
     }
+    #[cfg(feature = "ctl-notify")]
     fn notify(&self) -> Option<&dyn NotifyDrv> {
         None
     }
     /// UI Automation trees. Windows-only for now (AX / AT-SPI would slot here).
+    #[cfg(feature = "ctl-uia")]
     fn has_uia(&self) -> bool {
         false
     }
     /// WinRT OCR. Windows-only; the portable `ocrs` engine is always available.
+    #[cfg(feature = "ctl-ocr")]
     fn has_ocr_media(&self) -> bool {
         false
     }
@@ -354,17 +398,39 @@ fn select(pinned: Option<&str>) -> &'static dyn Backend {
 }
 
 /// Capability map of the live backend (the `ctl_caps` tool).
+#[cfg(feature = "ctl-desktop")]
 pub fn caps() -> Caps {
     let b = backend();
     Caps {
         backend: b.name(),
         verified_on_hardware: b.verified_on_hardware(),
+        // A seam the build does not carry is reported absent - the same answer the `null` backend
+        // gives, and the honest one. Input is `ctl-input`; the window seam is wider, because
+        // `ctl-ocr` resolves windows to read them without ever driving one.
+        #[cfg(feature = "ctl-input")]
         input: b.input().is_some(),
+        #[cfg(not(feature = "ctl-input"))]
+        input: false,
+        #[cfg(feature = "ctl-desktop")]
         window: b.win().is_some(),
+        #[cfg(not(feature = "ctl-desktop"))]
+        window: false,
+        #[cfg(feature = "ctl-uia")]
         uia: b.has_uia(),
+        #[cfg(not(feature = "ctl-uia"))]
+        uia: false,
+        #[cfg(feature = "ctl-ocr")]
         ocr_media: b.has_ocr_media(),
+        #[cfg(not(feature = "ctl-ocr"))]
+        ocr_media: false,
+        #[cfg(feature = "ctl-clip-files")]
         clip_files: b.clip().is_some(),
+        #[cfg(not(feature = "ctl-clip-files"))]
+        clip_files: false,
+        #[cfg(feature = "ctl-notify")]
         notify: b.notify().is_some(),
+        #[cfg(not(feature = "ctl-notify"))]
+        notify: false,
         capture: true,
         ocr_ocrs: true,
     }
@@ -375,34 +441,40 @@ pub fn caps() -> Caps {
 // Call sites keep using `driver::click(...)`; each function resolves the domain
 // and turns an absent one into a loud, specific error.
 
+#[cfg(feature = "ctl-input")]
 fn input() -> anyhow::Result<&'static dyn InputDrv> {
     backend()
         .input()
         .ok_or_else(|| unsupported("input injection"))
 }
 
+#[cfg(feature = "ctl-desktop")]
 fn win() -> anyhow::Result<&'static dyn WinDrv> {
     backend()
         .win()
         .ok_or_else(|| unsupported("window management"))
 }
 
+#[cfg(feature = "ctl-desktop")]
 fn screen() -> anyhow::Result<&'static dyn ScreenDrv> {
     backend()
         .screen()
         .ok_or_else(|| unsupported("screen geometry"))
 }
 
+#[cfg(any(feature = "ctl-input", feature = "ctl-clip-files"))]
 fn clip() -> anyhow::Result<&'static dyn ClipDrv> {
     backend()
         .clip()
         .ok_or_else(|| unsupported("clipboard file lists"))
 }
 
+#[cfg(feature = "ctl-input")]
 pub fn move_cursor(x: i32, y: i32) -> anyhow::Result<FocusInfo> {
     input()?.move_cursor(x, y)
 }
 
+#[cfg(feature = "ctl-input")]
 pub fn click(
     gate: &SafetyGate,
     x: Option<i32>,
@@ -414,6 +486,7 @@ pub fn click(
     input()?.click(gate, x, y, btn, clicks, mods)
 }
 
+#[cfg(feature = "ctl-input")]
 pub fn drag(
     gate: &SafetyGate,
     from: (i32, i32),
@@ -426,14 +499,17 @@ pub fn drag(
     input()?.drag(gate, from, to, btn, duration_ms, ease, hold_ms)
 }
 
+#[cfg(feature = "ctl-input")]
 pub fn scroll(gate: &SafetyGate, dy: i32, dx: i32) -> anyhow::Result<FocusInfo> {
     input()?.scroll(gate, dy, dx)
 }
 
+#[cfg(feature = "ctl-input")]
 pub fn key_tap(gate: &SafetyGate, combo: &str, hold_ms: u32) -> anyhow::Result<FocusInfo> {
     input()?.key_tap(gate, combo, hold_ms)
 }
 
+#[cfg(feature = "ctl-input")]
 pub fn type_text(
     gate: &SafetyGate,
     text: &str,
@@ -444,22 +520,27 @@ pub fn type_text(
     input()?.type_text(gate, text, paste, interval_ms, expect)
 }
 
+#[cfg(feature = "ctl-desktop")]
 pub fn cursor_pos() -> anyhow::Result<(i32, i32)> {
-    input()?.cursor_pos()
+    screen()?.cursor_pos()
 }
 
+#[cfg(feature = "ctl-input")]
 pub fn focus() -> anyhow::Result<FocusInfo> {
     input()?.focus()
 }
 
+#[cfg(feature = "ctl-desktop")]
 pub fn list_windows(query: Option<WinQuery>) -> anyhow::Result<Vec<WinInfo>> {
     win()?.list(query)
 }
 
+#[cfg(feature = "ctl-input")]
 pub fn focus_window(id: u32) -> anyhow::Result<()> {
     win()?.focus_window(id)
 }
 
+#[cfg(feature = "ctl-input")]
 pub fn geom(
     id: u32,
     x: Option<i32>,
@@ -471,27 +552,33 @@ pub fn geom(
     win()?.geom(id, x, y, w, h, state)
 }
 
+#[cfg(feature = "ctl-input")]
 pub fn close_window(id: u32) -> anyhow::Result<()> {
     win()?.close(id)
 }
 
+#[cfg(feature = "ctl-desktop")]
 pub fn virtual_screen() -> anyhow::Result<(i32, i32, i32, i32)> {
     screen()?.virtual_screen()
 }
 
+#[cfg(feature = "ctl-desktop")]
 pub fn color_at(x: i32, y: i32) -> anyhow::Result<(u8, u8, u8)> {
     screen()?.color_at(x, y)
 }
 
+#[cfg(feature = "ctl-clip-files")]
 pub fn get_files() -> anyhow::Result<Vec<String>> {
     clip()?.get_files()
 }
 
+#[cfg(feature = "ctl-clip-files")]
 pub fn set_files(files: &[String]) -> anyhow::Result<()> {
     clip()?.set_files(files)
 }
 
 /// Clipboard change counter used by `wait {clipboard:true}`.
+#[cfg(feature = "ctl-input")]
 pub fn clipboard_seq() -> anyhow::Result<u32> {
     clip()?.seq()
 }
@@ -515,6 +602,7 @@ pub fn ocr_media(
     }
 }
 
+#[cfg(feature = "ctl-notify")]
 pub fn notify(title: Option<&str>, msg: &str) -> anyhow::Result<()> {
     backend()
         .notify()
@@ -532,7 +620,8 @@ mod seam_guard {
         ("capture.rs", include_str!("../capture.rs")),
         ("find.rs", include_str!("../find.rs")),
         ("annotate.rs", include_str!("../annotate.rs")),
-        ("safety.rs", include_str!("../safety.rs")),
+        ("safety/mod.rs", include_str!("../safety/mod.rs")),
+        ("safety/gate.rs", include_str!("../safety/gate.rs")),
         ("steps.rs", include_str!("../steps.rs")),
         ("wait.rs", include_str!("../wait.rs")),
         ("ocrs_local.rs", include_str!("../ocrs_local.rs")),

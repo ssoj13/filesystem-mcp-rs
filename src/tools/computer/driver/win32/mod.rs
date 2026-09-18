@@ -11,15 +11,26 @@
 
 // The input and window halves of this backend, and the gate they pass through, exist only for a
 // domain that acts on the desktop; the notify and clipboard impls below need none of them.
-#[cfg(feature = "ctl-desktop")]
+#[cfg(feature = "ctl-input")]
 use crate::tools::computer::safety::SafetyGate;
 
 // `InputDrv` and `WinDrv` name the return types of `Backend::input`/`Backend::win`, which every
-// build implements - they answer `None` where the domain is off - so they stay ungated. The rest
-// appear only in the input and window impls below.
-use super::{Backend, ClipDrv, InputDrv, NotifyDrv, ScreenDrv, WinDrv};
+// domain is off - so each import, and each impl below, carries the gate of the domain it serves.
+use super::Backend;
+#[cfg(any(feature = "ctl-input", feature = "ctl-clip-files"))]
+use super::ClipDrv;
+#[cfg(feature = "ctl-input")]
+use super::InputDrv;
+#[cfg(feature = "ctl-notify")]
+use super::NotifyDrv;
 #[cfg(feature = "ctl-desktop")]
-use super::{Btn, Ease, FocusInfo, KeyMod, TypeResult, WinInfo, WinQuery};
+use super::ScreenDrv;
+#[cfg(feature = "ctl-desktop")]
+use super::WinDrv;
+#[cfg(feature = "ctl-input")]
+use super::{Btn, Ease, FocusInfo, KeyMod, TypeResult};
+#[cfg(feature = "ctl-desktop")]
+use super::{WinInfo, WinQuery};
 
 #[cfg(feature = "ctl-input")]
 pub mod input;
@@ -40,6 +51,7 @@ pub struct Win32;
 
 /// Window ids cross the seam as `u32`; on Windows that is the HWND value.
 #[cfg(feature = "ctl-desktop")]
+#[cfg(feature = "ctl-input")]
 pub(crate) fn hwnd(id: u32) -> windows::Win32::Foundation::HWND {
     windows::Win32::Foundation::HWND(id as usize as *mut core::ffi::c_void)
 }
@@ -50,10 +62,12 @@ impl Backend for Win32 {
     }
 
     /// The only backend exercised on real hardware so far (see driver/CLAUDE.md).
+    #[cfg(feature = "ctl-desktop")]
     fn verified_on_hardware(&self) -> bool {
         true
     }
 
+    #[cfg(feature = "ctl-input")]
     fn input(&self) -> Option<&dyn InputDrv> {
         #[cfg(feature = "ctl-input")]
         {
@@ -65,6 +79,7 @@ impl Backend for Win32 {
         }
     }
 
+    #[cfg(feature = "ctl-desktop")]
     fn win(&self) -> Option<&dyn WinDrv> {
         #[cfg(feature = "ctl-desktop")]
         {
@@ -76,6 +91,7 @@ impl Backend for Win32 {
         }
     }
 
+    #[cfg(feature = "ctl-desktop")]
     fn screen(&self) -> Option<&dyn ScreenDrv> {
         #[cfg(feature = "ctl-input")]
         {
@@ -89,6 +105,7 @@ impl Backend for Win32 {
 
     /// Clipboard is one domain but two features: `wait {clipboard:true}` needs
     /// only the change counter (`ctl-input`), file lists need `ctl-clip-files`.
+    #[cfg(any(feature = "ctl-input", feature = "ctl-clip-files"))]
     fn clip(&self) -> Option<&dyn ClipDrv> {
         #[cfg(any(feature = "ctl-input", feature = "ctl-clip-files"))]
         {
@@ -100,6 +117,7 @@ impl Backend for Win32 {
         }
     }
 
+    #[cfg(feature = "ctl-notify")]
     fn notify(&self) -> Option<&dyn NotifyDrv> {
         #[cfg(feature = "ctl-notify")]
         {
@@ -111,10 +129,12 @@ impl Backend for Win32 {
         }
     }
 
+    #[cfg(feature = "ctl-uia")]
     fn has_uia(&self) -> bool {
         cfg!(feature = "ctl-uia")
     }
 
+    #[cfg(feature = "ctl-ocr")]
     fn has_ocr_media(&self) -> bool {
         cfg!(feature = "ctl-ocr")
     }
@@ -171,10 +191,6 @@ impl InputDrv for Win32 {
         input::type_text(gate, text, paste, interval_ms, expect)
     }
 
-    fn cursor_pos(&self) -> anyhow::Result<(i32, i32)> {
-        input::cursor_pos().ok_or_else(|| anyhow::anyhow!("GetCursorPos failed"))
-    }
-
     fn focus(&self) -> anyhow::Result<FocusInfo> {
         Ok(input::focus())
     }
@@ -199,10 +215,12 @@ impl WinDrv for Win32 {
         win::list_windows(query)
     }
 
+    #[cfg(feature = "ctl-input")]
     fn focus_window(&self, id: u32) -> anyhow::Result<()> {
         win::focus_window(hwnd(id))
     }
 
+    #[cfg(feature = "ctl-input")]
     fn geom(
         &self,
         id: u32,
@@ -215,29 +233,38 @@ impl WinDrv for Win32 {
         win::geom(hwnd(id), x, y, w, h, state)
     }
 
+    #[cfg(feature = "ctl-input")]
     fn close(&self, id: u32) -> anyhow::Result<()> {
         win::close(hwnd(id))
     }
 
+    #[cfg(feature = "ctl-input")]
     fn alive(&self, id: u32) -> bool {
         // SAFETY: plain window query (Option<HWND> per windows 0.62).
         unsafe { windows::Win32::UI::WindowsAndMessaging::IsWindow(Some(hwnd(id))) }.as_bool()
     }
 }
 
-#[cfg(feature = "ctl-input")]
+// Both methods reach `win`, the screen half of this backend, so the impl follows that module
+// rather than the input one - which is what lets an OCR-only build capture a monitor.
+#[cfg(feature = "ctl-desktop")]
 impl ScreenDrv for Win32 {
+    fn cursor_pos(&self) -> anyhow::Result<(i32, i32)> {
+        win::cursor_pos().ok_or_else(|| anyhow::anyhow!("GetCursorPos failed"))
+    }
+
     fn virtual_screen(&self) -> anyhow::Result<(i32, i32, i32, i32)> {
         Ok(win::virtual_screen())
     }
 
     fn color_at(&self, x: i32, y: i32) -> anyhow::Result<(u8, u8, u8)> {
-        input::color_at(x, y)
+        win::color_at(x, y)
     }
 }
 
 #[cfg(any(feature = "ctl-input", feature = "ctl-clip-files"))]
 impl ClipDrv for Win32 {
+    #[cfg(feature = "ctl-clip-files")]
     fn get_files(&self) -> anyhow::Result<Vec<String>> {
         #[cfg(feature = "ctl-clip-files")]
         {
@@ -251,6 +278,7 @@ impl ClipDrv for Win32 {
         }
     }
 
+    #[cfg(feature = "ctl-clip-files")]
     fn set_files(&self, files: &[String]) -> anyhow::Result<()> {
         #[cfg(feature = "ctl-clip-files")]
         {
@@ -265,6 +293,7 @@ impl ClipDrv for Win32 {
         }
     }
 
+    #[cfg(feature = "ctl-input")]
     fn seq(&self) -> anyhow::Result<u32> {
         // SAFETY: parameterless counter query; never fails, 0 means "no access".
         Ok(unsafe { windows::Win32::System::DataExchange::GetClipboardSequenceNumber() })
