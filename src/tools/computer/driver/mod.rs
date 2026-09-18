@@ -431,8 +431,16 @@ pub fn caps() -> Caps {
         notify: b.notify().is_some(),
         #[cfg(not(feature = "ctl-notify"))]
         notify: false,
+        // `capture` is unconditional here because this map is `ctl-desktop`, and both desktop
+        // domains bring `screenshot-tools` with them. The portable OCR engine does not follow:
+        // `ocrs`/`rten` and `computer::ocrs_local` arrive with `ctl-ocr` alone, and a build
+        // without it serves no OCR tool at all - which is precisely what a client reads this
+        // field to find out.
         capture: true,
+        #[cfg(feature = "ctl-ocr")]
         ocr_ocrs: true,
+        #[cfg(not(feature = "ctl-ocr"))]
+        ocr_ocrs: false,
     }
 }
 
@@ -620,8 +628,7 @@ mod seam_guard {
         ("capture.rs", include_str!("../capture.rs")),
         ("find.rs", include_str!("../find.rs")),
         ("annotate.rs", include_str!("../annotate.rs")),
-        ("safety/mod.rs", include_str!("../safety/mod.rs")),
-        ("safety/gate.rs", include_str!("../safety/gate.rs")),
+        ("safety.rs", include_str!("../safety.rs")),
         ("steps.rs", include_str!("../steps.rs")),
         ("wait.rs", include_str!("../wait.rs")),
         ("ocrs_local.rs", include_str!("../ocrs_local.rs")),

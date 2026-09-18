@@ -144,12 +144,18 @@ fn ctl_vars() -> Vec<EnvVar> {
             default: "240",
             help: "Runaway cap on executed input ops per minute.",
         },
-        EnvVar {
-            key: "FS_MCP_CTL_BACKEND",
-            default: "",
-            help: "Pin the desktop backend. Blank = auto-detect; `null` disables input (testing).",
-        },
     ]);
+    // Registered as widely as it is read. `driver::backend()` consults it in every control build,
+    // including one whose only domain is OCR, notifications or clipboard file lists - so listing it
+    // only for the input domains left those builds steered by a variable that `--list-env` and the
+    // installed agent context file never mentioned. The registry's own guard cannot catch this: it
+    // checks that every registered key is read, not that every key read is registered.
+    #[cfg(feature = "ctl-any")]
+    v.push(EnvVar {
+        key: "FS_MCP_CTL_BACKEND",
+        default: "",
+        help: "Pin the desktop backend. Blank = auto-detect; `null` disables input (testing).",
+    });
     #[cfg(feature = "ctl-ocr")]
     v.push(EnvVar {
         key: "FS_MCP_CTL_OCRS_MODELS_DIR",

@@ -22,11 +22,8 @@
 // reach the machine only through `driver`, so they compile on every platform
 // and simply surface the backend's `unsupported` errors where a domain is
 // missing. (The OS-specific code lives under `driver/<backend>/`.)
-// Desktop domains only. The whole module is about acting on a desktop: the arm gate, its audit
-// trail, and a `CtlError` whose four variants are "not armed", "op cap exceeded", "no window
-// match" and "focus failed". A toast or a clipboard file list can produce none of them, so a
-// build without a desktop domain is not missing an error it could otherwise have raised - which
-// is why gating this does not make the wire shape depend on the feature set.
+// The arm gate and the error a refused action carries. `ctl-input`: every variant of
+// `CtlError` describes an input-domain refusal, and only input tools arm anything.
 #[cfg(feature = "ctl-input")]
 pub mod safety;
 #[cfg(feature = "ctl-input")]

@@ -7918,7 +7918,36 @@ fn print_features() {
     #[cfg(not(feature = "screenshot-tools"))]
     println!("  - screenshot-tools");
 
+    // The five control domains, listed individually rather than as the `computer-tools` umbrella:
+    // each one builds on its own, and which of them is present is exactly what decides whether
+    // `arm`, `ui`, `ocr`, `notify` or `clip_files_*` appear in `tools/list`.
+    #[cfg(feature = "ctl-input")]
+    println!("  + ctl-input (mouse, keyboard, windows; arm gate)");
+    #[cfg(not(feature = "ctl-input"))]
+    println!("  - ctl-input");
+
+    #[cfg(feature = "ctl-uia")]
+    println!("  + ctl-uia (UI Automation trees)");
+    #[cfg(not(feature = "ctl-uia"))]
+    println!("  - ctl-uia");
+
+    #[cfg(feature = "ctl-ocr")]
+    println!("  + ctl-ocr (WinRT + ocrs text recognition)");
+    #[cfg(not(feature = "ctl-ocr"))]
+    println!("  - ctl-ocr");
+
+    #[cfg(feature = "ctl-notify")]
+    println!("  + ctl-notify (desktop notifications)");
+    #[cfg(not(feature = "ctl-notify"))]
+    println!("  - ctl-notify");
+
+    #[cfg(feature = "ctl-clip-files")]
+    println!("  + ctl-clip-files (clipboard file lists)");
+    #[cfg(not(feature = "ctl-clip-files"))]
+    println!("  - ctl-clip-files");
+
     println!("  + thinking-tools (always on)");
+    println!("  + stats (always on; FS_MCP_STATS=off switches it off at runtime)");
     println!("  + memory-v2-tools (always on)");
     println!("  + xlsx-tools (always on)");
     println!("  + docx-tools (always on)");

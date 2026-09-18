@@ -50,7 +50,6 @@ pub mod uia;
 pub struct Win32;
 
 /// Window ids cross the seam as `u32`; on Windows that is the HWND value.
-#[cfg(feature = "ctl-desktop")]
 #[cfg(feature = "ctl-input")]
 pub(crate) fn hwnd(id: u32) -> windows::Win32::Foundation::HWND {
     windows::Win32::Foundation::HWND(id as usize as *mut core::ffi::c_void)
@@ -69,52 +68,29 @@ impl Backend for Win32 {
 
     #[cfg(feature = "ctl-input")]
     fn input(&self) -> Option<&dyn InputDrv> {
-        #[cfg(feature = "ctl-input")]
-        {
-            Some(self)
-        }
-        #[cfg(not(feature = "ctl-input"))]
-        {
-            None
-        }
+        Some(self)
     }
 
     #[cfg(feature = "ctl-desktop")]
     fn win(&self) -> Option<&dyn WinDrv> {
-        #[cfg(feature = "ctl-desktop")]
-        {
-            Some(self)
-        }
-        #[cfg(not(feature = "ctl-desktop"))]
-        {
-            None
-        }
+        Some(self)
     }
 
+    /// The body must carry the same gate as the attribute. It did not: the attribute said
+    /// `ctl-desktop` while the body still answered `Some` only under `ctl-input`, so an OCR-only
+    /// build compiled, reported `capture: true`, and then failed every monitor capture and every
+    /// pixel read with "unsupported". An unused impl warns about nothing, which is why the build
+    /// matrix could not see it.
     #[cfg(feature = "ctl-desktop")]
     fn screen(&self) -> Option<&dyn ScreenDrv> {
-        #[cfg(feature = "ctl-input")]
-        {
-            Some(self)
-        }
-        #[cfg(not(feature = "ctl-input"))]
-        {
-            None
-        }
+        Some(self)
     }
 
     /// Clipboard is one domain but two features: `wait {clipboard:true}` needs
     /// only the change counter (`ctl-input`), file lists need `ctl-clip-files`.
     #[cfg(any(feature = "ctl-input", feature = "ctl-clip-files"))]
     fn clip(&self) -> Option<&dyn ClipDrv> {
-        #[cfg(any(feature = "ctl-input", feature = "ctl-clip-files"))]
-        {
-            Some(self)
-        }
-        #[cfg(not(any(feature = "ctl-input", feature = "ctl-clip-files")))]
-        {
-            None
-        }
+        Some(self)
     }
 
     #[cfg(feature = "ctl-notify")]
