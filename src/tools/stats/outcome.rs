@@ -234,21 +234,27 @@ mod tests {
         );
     }
 
-    /// The resolved version of `name` in a `Cargo.lock`: the `version` line that follows that
-    /// package's `name` line.
+    /// The resolved version of `name` in a `Cargo.lock`: the `version` line inside that
+    /// package's own `[[package]]` block.
     ///
-    /// Split out as a pure function so the parse can be checked against a literal lock fragment,
+    /// The scan stops at the next `[[package]]` header, so a block that carried no `version`
+    /// line - or that ordered `version` before `name`, which cargo does not emit - yields `None`
+    /// rather than the *neighbouring* package's version. Failing is recoverable; a confidently
+    /// wrong version would defeat the tripwire it feeds.
+    ///
+    /// Split out as a pure function so the parse can be checked against literal lock fragments,
     /// including the `rmcp-macros` entry that a looser match would seize on first.
     fn resolved_version(lock: &str, name: &str) -> Option<String> {
         let needle = format!("name = \"{name}\"");
         let mut rest = lock.lines().skip_while(|line| line.trim() != needle);
         rest.next()?;
-        rest.find_map(|line| {
-            line.trim()
-                .strip_prefix("version = \"")
-                .and_then(|value| value.strip_suffix('"'))
-                .map(str::to_owned)
-        })
+        rest.take_while(|line| line.trim() != "[[package]]")
+            .find_map(|line| {
+                line.trim()
+                    .strip_prefix("version = \"")
+                    .and_then(|value| value.strip_suffix('"'))
+                    .map(str::to_owned)
+            })
     }
 
     /// The parse takes the package asked for, not one whose name merely begins the same way.
@@ -264,6 +270,26 @@ mod tests {
             Some("9.9.9")
         );
         assert_eq!(resolved_version(lock, "absent"), None);
+    }
+
+    /// The scan stops at the next package, so a version it cannot find is `None`, never the
+    /// neighbour's.
+    ///
+    /// The fragment is fabricated - cargo always writes `version` directly after `name` - but a
+    /// parser that answers the wrong question confidently is the one failure mode the tripwire
+    /// cannot survive, so the boundary is pinned rather than assumed.
+    #[test]
+    fn the_lock_parse_stops_at_the_package_boundary() {
+        let lock = concat!(
+            "[[package]]\nname = \"rmcp\"\nsource = \"registry+https://example\"\n\n",
+            "[[package]]\nname = \"serde\"\nversion = \"1.0.0\"\n"
+        );
+        assert_eq!(
+            resolved_version(lock, "rmcp"),
+            None,
+            "a block with no version must fail, not report the next package's"
+        );
+        assert_eq!(resolved_version(lock, "serde").as_deref(), Some("1.0.0"));
     }
 
     /// A protocol code this build does not map is still a failure, never a success.
