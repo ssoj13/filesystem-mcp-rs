@@ -31,6 +31,7 @@
     )
 )]
 
+pub mod collect;
 pub mod db;
 pub mod outcome;
 

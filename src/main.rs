@@ -3,7 +3,7 @@ use std::env;
 use std::fs::Metadata;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::time::{Duration, SystemTime};
+use std::time::{Duration, Instant, SystemTime};
 
 use async_recursion::async_recursion;
 use clap::Parser;
@@ -220,6 +220,13 @@ struct FileSystemServer {
     llm_server: Option<tools::llm::LlmMcpServer>,
     session_footer: bool,
     content_plane: ContentPlane,
+    /// Tool-call counters, or `None` when `FS_MCP_STATS=off`.
+    ///
+    /// An `Option` rather than an always-present collector with a disabled flag inside it,
+    /// because that is what makes "off" cost the hot path one branch: with `None` there is no
+    /// mutex to take, no name to intern and no map to grow. Shared with the flush task, hence
+    /// the `Arc` - the server is cloned per connection.
+    stats: Option<Arc<tools::stats::collect::Collector>>,
 }
 
 impl FileSystemServer {
@@ -261,9 +268,18 @@ impl FileSystemServer {
     /// reaches this message now is a genuine spool failure: the root resolved, but the spool
     /// directory beneath it could not be created.
     fn new(allowed: AllowedDirs) -> std::io::Result<Self> {
+        let tool_router = Self::build_tool_router();
+        // Interned from the router that actually serves this build, so a name the router will
+        // reject cannot become a map key of its own. Built here rather than lazily because the
+        // list is fixed for the life of the process and the hot path must never construct it.
+        let stats = tools::stats::enabled().then(|| {
+            Arc::new(tools::stats::collect::Collector::new(
+                tool_router.list_all().iter().map(|t| t.name.as_ref()),
+            ))
+        });
         Ok(Self {
             allowed,
-            tool_router: Self::build_tool_router(),
+            tool_router,
             allow_symlink_escape: false,
             process_manager: process::ProcessManager::new(),
             #[cfg(feature = "http-tools")]
@@ -304,6 +320,7 @@ impl FileSystemServer {
                     format!("Cannot create the content-plane blob spool: {e}"),
                 )
             })?,
+            stats,
         })
     }
 
@@ -7275,8 +7292,44 @@ impl ServerHandler for FileSystemServer {
         request: CallToolRequestParams,
         context: RequestContext<RoleServer>,
     ) -> Result<CallToolResponse, McpError> {
+        // The name is interned *before* dispatch, where the request still owns it, and the
+        // result recorded after: an `Arc` clone of a name the router already holds, so the hot
+        // path allocates nothing. With statistics off this `map` is the only work the seam does.
+        let measured = self
+            .stats
+            .as_ref()
+            .map(|stats| (stats.intern(&request.name), Instant::now()));
+
         let ctx = rmcp::handler::server::tool::ToolCallContext::new(self, request, context);
-        let response = self.tool_router.call(ctx).await?;
+        // Deliberately not `?`: the `Err` arm is half of what `classify` scores, and propagating
+        // here would leave every rejected call and every tool that broke below the handler
+        // uncounted - which is much of what an operator opens this table to find.
+        let result = self.tool_router.call(ctx).await;
+
+        if let (Some(stats), Some((tool, started))) = (self.stats.as_ref(), measured) {
+            // Measured against the router's own answer, before the session footer is stamped on
+            // to it. The footer is a constant per call, so counting it would inflate the tools
+            // that return least by the largest relative amount, for a reason that has nothing to
+            // do with the tool. Task 2 established that stamping does not touch `is_error`, so
+            // classifying on either side of it is equivalent; this side also keeps the seam
+            // independent of whether the footer is switched on at all.
+            let bytes_out = match &result {
+                Ok(CallToolResponse::Complete(complete)) => {
+                    tools::stats::collect::bytes_of(&complete.content)
+                }
+                _ => 0,
+            };
+            stats.record_interned(
+                tool,
+                tools::stats::outcome::classify(&result),
+                // A single call would have to run for 584 years to saturate this.
+                started.elapsed().as_nanos().min(u128::from(u64::MAX)) as u64,
+                bytes_out,
+                SystemTime::now(),
+            );
+        }
+
+        let response = result?;
         Ok(if self.session_footer {
             match response {
                 CallToolResponse::Complete(result) => {
