@@ -78,6 +78,18 @@ const JOURNAL_SIZE_LIMIT: i64 = 16 * 1024 * 1024;
 /// (`<YYYY-MM-DD>/fsmcp-<pid>-<instance>.log`) or a session row cannot name the log file it
 /// describes. `tool_agg` needs no such correction: its `bucket` already scopes the key in time.
 ///
+/// **Anything that writes a `sessions` row must be an upsert on that exact conflict target, and
+/// must not overwrite a descriptive column with what it does not know.** The flush task's
+/// heartbeat ([`super::flush`]) writes `last_seen` every minute from the moment the process
+/// starts, and it *creates* the row if it is missing - deliberately, so that liveness does not
+/// depend on the startup write having succeeded, since that failure is logged and swallowed. So
+/// by the time anything else goes to record `transport`, `version`, the client name or `cwd`, a
+/// row under that key may already exist, carrying nothing but the identity and a `last_seen`. A
+/// plain `INSERT` there fails on the primary key; an upsert that assigns every column
+/// unconditionally would overwrite a live `last_seen` with a stale one. The heartbeat is written
+/// the same way from the other side: its conflict clause touches `last_seen` and nothing else, so
+/// it can never blank out what a fuller write recorded.
+///
 /// `tool_daily`'s key is `(day, tool)` with no `instance_id`, which makes it the one table whose
 /// rows every process shares. Its counters are additive like every other, so two sweeps
 /// compacting the same day would double it - permanently, because compaction deletes the detail

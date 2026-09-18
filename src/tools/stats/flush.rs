@@ -392,10 +392,73 @@ mod tests {
         assert_eq!(agg_rows(&conn), 1, "one bucket, one tool, one row");
     }
 
+    /// A failure **after** the upserts have run leaves nothing behind, so the retry does not
+    /// double the stored counts.
+    ///
+    /// This is the test that pins the single transaction, and nothing else does. Every other
+    /// failing case in this module fails on the *first* statement - a read-only connection cannot
+    /// even begin - and with autocommitted upserts that first statement writes nothing either, so
+    /// those tests cannot tell a transaction from no transaction at all. Replace the
+    /// `BEGIN IMMEDIATE` in [`flush_once`] with a loop of autocommitted upserts and they all stay
+    /// green; only this one turns red.
+    ///
+    /// The shape is forced by what it has to reproduce: the failure must come **last**, once
+    /// every row is already written, which is what a `BEFORE INSERT` trigger on `sessions` buys -
+    /// the heartbeat is the final statement of the flush. Without the transaction, those rows are
+    /// durable, `merge_back` hands them back in full, and the next flush adds them a second time.
+    /// `tool_agg` is then permanently inflated with no error anywhere to explain it - the one
+    /// failure mode of this design that is silent, which is exactly why it gets a test of its own.
+    ///
+    /// Two tools rather than one, so that "rows 1..k already committed" is what is being measured
+    /// and not just a single lucky statement.
+    #[test]
+    fn a_failure_after_the_upserts_does_not_double_count() {
+        let dir = tempfile::TempDir::new().expect("tempdir");
+        let mut conn = db::open(&dir.path().join("stats.db")).expect("open");
+        let c = collector();
+        let id = identity();
+
+        c.record("read_text_file", Outcome::Ok, 500, 7, at(6_000));
+        c.record("grep_files", Outcome::Ok, 300, 5, at(6_000));
+
+        // Fails the heartbeat, which `flush_once` issues after every upsert - so the abort lands
+        // with the whole delta already written, which is the only state that can double-count.
+        conn.execute_batch(
+            "CREATE TRIGGER boom BEFORE INSERT ON sessions BEGIN SELECT raise(ABORT, 'no'); END",
+        )
+        .expect("arm the trigger");
+
+        let delta = c.take_delta();
+        flush_once(&mut conn, &id, &delta, at(6_001))
+            .expect_err("the heartbeat must abort the flush");
+        c.merge_back(delta);
+
+        conn.execute_batch("DROP TRIGGER boom").expect("disarm");
+        flush_once(&mut conn, &id, &c.take_delta(), at(6_002)).expect("the retry");
+
+        assert_eq!(
+            stored(&conn, "read_text_file").ok,
+            1,
+            "the failed flush wrote nothing, so the retry must store exactly one call"
+        );
+        assert_eq!(
+            stored(&conn, "grep_files").ok,
+            1,
+            "and the same for a row that was written before the one that failed"
+        );
+        assert_eq!(
+            stored(&conn, "read_text_file").content_bytes,
+            7,
+            "every counter of a rolled-back row, not only the call count"
+        );
+    }
+
     /// A flush that fails writes nothing and leaves the caller holding every counter.
     ///
     /// A read-only connection is the cheapest honest failure: the transaction cannot take the
-    /// write lock. What is asserted is both halves of the contract - the database is untouched,
+    /// write lock. It fails on the *first* statement, so - unlike
+    /// [`a_failure_after_the_upserts_does_not_double_count`] - it says nothing about whether the
+    /// write was one transaction. What is asserted is both halves of the contract - the database is untouched,
     /// and the delta handed back through `merge_back` restores the collector exactly.
     #[test]
     fn a_failing_flush_writes_nothing_and_the_delta_survives() {
