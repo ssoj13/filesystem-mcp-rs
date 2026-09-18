@@ -26,6 +26,12 @@
 //!   `to_monitor`, `layout_save`, `layout_load`) are written once for every OS
 //!   in `portable.rs`; only genuinely OS-specific calls belong in a backend.
 
+/// Window helpers written once for every OS.
+///
+/// Desktop domains only. `ctl-notify` and `ctl-clip-files` reach this module for their own
+/// backends and never touch a window, so they no longer compile the layout, target-resolution
+/// and monitor-placement helpers - nor the arm gate those helpers use.
+#[cfg(feature = "ctl-desktop")]
 pub mod portable;
 
 #[cfg(windows)]
@@ -33,9 +39,8 @@ pub mod win32;
 
 mod null;
 
-#[cfg(feature = "ctl-capture")]
-pub use portable::to_monitor;
-pub use portable::{layout_load, layout_save, resolve_target};
+#[cfg(feature = "ctl-desktop")]
+pub use portable::{layout_load, layout_save, resolve_target, to_monitor};
 
 /// Modifier keys, platform-neutral (wire + macro steps use these names).
 #[derive(

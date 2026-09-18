@@ -9,16 +9,21 @@
 //! Feature gates mirror the domains: a build with only `ctl-ocr` gets windows +
 //! screen but no input, and `backend().input()` correctly answers `None`.
 
+// The input and window halves of this backend, and the gate they pass through, exist only for a
+// domain that acts on the desktop; the notify and clipboard impls below need none of them.
+#[cfg(feature = "ctl-desktop")]
 use crate::tools::computer::safety::SafetyGate;
 
-use super::{
-    Backend, Btn, ClipDrv, Ease, FocusInfo, InputDrv, KeyMod, NotifyDrv, ScreenDrv, TypeResult,
-    WinDrv, WinInfo, WinQuery,
-};
+// `InputDrv` and `WinDrv` name the return types of `Backend::input`/`Backend::win`, which every
+// build implements - they answer `None` where the domain is off - so they stay ungated. The rest
+// appear only in the input and window impls below.
+use super::{Backend, ClipDrv, InputDrv, NotifyDrv, ScreenDrv, WinDrv};
+#[cfg(feature = "ctl-desktop")]
+use super::{Btn, Ease, FocusInfo, KeyMod, TypeResult, WinInfo, WinQuery};
 
 #[cfg(feature = "ctl-input")]
 pub mod input;
-#[cfg(any(feature = "ctl-input", feature = "ctl-uia", feature = "ctl-ocr"))]
+#[cfg(feature = "ctl-desktop")]
 pub mod win;
 
 #[cfg(feature = "ctl-clip-files")]
@@ -34,7 +39,7 @@ pub mod uia;
 pub struct Win32;
 
 /// Window ids cross the seam as `u32`; on Windows that is the HWND value.
-#[cfg(any(feature = "ctl-input", feature = "ctl-uia", feature = "ctl-ocr"))]
+#[cfg(feature = "ctl-desktop")]
 pub(crate) fn hwnd(id: u32) -> windows::Win32::Foundation::HWND {
     windows::Win32::Foundation::HWND(id as usize as *mut core::ffi::c_void)
 }
@@ -61,11 +66,11 @@ impl Backend for Win32 {
     }
 
     fn win(&self) -> Option<&dyn WinDrv> {
-        #[cfg(any(feature = "ctl-input", feature = "ctl-uia", feature = "ctl-ocr"))]
+        #[cfg(feature = "ctl-desktop")]
         {
             Some(self)
         }
-        #[cfg(not(any(feature = "ctl-input", feature = "ctl-uia", feature = "ctl-ocr")))]
+        #[cfg(not(feature = "ctl-desktop"))]
         {
             None
         }
@@ -188,7 +193,7 @@ fn vk_of(m: KeyMod) -> windows::Win32::UI::Input::KeyboardAndMouse::VIRTUAL_KEY 
     }
 }
 
-#[cfg(any(feature = "ctl-input", feature = "ctl-uia", feature = "ctl-ocr"))]
+#[cfg(feature = "ctl-desktop")]
 impl WinDrv for Win32 {
     fn list(&self, query: Option<WinQuery>) -> anyhow::Result<Vec<WinInfo>> {
         win::list_windows(query)

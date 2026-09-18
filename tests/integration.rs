@@ -99,8 +99,9 @@ struct ServerHandle {
     child: Child,
     tx_out: mpsc::Sender<serde_json::Value>,
     pending: PendingMap,
-    /// The child's private state root. Held only to keep it on disk for the server's lifetime;
-    /// dropping it early would delete the directory out from under a running process.
+    /// The child's private state root. Held to keep it on disk for the server's lifetime;
+    /// dropping it early would delete the directory out from under a running process. Also read
+    /// after the child exits, by the test that inspects the counters file it leaves behind.
     _state: TempDir,
 }
 
@@ -140,6 +141,16 @@ impl ServerHandle {
 
     async fn kill(mut self) {
         let _ = self.child.kill().await;
+    }
+
+    /// Close stdin and wait for the server to exit on its own.
+    ///
+    /// Not [`ServerHandle::kill`]: the counters are written on the way out, and a killed process
+    /// writes nothing. This is the shutdown an MCP client actually performs.
+    async fn shutdown(mut self) -> Result<TempDir> {
+        drop(self.tx_out);
+        self.child.wait().await?;
+        Ok(self._state)
     }
 }
 
@@ -2329,5 +2340,69 @@ async fn read_pdf_cryptomatte_quality_contract() -> Result<()> {
     );
 
     srv.kill().await;
+    Ok(())
+}
+
+/// The counters file records what the tool calls actually did - including the ones that failed
+/// before any tool ran.
+///
+/// This is the end-to-end guard on the `call_tool` seam in `main.rs`. That seam dispatches with
+/// `let result = self.tool_router.call(ctx).await;` and deliberately does **not** apply `?` there:
+/// the `Err` arm is half of what `classify` scores, so propagating early would leave every
+/// rejected call and every tool that broke below the handler uncounted - which is much of what an
+/// operator opens this table to find. Nothing but a comment protected that ordering, and a `?`
+/// put back would have passed every other test in this suite.
+///
+/// A name the router does not serve is the cheapest way to reach that arm: rmcp answers it with
+/// `invalid_params`, which never becomes a `CallToolResult`, so it is only ever counted if the
+/// record runs on the error path. It is attributed to `__unknown`, there being no registered tool
+/// to name.
+///
+/// The same run also pins two properties that have no other test: every router tool is seeded at
+/// zero, so an uncalled tool is a row of zeros rather than a missing row, and the run leaves
+/// exactly one counters file.
+#[tokio::test]
+async fn the_counters_file_records_failed_calls_and_seeds_every_tool() -> Result<()> {
+    let dir = TempDir::new()?;
+    let srv = start_server(dir.path()).await?;
+
+    let ok = srv
+        .call_tool("which", json!({ "command": "cargo" }))
+        .await?;
+    assert_ok(&ok);
+    let rejected = srv.call_tool("no_such_tool_exists", json!({})).await?;
+    assert!(rejected.get("error").is_some(), "{rejected}");
+
+    let state = srv.shutdown().await?;
+
+    let day = std::fs::read_dir(state.path().join("stats"))?
+        .next()
+        .expect("a dated directory")?
+        .path();
+    let files: Vec<_> = std::fs::read_dir(&day)?.collect::<std::io::Result<Vec<_>>>()?;
+    assert_eq!(
+        files.len(),
+        1,
+        "one run writes one counters file: {files:?}"
+    );
+
+    let report: serde_json::Value = serde_json::from_slice(&std::fs::read(files[0].path())?)?;
+    let tools = report["tools"].as_object().expect("tools object");
+
+    assert_eq!(
+        report["totals"]["calls"], 2,
+        "both calls counted, not just the one that reached a tool: {report}"
+    );
+    assert_eq!(tools["which"]["ok"], 1, "{report}");
+    assert_eq!(
+        tools["__unknown"]["err_params"], 1,
+        "a rejected call must reach the counters; if this is 0, the seam propagated the error          before recording it: {report}"
+    );
+
+    // Seeding: a tool nobody called is present and zero, rather than absent.
+    let untouched = tools
+        .get("read_text_file")
+        .expect("every router tool is seeded");
+    assert_eq!(untouched["calls"], 0, "{untouched}");
     Ok(())
 }

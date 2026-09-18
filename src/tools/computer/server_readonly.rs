@@ -20,7 +20,7 @@ use super::{
 };
 use crate::FileSystemServer;
 
-#[cfg(any(feature = "ctl-input", feature = "ctl-uia", feature = "ctl-ocr"))]
+#[cfg(feature = "ctl-desktop")]
 #[tool_router(router = ctl_readonly_router, vis = "pub(crate)")]
 impl FileSystemServer {
     #[tool(

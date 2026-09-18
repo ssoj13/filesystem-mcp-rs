@@ -23,7 +23,17 @@ crate is behind `#[cfg(windows)]` and a Linux-only pass never sees the driver.
 - Tools live in `src/tools/*.rs`, registered via `#[cfg(feature = "...")]` in `src/tools/mod.rs`.
 - Feature flags in Cargo.toml: `http-tools`, `s3-tools`, `screenshot-tools` (dep:image, xcap, arboard),
   `computer-tools` umbrella + `ctl-input/uia/ocr/notify/clip-files` (ctl-uia implies ctl-input).
-  All four are in `default` since 2026-08-30 — computer-tools included.
+  All four are in `default` since 2026-08-30 — computer-tools included. Statistics have NO flag:
+  three small files, no dependency, `FS_MCP_STATS=off` is the switch.
+- `ctl-any` / `ctl-desktop` are derived flags, enabled BY the domains, never by hand: "any control
+  domain" and "a domain that acts on the desktop" (input/uia/ocr). They exist so shared code has one
+  gate instead of a repeated `any(...)` list — that list was previously spelled out in ten places.
+- **`#[tool_router]` cannot gate a method.** It emits a route for every `#[tool]` fn and ignores the
+  `#[cfg]` on it (`rmcp-macros/src/tool_router.rs`), so a gated method leaves a route calling a
+  name that does not exist. Each optional family therefore has its OWN gated impl block + router,
+  merged in `build_tool_router` under the same cfg. Never add a `#[cfg]` tool to the main block.
+- All ten feature configurations are expected to build with `--all-targets`; check before shipping a
+  gating change.
 - `src/env_spec.rs` is the ONE registry of `FS_MCP_*` vars. `install` writes them all into the
   client config (blank = unset), the hint block renders from it, `--list-env` prints it. Never
   hardcode an env key or its default anywhere else; readers must go through `env_spec::get`

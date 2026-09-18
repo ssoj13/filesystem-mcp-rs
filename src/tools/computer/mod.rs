@@ -22,6 +22,12 @@
 // reach the machine only through `driver`, so they compile on every platform
 // and simply surface the backend's `unsupported` errors where a domain is
 // missing. (The OS-specific code lives under `driver/<backend>/`.)
+// Stays on for every domain, unlike `driver::portable`: this module holds two things, and only
+// one of them is about the desktop. The arm gate is - `ctl-notify` and `ctl-clip-files` never
+// arm anything - but `CtlError` and the `ctl_err` mapping below are what *every* domain turns
+// its failures into, toasts and clipboard file lists included. Narrowing the module would mean
+// splitting the error type away from the gate it mostly describes, or gating variants of a
+// public error enum per build, which would make the wire shape depend on the feature set.
 #[cfg(feature = "ctl-any")]
 pub mod safety;
 #[cfg(feature = "ctl-input")]
@@ -34,13 +40,13 @@ pub mod wait;
 pub mod driver;
 
 // Passive capture extensions (cursor-anchor, dhash) — needs xcap/image.
-#[cfg(feature = "ctl-capture")]
+#[cfg(feature = "ctl-desktop")]
 pub mod capture;
 // Template matching (find_image) — same passive class, same deps.
-#[cfg(feature = "ctl-capture")]
+#[cfg(feature = "ctl-desktop")]
 pub mod find;
 // Draw found rects back onto a capture (verify coordinates before clicking).
-#[cfg(feature = "ctl-capture")]
+#[cfg(feature = "ctl-desktop")]
 pub mod annotate;
 
 // Screen understanding. The engines differ per OS (WinRT OCR lives in the
@@ -70,7 +76,7 @@ pub(crate) mod server_input;
     feature = "ctl-clip-files"
 ))]
 pub(crate) mod server_misc;
-#[cfg(any(feature = "ctl-input", feature = "ctl-uia", feature = "ctl-ocr"))]
+#[cfg(feature = "ctl-desktop")]
 pub(crate) mod server_readonly;
 #[cfg(all(windows, feature = "ctl-uia"))]
 pub(crate) mod server_uia;
@@ -111,7 +117,7 @@ pub struct OcrOut {
 }
 
 /// Virtual-screen rectangle in physical pixels (may have negative origin).
-#[cfg(any(feature = "ctl-input", feature = "ctl-uia", feature = "ctl-ocr"))]
+#[cfg(feature = "ctl-desktop")]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, schemars::JsonSchema)]
 pub struct Rect {
     pub x: i32,
@@ -120,7 +126,7 @@ pub struct Rect {
     pub h: u32,
 }
 
-#[cfg(any(feature = "ctl-input", feature = "ctl-uia", feature = "ctl-ocr"))]
+#[cfg(feature = "ctl-desktop")]
 impl Rect {
     pub fn new(x: i32, y: i32, w: u32, h: u32) -> Self {
         Self { x, y, w, h }
@@ -146,7 +152,7 @@ impl Rect {
 /// acceptable as long as the host chose SOME aware context, so
 /// we query the actual context and succeed; only a truly DPI-unaware process
 /// is an error, because clicks/captures would land misaligned.
-#[cfg(any(feature = "ctl-input", feature = "ctl-uia", feature = "ctl-ocr"))]
+#[cfg(feature = "ctl-desktop")]
 pub fn ensure_dpi_aware() -> anyhow::Result<()> {
     #[cfg(not(windows))]
     {
@@ -190,5 +196,8 @@ pub fn ensure_dpi_aware() -> anyhow::Result<()> {
     }
 }
 
-#[cfg(all(test, windows, feature = "ctl-input"))]
+// `ctl-ocr` as well as `ctl-input`: the canary types text and then reads it back off the screen
+// to prove the typing landed, so without OCR it cannot check the thing it exists to check.
+// Its own doc comment says to run it with `--features computer-tools`, which brings both.
+#[cfg(all(test, windows, feature = "ctl-input", feature = "ctl-ocr"))]
 mod tests;

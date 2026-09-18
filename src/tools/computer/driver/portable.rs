@@ -61,7 +61,7 @@ pub fn resolve_target(target: &WinTarget) -> anyhow::Result<u32> {
 /// exist, which is `capture`'s job. A build with a control domain but no capture - toast
 /// notifications alone, say - therefore does not have this function, and does not serve
 /// `win_to_monitor` either; that tool belongs to `ctl-input`, which brings capture with it.
-#[cfg(feature = "ctl-capture")]
+#[cfg(feature = "ctl-desktop")]
 pub fn to_monitor(id: u32, monitor: u32) -> anyhow::Result<WinInfo> {
     let ms = crate::tools::computer::capture::monitors()?;
     let m = ms

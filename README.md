@@ -186,10 +186,17 @@ To build without computer control (much faster: no `ocrs` / `rten` / `windows` c
 
 ```bash
 cargo build --no-default-features --features http-tools,s3-tools,screenshot-tools
+# …or none of them at all; the tool families are genuinely optional
+cargo build --no-default-features
 ```
 
 `computer-tools` is an umbrella over `ctl-input` (core; `ctl-uia` implies it) / `ctl-uia` /
-`ctl-ocr` / `ctl-notify` / `ctl-clip-files`, so you can also enable just the domains you want.
+`ctl-ocr` / `ctl-notify` / `ctl-clip-files`, so you can also enable just the domains you want —
+each one builds on its own, which is checked. Two further flags, `ctl-any` and `ctl-desktop`, are
+derived: the domains switch them on to say "some control domain is present" and "a domain that
+acts on the desktop is present", so shared code carries one gate instead of listing domains.
+Enabling either by hand selects nothing.
+
 The desktop backend is Windows today; elsewhere the driver seam resolves to a `null` backend
 that reports "unsupported" instead of pretending to work.
 

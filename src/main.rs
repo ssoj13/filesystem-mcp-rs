@@ -253,7 +253,7 @@ impl FileSystemServer {
         let mut tool_router = Self::tool_router();
         // Computer-control domains: per-domain routers (S1 spike — rmcp cannot
         // cfg-gate methods inside one impl), merged before schema normalization.
-        #[cfg(any(feature = "ctl-input", feature = "ctl-uia", feature = "ctl-ocr"))]
+        #[cfg(feature = "ctl-desktop")]
         tool_router.merge(Self::ctl_readonly_router());
         #[cfg(feature = "ctl-input")]
         tool_router.merge(Self::ctl_input_router());
@@ -7624,7 +7624,7 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
 
     // Computer-control bootstrap: DPI must be set before anything clicks or captures,
     // otherwise coordinates misalign. The arm gate is built later, after logging exists.
-    #[cfg(any(feature = "ctl-input", feature = "ctl-uia", feature = "ctl-ocr"))]
+    #[cfg(feature = "ctl-desktop")]
     if let Err(e) = crate::tools::computer::ensure_dpi_aware() {
         eprintln!("fatal: {e}");
         std::process::exit(1);

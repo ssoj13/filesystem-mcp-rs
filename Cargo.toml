@@ -135,19 +135,25 @@ computer-tools = ["ctl-input", "ctl-uia", "ctl-ocr", "ctl-notify", "ctl-clip-fil
 # previously spelled out in ten places and which had to be edited in all ten whenever a domain
 # was added. Never enable this directly: on its own it selects no domain and builds nothing.
 ctl-any = []
-# "a capture source is available": `tools/computer/capture` and the window helpers built on
-# it. Enabled by the two domains that pull xcap/image (`ctl-input`, `ctl-ocr`), so code needing
-# a screen source names that requirement once instead of listing those two domains at each
-# site - the same reason as `ctl-any`. Never enable directly; it selects no domain.
-ctl-capture = []
+# "a domain that acts on the desktop is on": windows, input, the screen. Enabled by `ctl-input`
+# and `ctl-ocr`, and so by `ctl-uia`, which requires `ctl-input` - the three domains that need a
+# window to point at or a screen to read. `ctl-notify` and `ctl-clip-files` do neither: a toast
+# and a clipboard file list need no desktop.
+#
+# It names one concept that the tree previously spelled three ways - `any(ctl-input, ctl-ocr)`
+# for the capture modules, `any(ctl-input, ctl-uia, ctl-ocr)` for the window helpers, and
+# `ctl-any` for the arm gate and `driver::portable`, which was simply too broad and left both of
+# the other two domains compiling code they never call. Never enable directly; it selects no
+# domain.
+ctl-desktop = []
 # Input core: SendInput mouse/keys, arm gate, window mgmt, macro/wait, capture extensions.
 # Pulls screenshot-tools for xcap/arboard (capture + paste-mode clipboard).
-ctl-input = ["ctl-any", "ctl-capture", "dep:windows", "screenshot-tools", "dep:font8x8"]
+ctl-input = ["ctl-any", "ctl-desktop", "dep:windows", "screenshot-tools", "dep:font8x8"]
 # UI Automation (COM): ui/ui_click/ui_set. Requires ctl-input: the click
 # fallback needs SendInput, and Invoke-only clicking is a broken half-state.
 ctl-uia = ["ctl-any", "ctl-input", "dep:uiautomation"]
 # WinRT OCR (Windows.Media.Ocr): text + bbox find. Needs a capture source.
-ctl-ocr = ["ctl-any", "ctl-capture", "dep:windows", "dep:ocrs", "dep:rten", "screenshot-tools", "dep:font8x8"]
+ctl-ocr = ["ctl-any", "ctl-desktop", "dep:windows", "dep:ocrs", "dep:rten", "screenshot-tools", "dep:font8x8"]
 # Toast notifications.
 ctl-notify = ["ctl-any", "dep:tauri-winrt-notification"]
 # CF_HDROP clipboard file lists.

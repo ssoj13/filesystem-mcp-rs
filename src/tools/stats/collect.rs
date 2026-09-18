@@ -108,6 +108,17 @@ pub type Table = HashMap<Arc<str>, Counts>;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Health {
     /// Every call this process has recorded since it started.
+    ///
+    /// **Do not expect this to equal the sum of the rows.** It comes from an atomic that
+    /// [`Collector::record_interned`] bumps *before* it takes the counter lock, so under HTTP,
+    /// where many calls are in flight at once, it can lead the table by however many are between
+    /// those two steps. The gap closes on its own and is at most the number of calls running at
+    /// the instant the file was written.
+    ///
+    /// The one case where the gap is large is honest and labelled: when `try_snapshot` cannot
+    /// take the lock the report carries `totals.locked = true` with no rows at all, and this
+    /// number is then the only true thing in it. A reader that cross-checks the two and treats a
+    /// difference as corruption will be wrong on both counts.
     pub calls: u64,
     /// Calls whose response was a [`CallToolResponse`](rmcp::model::CallToolResponse) variant
     /// this build does not know.

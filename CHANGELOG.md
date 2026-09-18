@@ -2,6 +2,60 @@
 
 ## [Unreleased]
 
+### Tool-call statistics: one file per run, and nothing else
+
+- **Every run counts its own tool calls and writes them once**, on the way out or from the panic
+  hook, to `~/.filesystem-mcp-rs/stats/<YYYY-MM-DD>/<machine>_<timestamp>_<instance>.json`. Counts
+  per tool: calls, the five outcomes (`ok`, `err_flagged`, `err_params`, `err_internal`,
+  `deferred`), total and maximum nanoseconds, and returned content bytes; plus the run's pid,
+  instance, transport, version, working directory, client and start/end times.
+- **Every tool the router serves starts at zero**, so a tool nobody called is a row of zeros rather
+  than a missing row — which is what makes the unused part of the surface visible at all.
+- **No database, no background task, no aggregation and no query tool.** Counters live in memory
+  for the life of the process and are written once. Reading a week of runs is reading that
+  directory, which this server's own `grep_files` and `read_json` already do better than a bespoke
+  tool would. A run killed outright loses its counters; a panic still files them.
+- **`FS_MCP_STATS=off`** switches counting off. It is the only knob.
+- **The counters are never written to the log**, and the log is never used to carry a table.
+- An earlier draft of this wave had a shared SQLite file, a flush task, a lease and a compaction
+  step. All of it is gone.
+
+### One name for every file a run leaves behind
+
+- **`core::paths::run_file(kind, ext)`** is the single source of
+  `<state>/<kind>/<YYYY-MM-DD>/<machine>_<timestamp>_<instance>.<ext>`. The log, the crash report
+  and the counters go through it, so a run's three files share one name and differ only by
+  directory and extension. The host name, the timestamp format and the dated directory exist once.
+- **The stamp names the run, not the moment of writing.** It is fixed at process start, so the
+  counters resolve to one path whether the panic hook or the exit path writes them: the hook leaves
+  a partial file and the exit path overwrites it with the final one, with no latch to enforce it.
+- **A panic writes its own crash report** under `<state>/panics/` instead of appending to one
+  machine-wide `panic.log`, so it is possible to tell which run produced which backtrace.
+
+### Every feature combination builds
+
+- **`cargo check --no-default-features` did not compile, and neither did any build omitting
+  `http-tools`, `s3-tools` or `screenshot-tools`.** `#[tool_router]` emits a route for every
+  `#[tool]` function without reading the `#[cfg]` on it, so gating a method removed the method and
+  kept the route calling it. Each family now has its own gated impl block and router; the served
+  surface is unchanged.
+- **`ctl-notify` and `ctl-clip-files` could not be built alone either**, having borrowed
+  `dep:windows` and `clipboard-win/std` from whichever other domain happened to be on. Both are
+  declared where they are used.
+- **All ten configurations are now checked**: no features, each optional family alone, each control
+  domain alone, and `computer-tools`.
+
+### Every S3 call crashed the server
+
+- **`s3_stat`, `s3_put`, and the other ten S3 tools overflowed the worker thread's stack** and took
+  the process with them. Each argument type had a hand-written `Deserialize` ending in
+  `serde_json::from_value::<Self>`, which resolves back to that impl. It happened before the
+  allowlist check, and a stack overflow aborts — no panic hook, no crash report, nothing in the log.
+- **One `S3Args<T>` wrapper replaces the nine impls.** It folds the optional `credentials` blob into
+  the flattened fields and defers to the derive, so the cycle cannot be written again. Credentials
+  are still accepted flattened, nested, or as a JSON string; `metadata` on `s3_put` now really does
+  accept an object or a JSON string, which its attribute had claimed while doing nothing.
+
 ### Six stringly-typed parameters become real enums
 
 - **`wait.kind`, `mouse_click.button`, `mouse_drag.button`, `mouse_drag.ease`, `win_geom.state` and
@@ -85,7 +139,8 @@
 
 ### One log file per process, on by default
 
-- **Every run now writes its own log**, `~/.filesystem-mcp-rs/logs/<YYYY-MM-DD>/fsmcp-<pid>-<instance>.log`,
+- **Every run now writes its own log**,
+  `~/.filesystem-mcp-rs/logs/<YYYY-MM-DD>/<machine>_<timestamp>_<instance>.log`,
   in every transport mode and without a flag. Dozens of these servers run at once on one machine,
   so there is no shared file and therefore no rotation to arbitrate: a new process is a new file,
   a new day is a new directory. `tracing-appender` exists to rotate a shared file and is
@@ -99,15 +154,16 @@
   logging plan, so a stderr sink added to any stdio path fails a test instead of a handshake.
   Why a run is quieter than it was asked to be is kept and will be reported by the `health`
   section rather than through a second, bespoke channel.
-- **New `FS_MCP_LOG` (default `info`), `FS_MCP_LOG_KEEP_DAYS` (14) and `FS_MCP_LOG_MAX_MB` (512).**
+- **New `FS_MCP_LOG` (default `info`).**
   `info`, not `warn`: every event this wave exists to make visible — "Migrated X -> Y", "memory
   tools disabled", "removed N stale scratch files" — is logged at `info`. A mistyped level is now
   complained about in the log rather than silently swallowing it: `FS_MCP_LOG=bogus` parses as a
   *target* filter, which used to switch the rest of the log off and produce a zero-byte file.
-- **Logs are reclaimed on start** by the same leased housekeeping sweep that clears `<state>/tmp`,
-  by age and then by total size. A dated directory is aged by its name, never by walking its tree;
-  today's directory is never touched and a file whose process is still alive is never deleted —
-  on Windows that unlink fails, and on Unix the server would go on writing into an unlinked inode.
+- **Nothing ever deletes a log.** An earlier draft of this wave swept `<state>/logs` by age and by
+  total size, which needed a lease, a rule for aging a dated directory by its name, and a way to
+  tell whether another process was still writing to a file — around a thousand lines whose entire
+  job was deciding when it was safe to delete someone else's log. It is gone: the operator clears
+  the directory by hand. `<state>/tmp` is still swept by age, which needs none of that machinery.
 - **CI now runs `cargo clippy --all-targets -- -D warnings`** on every OS alongside `cargo test`
   and `cargo fmt --check`. It was a stated gate of this project that existed only as a habit;
   clippy runs per-OS rather than once because half this crate is behind `#[cfg(windows)]`.
@@ -115,8 +171,9 @@
 ### One state directory: `~/.filesystem-mcp-rs/`
 
 - **Every durable and scratch file now lives under a single per-user root**, identical on Windows,
-  macOS and Linux: `memory2.db`, `panic.log`, the ocrs model cache, window layouts, computer-control
-  safety state, and `tmp/` for captures, `run_command` stream logs and temporary scripts. State used
+  macOS and Linux: `memory2.db`, the ocrs model cache, window layouts, computer-control safety
+  state, `tmp/` for captures, `run_command` stream logs and temporary scripts, and three
+  directories written once per run — `logs/`, `panics/` and `stats/`. State used
   to be spread over four roots, two of which differ per OS and per Windows account.
 - **Supersedes the 0.1.20 entry below**, which said auto-created `run_command` stream logs "now
   always go to the OS temp dir (`<temp>/filesystem-mcp`)". They go to `~/.filesystem-mcp-rs/tmp/`

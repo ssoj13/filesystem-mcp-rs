@@ -36,7 +36,7 @@ pub enum SubDir {
     #[cfg(feature = "ctl-ocr")]
     Ocrs,
     /// Saved window layouts.
-    #[cfg(feature = "ctl-any")]
+    #[cfg(feature = "ctl-desktop")]
     Layouts,
     /// Computer-control safety state.
     #[cfg(feature = "ctl-any")]
@@ -60,7 +60,7 @@ impl SubDir {
             SubDir::Logs => "logs",
             #[cfg(feature = "ctl-ocr")]
             SubDir::Ocrs => "ocrs",
-            #[cfg(feature = "ctl-any")]
+            #[cfg(feature = "ctl-desktop")]
             SubDir::Layouts => "layouts",
             #[cfg(feature = "ctl-any")]
             SubDir::Safety => "safety",
