@@ -155,8 +155,32 @@ pub fn write(ending: Ending, ended: SystemTime) -> io::Result<Option<PathBuf>> {
         return Ok(None);
     };
     let path = paths::run_file(SubDir::Stats, "json")?;
-    std::fs::write(&path, report(active, ending, ended).to_string())?;
+    let report = report(active, ending, ended);
+
+    // A run resolves one path, so a later write replaces an earlier one. That is what keeps a run
+    // to a single file, and for counters it is almost always an improvement: they only ever grow,
+    // so the later snapshot is the fuller one.
+    //
+    // Except when the later one is empty. `try_snapshot` gives up rather than block, and reports
+    // that honestly as `locked` with no rows - so a second panic on the thread holding the counter
+    // lock, or a panic after the exit path has already written, would replace a complete report
+    // with one that knows nothing. A report that could not read the table therefore refuses to
+    // overwrite a file that is already there; it still writes when there is nothing to lose.
+    if !worth_writing(&report, path.exists()) {
+        return Ok(None);
+    }
+    std::fs::write(&path, report.to_string())?;
     Ok(Some(path))
+}
+
+/// Would writing `report` over a file that `exists` leave more information than it removes?
+///
+/// Pure, and separate from [`write`], because the interesting case is a decision and not a file:
+/// [`write`] reads a process-global that a test can set only once per binary, while this can be
+/// asked every combination in one test.
+fn worth_writing(report: &Value, exists: bool) -> bool {
+    let blind = report["totals"]["locked"] == Value::Bool(true);
+    !(blind && exists)
 }
 
 /// The file's contents.
@@ -353,6 +377,43 @@ mod tests {
             report(&a, Ending::Panic, SystemTime::UNIX_EPOCH)["totals"]["locked"],
             false
         );
+    }
+
+    /// A report that could not read the counters never replaces one that could.
+    ///
+    /// A run resolves one path, so writes to it replace each other - which is what keeps a run to
+    /// one file, and is normally an improvement, counters being monotonic. The exception is a
+    /// report whose `try_snapshot` gave up: it carries no rows, and two orderings reach it after a
+    /// good report is already on disk - a second panic on the thread holding the lock, and a panic
+    /// after the exit path has written. Either would replace the whole table with nothing.
+    ///
+    /// It still writes when there is nothing to lose, because an honest `locked: true` file beats
+    /// no file at all.
+    #[test]
+    fn a_blind_report_refuses_to_overwrite_a_sighted_one() {
+        let a = active(&["read_text_file"]);
+
+        let held = a.collector.hold_for_test();
+        let blind = report(&a, Ending::Panic, SystemTime::UNIX_EPOCH);
+        drop(held);
+        let sighted = report(&a, Ending::Exit, SystemTime::UNIX_EPOCH);
+
+        assert_eq!(blind["totals"]["locked"], true, "fixture check");
+        assert_eq!(sighted["totals"]["locked"], false, "fixture check");
+
+        assert!(
+            !worth_writing(&blind, true),
+            "a blind report must not clobber a file that is already there"
+        );
+        assert!(
+            worth_writing(&blind, false),
+            "with no file yet, a locked report is better than none"
+        );
+        assert!(
+            worth_writing(&sighted, true),
+            "a full report always replaces an earlier one: counters only grow"
+        );
+        assert!(worth_writing(&sighted, false));
     }
 
     /// The file lands under a dated directory named for this run, and is valid JSON on disk.

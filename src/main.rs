@@ -58,7 +58,10 @@ use crate::core::serde::{
 use crate::core::serde::FlexI32;
 #[cfg(feature = "screenshot-tools")]
 use crate::core::serde::RI32;
-#[cfg(feature = "http-tools")]
+// Both families: HTTP headers/cookies/query, and S3 object metadata. The S3 use only became real
+// when `S3PutArgs` gained its `Deserialize` derive - before that its `deserialize_with` sat on a
+// type that never deserialized, which is exactly why a narrower gate looked right and was not.
+#[cfg(any(feature = "http-tools", feature = "s3-tools"))]
 use crate::core::serde::map_or_json_string;
 use crate::tools::binary::{
     extract_bytes, from_base64, patch_bytes, read_bytes, to_base64, write_bytes,
@@ -7595,7 +7598,15 @@ fn main() {
 /// Parse the command line, build the server and hand it to the selected transport.
 #[tokio::main]
 async fn run() -> Result<(), Box<dyn std::error::Error>> {
-    // Install panic hook FIRST - writes to file since stderr breaks stdio MCP
+    // Fix this run's identity BEFORE the hook that will use it. Both are `OnceLock::get_or_init`,
+    // and the hook names its crash report through `run_file`, which reads both: initialising them
+    // here means the hook only ever *reads* an already-set cell. `get_or_init` re-entered from
+    // inside its own initializer deadlocks or panics, and a panic inside a panic hook aborts the
+    // process with no diagnostic at all - the one outcome a crash report exists to prevent.
+    core::instance::id();
+    core::instance::started();
+
+    // Install the panic hook early - it writes to a file, because stderr breaks stdio MCP.
     install_panic_hook();
 
     let top = TopCli::parse();
