@@ -130,10 +130,11 @@ screenshot-tools = ["dep:image", "dep:xcap", "dep:arboard"]
 # Opt out with `--no-default-features --features http-tools,s3-tools,screenshot-tools`.
 computer-tools = ["ctl-input", "ctl-uia", "ctl-ocr", "ctl-notify", "ctl-clip-files"]
 # "any computer-control domain is on". Every `ctl-*` feature below enables it, so code that is
-# shared by the domains — the safety state, the driver seam, `<state>/safety` and
-# `<state>/layouts` — carries one gate instead of repeating a five-way `any(...)`, which the tree
-# previously spelled out in ten places and which had to be edited in all ten whenever a domain
-# was added. Never enable this directly: on its own it selects no domain and builds nothing.
+# shared by every domain — the driver seam itself and `FS_MCP_CTL_BACKEND`, which steers it —
+# carries one gate instead of repeating a five-way `any(...)`, which the tree previously spelled
+# out in ten places and which had to be edited in all ten whenever a domain was added. The arm
+# gate and `<state>/safety` are NOT here: they belong to `ctl-input`, the only domain that arms
+# anything. Never enable this directly: on its own it selects no domain and builds nothing.
 ctl-any = []
 # "a domain that acts on the desktop is on": windows, input, the screen. Enabled by `ctl-input`
 # and `ctl-ocr`, and so by `ctl-uia`, which requires `ctl-input` - the three domains that need a

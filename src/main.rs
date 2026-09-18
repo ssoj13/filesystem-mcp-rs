@@ -173,7 +173,7 @@ struct ServerArgs {
 
     /// Computer-control executed-input ops per minute cap (needs ctl-input/ctl-uia features).
     /// Precedence: this flag > FS_MCP_CTL_OPS_PER_MIN env > 240.
-    #[cfg(any(feature = "ctl-input", feature = "ctl-uia"))]
+    #[cfg(feature = "ctl-input")]
     #[arg(long = "ctl-ops-per-min", value_name = "N")]
     ctl_ops_per_min: Option<u32>,
 
@@ -7682,7 +7682,7 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
     // warning has to reach a subscriber. Built before `init_logging` it could not reach one at
     // all; it now does in every mode, plain stdio included, which is how an MCP client normally
     // starts this server.
-    #[cfg(any(feature = "ctl-input", feature = "ctl-uia"))]
+    #[cfg(feature = "ctl-input")]
     crate::tools::computer::safety::init_gate(crate::tools::computer::safety::resolve_ops_per_min(
         args.ctl_ops_per_min,
     ));

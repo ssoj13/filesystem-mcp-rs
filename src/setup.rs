@@ -17,7 +17,7 @@ pub const SERVER_KEY: &str = "filesystem-mcp-rs";
 const MCP_POLICY: &str = include_str!("docs/mcp_policy.md");
 
 /// Arm-gate policy, appended only when this build can actually move the mouse.
-#[cfg(any(feature = "ctl-input", feature = "ctl-uia"))]
+#[cfg(feature = "ctl-input")]
 const CTL_POLICY: &str = concat!(
     "== COMPUTER CONTROL POLICY ==\n",
     "This build can move the mouse and type into real windows. Input tools REQUIRE ",
@@ -32,7 +32,7 @@ const CTL_POLICY: &str = concat!(
 fn hint_sections() -> Vec<String> {
     #[allow(unused_mut)]
     let mut policy = MCP_POLICY.to_string();
-    #[cfg(any(feature = "ctl-input", feature = "ctl-uia"))]
+    #[cfg(feature = "ctl-input")]
     {
         policy.push('\n');
         policy.push_str(CTL_POLICY);

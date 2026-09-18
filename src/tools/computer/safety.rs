@@ -59,7 +59,7 @@ impl CtlError {
 static GATE: OnceLock<Arc<SafetyGate>> = OnceLock::new();
 
 /// Install the process-global gate with the ops-per-minute runaway cap.
-#[cfg(any(feature = "ctl-input", feature = "ctl-uia"))]
+#[cfg(feature = "ctl-input")]
 pub fn init_gate(max_ops_per_min: u32) {
     let _ = GATE.set(Arc::new(SafetyGate::with_audit(
         max_ops_per_min,
@@ -68,7 +68,7 @@ pub fn init_gate(max_ops_per_min: u32) {
 }
 
 /// The process-global gate (input/uia tool handlers borrow it).
-#[cfg(any(feature = "ctl-input", feature = "ctl-uia"))]
+#[cfg(feature = "ctl-input")]
 pub fn gate() -> std::sync::Arc<SafetyGate> {
     GATE.get()
         .cloned()
@@ -139,7 +139,7 @@ pub fn resolve_arm_ttl_ms(explicit: Option<u32>) -> u32 {
 }
 
 /// Effective ops-per-minute cap: CLI arg > env > default (240).
-#[cfg(any(feature = "ctl-input", feature = "ctl-uia"))]
+#[cfg(feature = "ctl-input")]
 pub fn resolve_ops_per_min(explicit: Option<u32>) -> u32 {
     explicit
         .or_else(|| env_trimmed(ENV_OPS_PER_MIN).and_then(|v| v.parse().ok()))

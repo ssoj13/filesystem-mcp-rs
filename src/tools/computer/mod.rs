@@ -14,8 +14,8 @@
 //! MCP tool routing lives in `server_*.rs` — per-domain `#[tool_router]` impls
 //! merged into the host router (rmcp cannot cfg-gate methods inside one impl).
 //!
-//! Safety: the arm gate (`safety::SafetyGate`) is compiled in with any ctl-*
-//! feature; every input tool re-checks it per call. Coordinates are
+//! Safety: the arm gate (`safety::SafetyGate`) is compiled in with `ctl-input` - the domain that
+//! injects input, and the only one that arms anything; every input tool re-checks it per call. Coordinates are
 //! virtual-screen physical px (multi-monitor, negative origins allowed).
 
 // Portable core: arm gate, macro steps, waits. These are OS-independent — they

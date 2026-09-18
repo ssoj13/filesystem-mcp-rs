@@ -618,6 +618,80 @@ pub fn notify(title: Option<&str>, msg: &str) -> anyhow::Result<()> {
         .notify(title, msg)
 }
 
+/// Every seam this build compiles is a seam this build can actually hand out.
+///
+/// The bug this exists for: `Backend::screen` had its `#[cfg]` widened to `ctl-desktop` while its
+/// body still answered `Some` only under `ctl-input`. An OCR-only build compiled with no error and
+/// no warning - an unused trait impl produces neither - reported `capture: true`, and then failed
+/// every monitor capture and pixel read with "unsupported". Ten green build configurations proved
+/// nothing, because the defect is not about compiling.
+///
+/// The property here is the one that was broken: if the accessor exists in this build, it must
+/// return `Some`. It costs no hardware and no desktop - the accessors only hand out a reference -
+/// so it runs everywhere the win32 backend is selected.
+#[cfg(all(test, windows))]
+mod seam_reachable {
+    use super::*;
+
+    #[test]
+    fn every_compiled_seam_answers_some() {
+        let b = backend();
+        // `null` is pinned in some test runs and legitimately answers `None` to everything.
+        if b.name() == "null" {
+            return;
+        }
+        #[cfg(feature = "ctl-input")]
+        assert!(
+            b.input().is_some(),
+            "input seam compiled but not handed out"
+        );
+        #[cfg(feature = "ctl-desktop")]
+        assert!(b.win().is_some(), "window seam compiled but not handed out");
+        #[cfg(feature = "ctl-desktop")]
+        assert!(
+            b.screen().is_some(),
+            "screen seam compiled but not handed out - this is the exact shape of the defect              that made an OCR-only build unable to capture a monitor"
+        );
+        #[cfg(any(feature = "ctl-input", feature = "ctl-clip-files"))]
+        assert!(
+            b.clip().is_some(),
+            "clipboard seam compiled but not handed out"
+        );
+        #[cfg(feature = "ctl-notify")]
+        assert!(
+            b.notify().is_some(),
+            "notify seam compiled but not handed out"
+        );
+    }
+
+    /// What `ctl_caps` promises is what the backend can actually do.
+    ///
+    /// A client reads that map precisely to avoid calling a tool that will refuse, so a `true`
+    /// there with no seam behind it is worse than an honest `false`.
+    #[cfg(feature = "ctl-desktop")]
+    #[test]
+    fn the_capability_map_matches_the_seams() {
+        let b = backend();
+        if b.name() == "null" {
+            return;
+        }
+        let c = caps();
+        #[cfg(feature = "ctl-input")]
+        assert_eq!(c.input, b.input().is_some());
+        #[cfg(feature = "ctl-desktop")]
+        assert_eq!(c.window, b.win().is_some());
+        #[cfg(feature = "ctl-clip-files")]
+        assert_eq!(c.clip_files, b.clip().is_some());
+        #[cfg(feature = "ctl-notify")]
+        assert_eq!(c.notify, b.notify().is_some());
+        assert_eq!(
+            c.ocr_ocrs,
+            cfg!(feature = "ctl-ocr"),
+            "the portable OCR engine ships with ctl-ocr and nothing else"
+        );
+    }
+}
+
 #[cfg(test)]
 mod seam_guard {
     //! The seam is only real if nothing bypasses it. These sources are the

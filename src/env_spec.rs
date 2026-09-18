@@ -122,7 +122,7 @@ fn memory_vars() -> Vec<EnvVar> {
 fn ctl_vars() -> Vec<EnvVar> {
     #[allow(unused_mut)]
     let mut v = Vec::new();
-    #[cfg(any(feature = "ctl-input", feature = "ctl-uia"))]
+    #[cfg(feature = "ctl-input")]
     v.extend([
         EnvVar {
             key: "FS_MCP_CTL_TYPE_MODE",

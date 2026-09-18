@@ -95,24 +95,17 @@ impl Backend for Win32 {
 
     #[cfg(feature = "ctl-notify")]
     fn notify(&self) -> Option<&dyn NotifyDrv> {
-        #[cfg(feature = "ctl-notify")]
-        {
-            Some(self)
-        }
-        #[cfg(not(feature = "ctl-notify"))]
-        {
-            None
-        }
+        Some(self)
     }
 
     #[cfg(feature = "ctl-uia")]
     fn has_uia(&self) -> bool {
-        cfg!(feature = "ctl-uia")
+        true
     }
 
     #[cfg(feature = "ctl-ocr")]
     fn has_ocr_media(&self) -> bool {
-        cfg!(feature = "ctl-ocr")
+        true
     }
 }
 
@@ -242,31 +235,12 @@ impl ScreenDrv for Win32 {
 impl ClipDrv for Win32 {
     #[cfg(feature = "ctl-clip-files")]
     fn get_files(&self) -> anyhow::Result<Vec<String>> {
-        #[cfg(feature = "ctl-clip-files")]
-        {
-            clip::get_files()
-        }
-        #[cfg(not(feature = "ctl-clip-files"))]
-        {
-            Err(super::unsupported(
-                "clipboard file lists (build without ctl-clip-files)",
-            ))
-        }
+        clip::get_files()
     }
 
     #[cfg(feature = "ctl-clip-files")]
     fn set_files(&self, files: &[String]) -> anyhow::Result<()> {
-        #[cfg(feature = "ctl-clip-files")]
-        {
-            clip::set_files(files)
-        }
-        #[cfg(not(feature = "ctl-clip-files"))]
-        {
-            let _ = files;
-            Err(super::unsupported(
-                "clipboard file lists (build without ctl-clip-files)",
-            ))
-        }
+        clip::set_files(files)
     }
 
     #[cfg(feature = "ctl-input")]
