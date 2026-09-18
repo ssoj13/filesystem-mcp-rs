@@ -33,6 +33,7 @@
 
 pub mod collect;
 pub mod db;
+pub mod flush;
 pub mod outcome;
 
 use std::path::PathBuf;

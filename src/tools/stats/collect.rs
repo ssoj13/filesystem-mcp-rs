@@ -134,6 +134,14 @@ pub struct Health {
     pub unknown_shape: u64,
     /// Rows waiting for the next flush. Growing without bound means the flush is not running.
     pub pending_rows: usize,
+    /// Flushes that failed since this process started.
+    ///
+    /// Counted here rather than only logged, because under stdio there may be no log subscriber
+    /// at all - and a statistics subsystem whose writes all fail while its counters pile up in
+    /// memory looks, from every other angle, exactly like an idle server. Read together with
+    /// [`Health::pending_rows`]: failures rising while pending rows grow is the signature of a
+    /// database the flush cannot write.
+    pub flush_failures: u64,
 }
 
 /// The in-memory counters for one server process.
@@ -153,6 +161,8 @@ pub struct Collector {
     calls: AtomicU64,
     /// See [`Health::unknown_shape`].
     unknown_shape: AtomicU64,
+    /// See [`Health::flush_failures`]. Written by the flush task, never by the hot path.
+    flush_failures: AtomicU64,
 }
 
 impl Collector {
@@ -171,6 +181,7 @@ impl Collector {
             rows: Mutex::new(Delta::new()),
             calls: AtomicU64::new(0),
             unknown_shape: AtomicU64::new(0),
+            flush_failures: AtomicU64::new(0),
         }
     }
 
@@ -269,12 +280,21 @@ impl Collector {
         }
     }
 
+    /// Record that a flush failed; see [`Health::flush_failures`].
+    ///
+    /// Called by [`super::flush`] on every failed flush, whether or not it also logged one - the
+    /// log is rate-limited and this is not, so the count stays true.
+    pub fn note_flush_failure(&self) {
+        self.flush_failures.fetch_add(1, Ordering::Relaxed);
+    }
+
     /// What this collector can say about itself; see [`Health`].
     pub fn health(&self) -> Health {
         Health {
             calls: self.calls.load(Ordering::Relaxed),
             unknown_shape: self.unknown_shape.load(Ordering::Relaxed),
             pending_rows: self.lock().len(),
+            flush_failures: self.flush_failures.load(Ordering::Relaxed),
         }
     }
 

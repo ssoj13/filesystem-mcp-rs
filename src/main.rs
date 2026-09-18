@@ -7670,6 +7670,33 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
         Err(e) => warn!("Log retention skipped: {e}"),
     }
 
+    // The statistics flush, last before the transport and on the same terms as housekeeping: a
+    // subsystem that observes may not decide whether the server runs. With statistics off there
+    // is no collector and nothing is spawned; if the database path cannot even be resolved the
+    // reason is reported once and the counters simply stay in memory, where they cost a few
+    // hundred kilobytes and nothing else.
+    if let Some(collector) = server.stats.clone() {
+        match tools::stats::db_file() {
+            Ok(path) => tools::stats::flush::spawn(
+                collector,
+                path,
+                tools::stats::flush::Identity {
+                    started_day: core::logging::utc_day(std::time::SystemTime::now()),
+                    pid: i64::from(core::instance::pid()),
+                    instance_id: core::instance::id().to_string(),
+                    // One process is one session: stdio carries no session id in the protocol at
+                    // all, and over HTTP the collector is shared by every connection this process
+                    // serves, so its rows cannot be attributed more finely than this anyway. The
+                    // process nonce is therefore the synthesized session id, and it is the same
+                    // value the `sessions` row is keyed by.
+                    session_id: core::instance::id().to_string(),
+                },
+                std::time::Duration::from_secs(tools::stats::flush_secs()),
+            ),
+            Err(e) => warn!("Statistics: the database path could not be resolved: {e}"),
+        }
+    }
+
     // Run in selected mode
     match mode {
         TransportMode::Stdio => run_stdio_mode(server).await,
