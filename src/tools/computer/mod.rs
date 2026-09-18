@@ -22,13 +22,7 @@
 // reach the machine only through `driver`, so they compile on every platform
 // and simply surface the backend's `unsupported` errors where a domain is
 // missing. (The OS-specific code lives under `driver/<backend>/`.)
-#[cfg(any(
-    feature = "ctl-input",
-    feature = "ctl-uia",
-    feature = "ctl-ocr",
-    feature = "ctl-notify",
-    feature = "ctl-clip-files"
-))]
+#[cfg(feature = "ctl-any")]
 pub mod safety;
 #[cfg(feature = "ctl-input")]
 pub mod steps;
@@ -36,13 +30,7 @@ pub mod steps;
 pub mod wait;
 
 // Platform driver: OS seam — portable core calls only this layer.
-#[cfg(any(
-    feature = "ctl-input",
-    feature = "ctl-uia",
-    feature = "ctl-ocr",
-    feature = "ctl-notify",
-    feature = "ctl-clip-files"
-))]
+#[cfg(feature = "ctl-any")]
 pub mod driver;
 
 // Passive capture extensions (cursor-anchor, dhash) — needs xcap/image.
@@ -63,13 +51,7 @@ pub mod ocrs_local;
 
 /// Downcast CtlError for a stable wire code prefix (codes:
 /// not_armed / op_cap / no_match / focus_failed). Shared by all server files.
-#[cfg(any(
-    feature = "ctl-input",
-    feature = "ctl-uia",
-    feature = "ctl-ocr",
-    feature = "ctl-notify",
-    feature = "ctl-clip-files"
-))]
+#[cfg(feature = "ctl-any")]
 pub(crate) fn ctl_err(e: anyhow::Error) -> rmcp::ErrorData {
     if let Some(ctl) = e.downcast_ref::<safety::CtlError>() {
         rmcp::ErrorData::invalid_params(format!("{}: {ctl}", ctl.code()), None)
@@ -96,13 +78,7 @@ pub(crate) mod server_uia;
 /// Shared response helper for the ctl server files: text + structured JSON.
 /// Uses the host's private `WithStructured` trait (main.rs) to fill
 /// structured_content — same wire shape as the rest of the fs server.
-#[cfg(any(
-    feature = "ctl-input",
-    feature = "ctl-uia",
-    feature = "ctl-ocr",
-    feature = "ctl-notify",
-    feature = "ctl-clip-files"
-))]
+#[cfg(feature = "ctl-any")]
 pub(crate) fn ok_json(
     v: serde_json::Value,
 ) -> Result<rmcp::model::CallToolResult, rmcp::ErrorData> {

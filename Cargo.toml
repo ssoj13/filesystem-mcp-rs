@@ -129,18 +129,24 @@ screenshot-tools = ["dep:image", "dep:xcap", "dep:arboard"]
 # non-Windows builds are unverified from a Windows host (no cross toolchain).
 # Opt out with `--no-default-features --features http-tools,s3-tools,screenshot-tools`.
 computer-tools = ["ctl-input", "ctl-uia", "ctl-ocr", "ctl-notify", "ctl-clip-files"]
+# "any computer-control domain is on". Every `ctl-*` feature below enables it, so code that is
+# shared by the domains — the safety state, the driver seam, `<state>/safety` and
+# `<state>/layouts` — carries one gate instead of repeating a five-way `any(...)`, which the tree
+# previously spelled out in ten places and which had to be edited in all ten whenever a domain
+# was added. Never enable this directly: on its own it selects no domain and builds nothing.
+ctl-any = []
 # Input core: SendInput mouse/keys, arm gate, window mgmt, macro/wait, capture extensions.
 # Pulls screenshot-tools for xcap/arboard (capture + paste-mode clipboard).
-ctl-input = ["dep:windows", "screenshot-tools", "dep:font8x8"]
+ctl-input = ["ctl-any", "dep:windows", "screenshot-tools", "dep:font8x8"]
 # UI Automation (COM): ui/ui_click/ui_set. Requires ctl-input: the click
 # fallback needs SendInput, and Invoke-only clicking is a broken half-state.
-ctl-uia = ["ctl-input", "dep:uiautomation"]
+ctl-uia = ["ctl-any", "ctl-input", "dep:uiautomation"]
 # WinRT OCR (Windows.Media.Ocr): text + bbox find. Needs a capture source.
-ctl-ocr = ["dep:windows", "dep:ocrs", "dep:rten", "screenshot-tools", "dep:font8x8"]
+ctl-ocr = ["ctl-any", "dep:windows", "dep:ocrs", "dep:rten", "screenshot-tools", "dep:font8x8"]
 # Toast notifications.
-ctl-notify = ["dep:tauri-winrt-notification"]
+ctl-notify = ["ctl-any", "dep:tauri-winrt-notification"]
 # CF_HDROP clipboard file lists.
-ctl-clip-files = ["dep:clipboard-win"]
+ctl-clip-files = ["ctl-any", "dep:clipboard-win"]
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"

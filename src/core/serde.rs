@@ -583,6 +583,7 @@ where
 }
 
 /// Deserialize a struct from a JSON object or a JSON string containing that object.
+#[cfg(feature = "http-tools")]
 pub fn object_or_json_string<'de, D, T>(deserializer: D) -> Result<T, D::Error>
 where
     D: Deserializer<'de>,
@@ -609,6 +610,7 @@ where
 }
 
 /// Deserialize a map from a JSON object or a JSON string containing that object.
+#[cfg(feature = "http-tools")]
 pub fn map_or_json_string<'de, D, M>(deserializer: D) -> Result<M, D::Error>
 where
     D: Deserializer<'de>,
@@ -952,12 +954,14 @@ mod tests {
         assert_eq!(result.items, vec!["alpha".to_string()]);
     }
 
+    #[cfg(feature = "http-tools")]
     #[derive(Deserialize, Debug, PartialEq)]
     struct TestObjectField {
         #[serde(deserialize_with = "object_or_json_string")]
         item: TestItem,
     }
 
+    #[cfg(feature = "http-tools")]
     #[test]
     fn test_object_or_json_string_object() {
         let json = r#"{"item":{"name":"a","value":1}}"#;
@@ -971,6 +975,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "http-tools")]
     #[test]
     fn test_object_or_json_string_stringified_object() {
         let json = r#"{"item":"{\"name\":\"a\",\"value\":1}"}"#;
@@ -1010,12 +1015,14 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "http-tools")]
     #[derive(Deserialize, Debug, PartialEq, Eq)]
     struct TestMapField {
         #[serde(default, deserialize_with = "map_or_json_string")]
         meta: std::collections::BTreeMap<String, String>,
     }
 
+    #[cfg(feature = "http-tools")]
     #[test]
     fn test_map_or_json_string_object() {
         let json = r#"{"meta":{"k":"v"}}"#;
@@ -1025,6 +1032,7 @@ mod tests {
         assert_eq!(result.meta, expected);
     }
 
+    #[cfg(feature = "http-tools")]
     #[test]
     fn test_map_or_json_string_string() {
         let json = r#"{"meta":"{\"k\":\"v\"}"}"#;

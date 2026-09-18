@@ -1,3 +1,6 @@
+// Ordered maps appear in the HTTP argument structs (headers, cookies, query) and in the S3 ones
+// (object metadata), and nowhere else; gated with both so neither build carries it unused.
+#[cfg(any(feature = "http-tools", feature = "s3-tools"))]
 use std::collections::BTreeMap;
 use std::env;
 use std::fs::Metadata;
@@ -32,6 +35,7 @@ use rmcp::{
 use schemars::JsonSchema;
 use serde_json::{Value, json};
 use tokio::fs;
+#[cfg(feature = "s3-tools")]
 use tokio::sync::OnceCell;
 use tracing::{info, warn};
 
@@ -47,10 +51,17 @@ use crate::core::schema::normalize_tool_schemas;
 #[cfg(feature = "s3-tools")]
 use crate::core::serde::deserialize_s3_args;
 use crate::core::serde::{
-    FlexBool, FlexI32, FlexU32, FlexU64, FlexUsize, RI32, RU16, RU32, RU64, RUsize, ShellArg,
-    ShellKind, default_flex_true, map_or_json_string, number_or_string,
-    option_object_or_json_string, vec_or_string,
+    FlexBool, FlexU32, FlexU64, FlexUsize, RU16, RU32, RU64, RUsize, ShellArg, ShellKind,
+    default_flex_true, number_or_string, option_object_or_json_string, vec_or_string,
 };
+// Each of these is read by one tool family's argument structs and by nothing else, so it is
+// imported under the same gate rather than left to warn in a build that omits that family.
+#[cfg(feature = "s3-tools")]
+use crate::core::serde::FlexI32;
+#[cfg(feature = "screenshot-tools")]
+use crate::core::serde::RI32;
+#[cfg(feature = "http-tools")]
+use crate::core::serde::map_or_json_string;
 use crate::tools::binary::{
     extract_bytes, from_base64, patch_bytes, read_bytes, to_base64, write_bytes,
 };
@@ -256,6 +267,14 @@ impl FileSystemServer {
         tool_router.merge(Self::ctl_notify_router());
         #[cfg(feature = "ctl-clip-files")]
         tool_router.merge(Self::ctl_clip_router());
+        // Optional tool families, gated for the same reason as the domains above: the router
+        // macro cannot gate a method, so each family lives in its own gated block.
+        #[cfg(feature = "http-tools")]
+        tool_router.merge(Self::http_router());
+        #[cfg(feature = "s3-tools")]
+        tool_router.merge(Self::s3_router());
+        #[cfg(feature = "screenshot-tools")]
+        tool_router.merge(Self::screenshot_router());
         normalize_tool_schemas(&mut tool_router);
         tool_router
     }
@@ -3762,976 +3781,6 @@ impl FileSystemServer {
         Ok(CallToolResult::success(vec![ContentBlock::text(text)]).with_structured(structured))
     }
 
-    #[cfg(feature = "http-tools")]
-    #[tool(
-        name = "http_request",
-        description = "HTTP/HTTPS request with method, headers, cookies, query params, and body. Requires allowlisted domains."
-    )]
-    async fn http_request(
-        &self,
-        Parameters(args): Parameters<HttpRequestArgs>,
-    ) -> Result<CallToolResult, McpError> {
-        let _parsed = self.ensure_http_allowed(&args.url)?;
-
-        let mut body_bytes = None;
-        if let Some(path) = &args.body_path {
-            let resolved = self.resolve(path).await?;
-            body_bytes = Some(
-                fs::read(&resolved)
-                    .await
-                    .map_err(internal_err("Failed to read body file"))?,
-            );
-        }
-
-        let params = HttpRequestParams {
-            method: args.method.clone(),
-            url: args.url.clone(),
-            headers: args.headers.clone(),
-            cookies: args.cookies.clone(),
-            query: args.query.clone(),
-            body: args.body.clone(),
-            body_base64: *args.body_base64,
-            body_bytes,
-            timeout_ms: args.timeout_ms,
-            max_bytes: args.max_bytes,
-        };
-
-        let client = self.http_client(*args.follow_redirects);
-        let resp = http_request(client, params)
-            .await
-            .map_err(|e| McpError::internal_error(format!("HTTP request failed: {e}"), None))?;
-
-        let accept = args.accept.as_deref().unwrap_or("bytes");
-        let (body_text, body_base64, json_value, parse_error) = match accept {
-            "text" => (Some(decode_body_text(&resp.body)), None, None, None),
-            "json" => match serde_json::from_slice::<Value>(&resp.body) {
-                Ok(v) => (None, None, Some(v), None),
-                Err(e) => (None, None, None, Some(format!("Invalid JSON: {e}"))),
-            },
-            _ => (None, Some(to_base64(&resp.body)), None, None),
-        };
-
-        let text = format!(
-            "HTTP {} {} (truncated: {})",
-            resp.status, resp.url, resp.truncated
-        );
-
-        let structured = json!({
-            "status": resp.status,
-            "url": resp.url,
-            "headers": resp.headers,
-            "contentType": resp.content_type,
-            "contentLength": resp.content_length,
-            "truncated": resp.truncated,
-            "bodyText": body_text,
-            "bodyBase64": body_base64,
-            "json": json_value,
-            "parseError": parse_error,
-        });
-
-        Ok(CallToolResult::success(vec![ContentBlock::text(text)]).with_structured(structured))
-    }
-
-    #[cfg(feature = "http-tools")]
-    #[tool(
-        name = "http_request_batch",
-        description = "Batch HTTP requests. Each request supports method, headers, cookies, query params, and body. Requires allowlisted domains."
-    )]
-    async fn http_request_batch(
-        &self,
-        Parameters(args): Parameters<HttpRequestBatchArgs>,
-    ) -> Result<CallToolResult, McpError> {
-        let mut results: Vec<Option<Value>> = vec![None; args.requests.len()];
-        let mut batch_follow = Vec::new();
-        let mut batch_no_follow = Vec::new();
-
-        for (index, item) in args.requests.into_iter().enumerate() {
-            let _parsed = match self.ensure_http_allowed(&item.request.url) {
-                Ok(p) => p,
-                Err(e) => {
-                    results[index] = Some(json!({
-                        "id": item.id,
-                        "ok": false,
-                        "error": e.to_string(),
-                    }));
-                    continue;
-                }
-            };
-
-            let mut body_bytes = None;
-            if let Some(path) = &item.request.body_path {
-                match self.resolve(path).await {
-                    Ok(resolved) => match fs::read(&resolved).await {
-                        Ok(bytes) => body_bytes = Some(bytes),
-                        Err(e) => {
-                            results[index] = Some(json!({
-                                "id": item.id,
-                                "ok": false,
-                                "error": format!("Failed to read body file: {e}"),
-                            }));
-                            continue;
-                        }
-                    },
-                    Err(e) => {
-                        results[index] = Some(json!({
-                            "id": item.id,
-                            "ok": false,
-                            "error": e.to_string(),
-                        }));
-                        continue;
-                    }
-                }
-            }
-
-            let params = HttpRequestParams {
-                method: item.request.method.clone(),
-                url: item.request.url.clone(),
-                headers: item.request.headers.clone(),
-                cookies: item.request.cookies.clone(),
-                query: item.request.query.clone(),
-                body: item.request.body.clone(),
-                body_base64: *item.request.body_base64,
-                body_bytes,
-                timeout_ms: item.request.timeout_ms,
-                max_bytes: item.request.max_bytes,
-            };
-
-            let request_item = crate::tools::http_tools::HttpRequestItem {
-                id: item.id,
-                params,
-            };
-
-            if *item.request.follow_redirects {
-                batch_follow.push((index, request_item));
-            } else {
-                batch_no_follow.push((index, request_item));
-            }
-        }
-
-        for (follow, items) in [(true, batch_follow), (false, batch_no_follow)] {
-            if items.is_empty() {
-                continue;
-            }
-
-            let client = self.http_client(follow);
-            let (indices, batch_items): (
-                Vec<usize>,
-                Vec<crate::tools::http_tools::HttpRequestItem>,
-            ) = items.into_iter().unzip();
-            let batch_results = http_request_batch(client, batch_items).await;
-
-            for (index, result) in indices.into_iter().zip(batch_results) {
-                let crate::tools::http_tools::HttpBatchResult {
-                    id,
-                    ok,
-                    response,
-                    error,
-                } = result;
-                let json_result = if let Some(resp) = response {
-                    let mut payload = json!({
-                        "id": id,
-                        "ok": ok,
-                        "status": resp.status,
-                        "url": resp.url,
-                        "headers": resp.headers,
-                        "contentType": resp.content_type,
-                        "contentLength": resp.content_length,
-                        "truncated": resp.truncated,
-                        "bodyBase64": to_base64(&resp.body),
-                    });
-                    if !ok {
-                        let err_msg =
-                            error.unwrap_or_else(|| format!("HTTP status {}", resp.status));
-                        if let Some(map) = payload.as_object_mut() {
-                            map.insert("error".to_string(), Value::String(err_msg));
-                        }
-                    }
-                    payload
-                } else {
-                    json!({ "id": id, "ok": false, "error": error.unwrap_or_else(|| "Missing response".to_string()) })
-                };
-                results[index] = Some(json_result);
-            }
-        }
-
-        let results: Vec<Value> = results
-            .into_iter()
-            .map(|r| r.unwrap_or_else(|| json!({ "ok": false, "error": "Missing result" })))
-            .collect();
-
-        Ok(CallToolResult::success(vec![ContentBlock::text(format!(
-            "Batch results: {}",
-            results.len()
-        ))])
-        .with_structured(json!({ "results": results })))
-    }
-
-    #[cfg(feature = "http-tools")]
-    #[tool(
-        name = "http_download",
-        description = "Download an HTTP/HTTPS resource to a local file path. Requires allowlisted domains."
-    )]
-    async fn http_download(
-        &self,
-        Parameters(args): Parameters<HttpDownloadArgs>,
-    ) -> Result<CallToolResult, McpError> {
-        let _parsed = self.ensure_http_allowed(&args.url)?;
-
-        let params = HttpRequestParams {
-            method: "GET".to_string(),
-            url: args.url.clone(),
-            headers: args.headers.clone(),
-            cookies: args.cookies.clone(),
-            query: args.query.clone(),
-            body: None,
-            body_base64: false,
-            body_bytes: None,
-            timeout_ms: args.timeout_ms,
-            max_bytes: args.max_bytes,
-        };
-
-        let client = self.http_client(*args.follow_redirects);
-        let resp = http_request(client, params)
-            .await
-            .map_err(|e| McpError::internal_error(format!("HTTP request failed: {e}"), None))?;
-
-        if resp.status >= 400 {
-            return Err(McpError::internal_error(
-                format!("HTTP status {} for {}", resp.status, resp.url),
-                None,
-            ));
-        }
-
-        // A truncated body means the resource exceeded maxBytes. Writing it would
-        // leave a silently-incomplete file on disk under a success response, so
-        // refuse instead (BH-17). Nothing has been written yet, so no cleanup.
-        if resp.truncated {
-            return Err(McpError::internal_error(
-                format!(
-                    "Download of {} exceeded maxBytes ({}); refusing to write a truncated file. \
-                     Raise maxBytes to fetch the full resource.",
-                    resp.url, args.max_bytes
-                ),
-                None,
-            ));
-        }
-
-        let path = self.resolve(&args.path).await?;
-        fs::write(&path, &resp.body)
-            .await
-            .map_err(internal_err("Failed to write download"))?;
-
-        let text = format!("Downloaded {} bytes to {}", resp.body.len(), path.display());
-        Ok(
-            CallToolResult::success(vec![ContentBlock::text(text)]).with_structured(json!({
-                "path": path.to_string_lossy(),
-                "bytes": resp.body.len(),
-                "status": resp.status,
-                "url": resp.url,
-                "truncated": resp.truncated,
-            })),
-        )
-    }
-
-    #[cfg(feature = "http-tools")]
-    #[tool(
-        name = "http_download_batch",
-        description = "Batch HTTP downloads to local file paths. Requires allowlisted domains."
-    )]
-    async fn http_download_batch(
-        &self,
-        Parameters(args): Parameters<HttpDownloadBatchArgs>,
-    ) -> Result<CallToolResult, McpError> {
-        let mut results = Vec::new();
-        for item in args.downloads {
-            let _parsed = match self.ensure_http_allowed(&item.url) {
-                Ok(p) => p,
-                Err(e) => {
-                    results.push(json!({
-                        "url": item.url,
-                        "path": item.path,
-                        "ok": false,
-                        "error": e.to_string(),
-                    }));
-                    continue;
-                }
-            };
-
-            let params = HttpRequestParams {
-                method: "GET".to_string(),
-                url: item.url.clone(),
-                headers: item.headers.clone(),
-                cookies: item.cookies.clone(),
-                query: item.query.clone(),
-                body: None,
-                body_base64: false,
-                body_bytes: None,
-                timeout_ms: item.timeout_ms,
-                max_bytes: item.max_bytes,
-            };
-
-            let client = self.http_client(*item.follow_redirects);
-            match http_request(client, params).await {
-                Ok(resp) => {
-                    if resp.status >= 400 {
-                        results.push(json!({
-                            "url": item.url,
-                            "path": item.path,
-                            "ok": false,
-                            "status": resp.status,
-                            "error": format!("HTTP status {}", resp.status),
-                        }));
-                        continue;
-                    }
-                    // Refuse to write a truncated (over-maxBytes) download as success.
-                    if resp.truncated {
-                        results.push(json!({
-                            "url": item.url,
-                            "path": item.path,
-                            "ok": false,
-                            "status": resp.status,
-                            "truncated": true,
-                            "error": format!(
-                                "Download exceeded maxBytes ({}); refusing to write a truncated file",
-                                item.max_bytes
-                            ),
-                        }));
-                        continue;
-                    }
-                    match self.resolve(&item.path).await {
-                        Ok(path) => {
-                            if let Err(e) = fs::write(&path, &resp.body).await {
-                                results.push(json!({
-                                    "url": item.url,
-                                    "path": item.path,
-                                    "ok": false,
-                                    "error": format!("Failed to write file: {e}"),
-                                }));
-                                continue;
-                            }
-                            results.push(json!({
-                                "url": item.url,
-                                "path": path.to_string_lossy(),
-                                "ok": true,
-                                "status": resp.status,
-                                "bytes": resp.body.len(),
-                                "truncated": resp.truncated,
-                            }));
-                        }
-                        Err(e) => {
-                            results.push(json!({
-                                "url": item.url,
-                                "path": item.path,
-                                "ok": false,
-                                "error": e.to_string(),
-                            }));
-                        }
-                    }
-                }
-                Err(e) => {
-                    results.push(json!({
-                        "url": item.url,
-                        "path": item.path,
-                        "ok": false,
-                        "error": e.to_string(),
-                    }));
-                }
-            }
-        }
-
-        Ok(CallToolResult::success(vec![ContentBlock::text(format!(
-            "Batch downloads: {}",
-            results.len()
-        ))])
-        .with_structured(json!({ "results": results })))
-    }
-
-    #[cfg(feature = "s3-tools")]
-    #[tool(
-        name = "s3_list_buckets",
-        description = "List S3 buckets for the current credentials. Requires allowlisted buckets (use '*' to allow all)."
-    )]
-    async fn s3_list_buckets(
-        &self,
-        Parameters(args): Parameters<S3ListBucketsArgs>,
-    ) -> Result<CallToolResult, McpError> {
-        if self.s3_allowlist_buckets.is_empty() {
-            return Err(McpError::invalid_params(
-                "S3 allowlist is empty; use FS_MCP_S3_ALLOW_LIST or --s3-allowlist-bucket",
-                None,
-            ));
-        }
-        if !self.s3_allowlist_buckets.iter().any(|b| b == "*") {
-            return Err(McpError::invalid_params(
-                "S3 allowlist must include '*' to list all buckets",
-                None,
-            ));
-        }
-
-        let client = self.s3_client_for(&args.credentials).await?;
-        let buckets = list_buckets(&client)
-            .await
-            .map_err(|e| McpError::internal_error(format!("S3 list buckets failed: {e}"), None))?;
-
-        let text = format!("S3 buckets: {}", buckets.len());
-        Ok(
-            CallToolResult::success(vec![ContentBlock::text(text)]).with_structured(json!({
-                "buckets": buckets.iter().map(|b| json!({
-                    "name": b.name,
-                    "createdAt": b.created_at,
-                })).collect::<Vec<_>>(),
-            })),
-        )
-    }
-
-    #[cfg(feature = "s3-tools")]
-    #[tool(
-        name = "s3_list",
-        description = "List S3 objects and common prefixes. Requires allowlisted buckets."
-    )]
-    async fn s3_list(
-        &self,
-        Parameters(args): Parameters<S3ListArgs>,
-    ) -> Result<CallToolResult, McpError> {
-        if !is_bucket_allowed(&args.bucket, &self.s3_allowlist_buckets) {
-            return Err(McpError::invalid_params(
-                format!("S3 bucket '{}' is not in allowlist", args.bucket),
-                None,
-            ));
-        }
-
-        let client = self.s3_client_for(&args.credentials).await?;
-        let params = S3ListParams {
-            bucket: args.bucket.clone(),
-            prefix: args.prefix.clone(),
-            delimiter: args.delimiter.clone(),
-            max_keys: args.max_keys.get(),
-            continuation_token: args.continuation_token.clone(),
-        };
-        let result = list_objects(&client, params)
-            .await
-            .map_err(|e| McpError::internal_error(format!("S3 list failed: {e}"), None))?;
-
-        let text = format!(
-            "S3 list: {} objects, {} prefixes",
-            result.objects.len(),
-            result.prefixes.len()
-        );
-        Ok(
-            CallToolResult::success(vec![ContentBlock::text(text)]).with_structured(json!({
-                "objects": result.objects.iter().map(|o| json!({
-                    "key": o.key,
-                    "size": o.size,
-                    "eTag": o.e_tag,
-                    "lastModified": o.last_modified,
-                    "storageClass": o.storage_class,
-                })).collect::<Vec<_>>(),
-                "prefixes": result.prefixes,
-                "isTruncated": result.is_truncated,
-                "nextToken": result.next_token,
-            })),
-        )
-    }
-
-    #[cfg(feature = "s3-tools")]
-    #[tool(
-        name = "s3_stat",
-        description = "Fetch S3 object metadata. Requires allowlisted buckets."
-    )]
-    async fn s3_stat(
-        &self,
-        Parameters(args): Parameters<S3StatArgs>,
-    ) -> Result<CallToolResult, McpError> {
-        if !is_bucket_allowed(&args.bucket, &self.s3_allowlist_buckets) {
-            return Err(McpError::invalid_params(
-                format!("S3 bucket '{}' is not in allowlist", args.bucket),
-                None,
-            ));
-        }
-
-        let client = self.s3_client_for(&args.credentials).await?;
-        let result = stat_object(&client, &args.bucket, &args.key)
-            .await
-            .map_err(|e| McpError::internal_error(format!("S3 stat failed: {e}"), None))?;
-
-        let text = format!("S3 stat: {}/{}", result.bucket, result.key);
-        Ok(
-            CallToolResult::success(vec![ContentBlock::text(text)]).with_structured(json!({
-                "bucket": result.bucket,
-                "key": result.key,
-                "size": result.size,
-                "eTag": result.e_tag,
-                "contentType": result.content_type,
-                "lastModified": result.last_modified,
-                "metadata": result.metadata,
-            })),
-        )
-    }
-
-    #[cfg(feature = "s3-tools")]
-    #[tool(
-        name = "s3_get",
-        description = "Get S3 object bytes or write to file. Requires allowlisted buckets."
-    )]
-    async fn s3_get(
-        &self,
-        Parameters(args): Parameters<S3GetArgs>,
-    ) -> Result<CallToolResult, McpError> {
-        if !is_bucket_allowed(&args.bucket, &self.s3_allowlist_buckets) {
-            return Err(McpError::invalid_params(
-                format!("S3 bucket '{}' is not in allowlist", args.bucket),
-                None,
-            ));
-        }
-
-        let output_path = if let Some(path) = &args.output_path {
-            Some(self.resolve(path).await?.to_string_lossy().to_string())
-        } else {
-            None
-        };
-
-        let client = self.s3_client_for(&args.credentials).await?;
-        let params = S3GetParams {
-            bucket: args.bucket.clone(),
-            key: args.key.clone(),
-            range: args.range.clone(),
-            output_path,
-            max_bytes: Some(args.max_bytes),
-            accept_text: *args.accept_text,
-        };
-        let result = get_object(&client, params)
-            .await
-            .map_err(|e| McpError::internal_error(format!("S3 get failed: {e}"), None))?;
-
-        let text = if let Some(path) = &result.output_path {
-            format!("Downloaded to {}", path)
-        } else {
-            format!("S3 get: {}/{}", result.bucket, result.key)
-        };
-        Ok(
-            CallToolResult::success(vec![ContentBlock::text(text)]).with_structured(json!({
-                "bucket": result.bucket,
-                "key": result.key,
-                "size": result.size,
-                "contentType": result.content_type,
-                "bodyBase64": result.body.as_ref().map(|b| to_base64(b)),
-                "text": result.text,
-                "outputPath": result.output_path,
-                "truncated": result.truncated,
-            })),
-        )
-    }
-
-    #[cfg(feature = "s3-tools")]
-    #[tool(
-        name = "s3_put",
-        description = "Upload data to S3. Supports path or body. Requires allowlisted buckets."
-    )]
-    async fn s3_put(
-        &self,
-        Parameters(args): Parameters<S3PutArgs>,
-    ) -> Result<CallToolResult, McpError> {
-        if !is_bucket_allowed(&args.bucket, &self.s3_allowlist_buckets) {
-            return Err(McpError::invalid_params(
-                format!("S3 bucket '{}' is not in allowlist", args.bucket),
-                None,
-            ));
-        }
-
-        let path = if let Some(p) = &args.path {
-            Some(self.resolve(p).await?.to_string_lossy().to_string())
-        } else {
-            None
-        };
-
-        let client = self.s3_client_for(&args.credentials).await?;
-        let params = S3PutParams {
-            bucket: args.bucket.clone(),
-            key: args.key.clone(),
-            path,
-            body: args.body.clone(),
-            body_base64: *args.body_base64,
-            content_type: args.content_type.clone(),
-            cache_control: args.cache_control.clone(),
-            metadata: args.metadata.clone(),
-        };
-        put_object(&client, params)
-            .await
-            .map_err(|e| McpError::internal_error(format!("S3 put failed: {e}"), None))?;
-
-        Ok(CallToolResult::success(vec![ContentBlock::text(
-            "S3 put ok",
-        )]))
-    }
-
-    #[cfg(feature = "s3-tools")]
-    #[tool(
-        name = "s3_copy",
-        description = "Copy S3 object. Requires allowlisted buckets."
-    )]
-    async fn s3_copy(
-        &self,
-        Parameters(args): Parameters<S3CopyArgs>,
-    ) -> Result<CallToolResult, McpError> {
-        if !is_bucket_allowed(&args.source_bucket, &self.s3_allowlist_buckets)
-            || !is_bucket_allowed(&args.dest_bucket, &self.s3_allowlist_buckets)
-        {
-            return Err(McpError::invalid_params(
-                "S3 bucket is not in allowlist",
-                None,
-            ));
-        }
-
-        let client = self.s3_client_for(&args.credentials).await?;
-        let params = S3CopyParams {
-            source_bucket: args.source_bucket.clone(),
-            source_key: args.source_key.clone(),
-            dest_bucket: args.dest_bucket.clone(),
-            dest_key: args.dest_key.clone(),
-        };
-        copy_object(&client, params)
-            .await
-            .map_err(|e| McpError::internal_error(format!("S3 copy failed: {e}"), None))?;
-
-        Ok(CallToolResult::success(vec![ContentBlock::text(
-            "S3 copy ok",
-        )]))
-    }
-
-    #[cfg(feature = "s3-tools")]
-    #[tool(
-        name = "s3_delete",
-        description = "Delete S3 object. Requires allowlisted buckets."
-    )]
-    async fn s3_delete(
-        &self,
-        Parameters(args): Parameters<S3DeleteArgs>,
-    ) -> Result<CallToolResult, McpError> {
-        if !is_bucket_allowed(&args.bucket, &self.s3_allowlist_buckets) {
-            return Err(McpError::invalid_params(
-                format!("S3 bucket '{}' is not in allowlist", args.bucket),
-                None,
-            ));
-        }
-
-        let client = self.s3_client_for(&args.credentials).await?;
-        delete_object(
-            &client,
-            S3DeleteParams {
-                bucket: args.bucket,
-                key: args.key,
-            },
-        )
-        .await
-        .map_err(|e| McpError::internal_error(format!("S3 delete failed: {e}"), None))?;
-
-        Ok(CallToolResult::success(vec![ContentBlock::text(
-            "S3 delete ok",
-        )]))
-    }
-
-    #[cfg(feature = "s3-tools")]
-    #[tool(
-        name = "s3_delete_batch",
-        description = "Delete multiple S3 objects. Requires allowlisted buckets."
-    )]
-    async fn s3_delete_batch(
-        &self,
-        Parameters(args): Parameters<S3DeleteBatchArgs>,
-    ) -> Result<CallToolResult, McpError> {
-        if !is_bucket_allowed(&args.bucket, &self.s3_allowlist_buckets) {
-            return Err(McpError::invalid_params(
-                format!("S3 bucket '{}' is not in allowlist", args.bucket),
-                None,
-            ));
-        }
-        let client = self.s3_client_for(&args.credentials).await?;
-        delete_objects(&client, &args.bucket, args.keys)
-            .await
-            .map_err(|e| McpError::internal_error(format!("S3 delete batch failed: {e}"), None))?;
-        Ok(CallToolResult::success(vec![ContentBlock::text(
-            "S3 delete batch ok",
-        )]))
-    }
-
-    #[cfg(feature = "s3-tools")]
-    #[tool(
-        name = "s3_presign",
-        description = "Generate a presigned S3 URL for GET or PUT. Requires allowlisted buckets."
-    )]
-    async fn s3_presign(
-        &self,
-        Parameters(args): Parameters<S3PresignArgs>,
-    ) -> Result<CallToolResult, McpError> {
-        if !is_bucket_allowed(&args.bucket, &self.s3_allowlist_buckets) {
-            return Err(McpError::invalid_params(
-                format!("S3 bucket '{}' is not in allowlist", args.bucket),
-                None,
-            ));
-        }
-        let client = self.s3_client_for(&args.credentials).await?;
-        let url = presign(
-            &client,
-            S3PresignParams {
-                bucket: args.bucket,
-                key: args.key,
-                method: args.method,
-                expires_in_seconds: args.expires_in_seconds,
-            },
-        )
-        .await
-        .map_err(|e| McpError::internal_error(format!("S3 presign failed: {e}"), None))?;
-
-        Ok(
-            CallToolResult::success(vec![ContentBlock::text(url.clone())])
-                .with_structured(json!({ "url": url })),
-        )
-    }
-
-    #[cfg(feature = "s3-tools")]
-    #[tool(
-        name = "s3_get_batch",
-        description = "Batch S3 get. Requires allowlisted buckets."
-    )]
-    async fn s3_get_batch(
-        &self,
-        Parameters(args): Parameters<S3GetBatchArgs>,
-    ) -> Result<CallToolResult, McpError> {
-        let mut results = Vec::new();
-
-        for req in args.requests {
-            if !is_bucket_allowed(&req.bucket, &self.s3_allowlist_buckets) {
-                results.push(json!({
-                    "bucket": req.bucket,
-                    "key": req.key,
-                    "ok": false,
-                    "error": "Bucket not in allowlist",
-                }));
-                continue;
-            }
-
-            let client = match self.s3_client_for(&req.credentials).await {
-                Ok(client) => client,
-                Err(e) => {
-                    results.push(json!({
-                        "bucket": req.bucket,
-                        "key": req.key,
-                        "ok": false,
-                        "error": e.to_string(),
-                    }));
-                    continue;
-                }
-            };
-
-            let output_path = if let Some(path) = &req.output_path {
-                match self.resolve(path).await {
-                    Ok(resolved) => Some(resolved.to_string_lossy().to_string()),
-                    Err(e) => {
-                        results.push(json!({
-                            "bucket": req.bucket,
-                            "key": req.key,
-                            "ok": false,
-                            "error": e.to_string(),
-                        }));
-                        continue;
-                    }
-                }
-            } else {
-                None
-            };
-
-            let params = S3GetParams {
-                bucket: req.bucket.clone(),
-                key: req.key.clone(),
-                range: req.range.clone(),
-                output_path,
-                max_bytes: Some(req.max_bytes),
-                accept_text: *req.accept_text,
-            };
-
-            match get_object(&client, params).await {
-                Ok(result) => results.push(json!({
-                    "bucket": result.bucket,
-                    "key": result.key,
-                    "ok": true,
-                    "size": result.size,
-                    "contentType": result.content_type,
-                    "bodyBase64": result.body.as_ref().map(|b| to_base64(b)),
-                    "text": result.text,
-                    "outputPath": result.output_path,
-                    "truncated": result.truncated,
-                })),
-                Err(e) => results.push(json!({
-                    "bucket": req.bucket,
-                    "key": req.key,
-                    "ok": false,
-                    "error": e.to_string(),
-                })),
-            }
-        }
-
-        Ok(CallToolResult::success(vec![ContentBlock::text(format!(
-            "Batch S3 get: {}",
-            results.len()
-        ))])
-        .with_structured(json!({ "results": results })))
-    }
-
-    #[cfg(feature = "s3-tools")]
-    #[tool(
-        name = "s3_put_batch",
-        description = "Batch S3 put. Requires allowlisted buckets."
-    )]
-    async fn s3_put_batch(
-        &self,
-        Parameters(args): Parameters<S3PutBatchArgs>,
-    ) -> Result<CallToolResult, McpError> {
-        let mut results = Vec::new();
-
-        for req in args.requests {
-            if !is_bucket_allowed(&req.bucket, &self.s3_allowlist_buckets) {
-                results.push(json!({
-                    "bucket": req.bucket,
-                    "key": req.key,
-                    "ok": false,
-                    "error": "Bucket not in allowlist",
-                }));
-                continue;
-            }
-
-            let client = match self.s3_client_for(&req.credentials).await {
-                Ok(client) => client,
-                Err(e) => {
-                    results.push(json!({
-                        "bucket": req.bucket,
-                        "key": req.key,
-                        "ok": false,
-                        "error": e.to_string(),
-                    }));
-                    continue;
-                }
-            };
-
-            let path = if let Some(p) = &req.path {
-                match self.resolve(p).await {
-                    Ok(resolved) => Some(resolved.to_string_lossy().to_string()),
-                    Err(e) => {
-                        results.push(json!({
-                            "bucket": req.bucket,
-                            "key": req.key,
-                            "ok": false,
-                            "error": e.to_string(),
-                        }));
-                        continue;
-                    }
-                }
-            } else {
-                None
-            };
-
-            let params = S3PutParams {
-                bucket: req.bucket.clone(),
-                key: req.key.clone(),
-                path,
-                body: req.body.clone(),
-                body_base64: *req.body_base64,
-                content_type: req.content_type.clone(),
-                cache_control: req.cache_control.clone(),
-                metadata: req.metadata.clone(),
-            };
-
-            match put_object(&client, params).await {
-                Ok(()) => results.push(json!({
-                    "bucket": req.bucket,
-                    "key": req.key,
-                    "ok": true,
-                })),
-                Err(e) => results.push(json!({
-                    "bucket": req.bucket,
-                    "key": req.key,
-                    "ok": false,
-                    "error": e.to_string(),
-                })),
-            }
-        }
-
-        Ok(CallToolResult::success(vec![ContentBlock::text(format!(
-            "Batch S3 put: {}",
-            results.len()
-        ))])
-        .with_structured(json!({ "results": results })))
-    }
-
-    #[cfg(feature = "s3-tools")]
-    #[tool(
-        name = "s3_copy_batch",
-        description = "Batch S3 copy. Requires allowlisted buckets."
-    )]
-    async fn s3_copy_batch(
-        &self,
-        Parameters(args): Parameters<S3CopyBatchArgs>,
-    ) -> Result<CallToolResult, McpError> {
-        let mut results = Vec::new();
-
-        for req in args.requests {
-            if !is_bucket_allowed(&req.source_bucket, &self.s3_allowlist_buckets)
-                || !is_bucket_allowed(&req.dest_bucket, &self.s3_allowlist_buckets)
-            {
-                results.push(json!({
-                    "sourceBucket": req.source_bucket,
-                    "destBucket": req.dest_bucket,
-                    "key": req.source_key,
-                    "ok": false,
-                    "error": "Bucket not in allowlist",
-                }));
-                continue;
-            }
-
-            let client = match self.s3_client_for(&req.credentials).await {
-                Ok(client) => client,
-                Err(e) => {
-                    results.push(json!({
-                        "sourceBucket": req.source_bucket,
-                        "destBucket": req.dest_bucket,
-                        "key": req.source_key,
-                        "ok": false,
-                        "error": e.to_string(),
-                    }));
-                    continue;
-                }
-            };
-
-            let params = S3CopyParams {
-                source_bucket: req.source_bucket.clone(),
-                source_key: req.source_key.clone(),
-                dest_bucket: req.dest_bucket.clone(),
-                dest_key: req.dest_key.clone(),
-            };
-
-            match copy_object(&client, params).await {
-                Ok(()) => results.push(json!({
-                    "sourceBucket": req.source_bucket,
-                    "destBucket": req.dest_bucket,
-                    "key": req.source_key,
-                    "ok": true,
-                })),
-                Err(e) => results.push(json!({
-                    "sourceBucket": req.source_bucket,
-                    "destBucket": req.dest_bucket,
-                    "key": req.source_key,
-                    "ok": false,
-                    "error": e.to_string(),
-                })),
-            }
-        }
-
-        Ok(CallToolResult::success(vec![ContentBlock::text(format!(
-            "Batch S3 copy: {}",
-            results.len()
-        ))])
-        .with_structured(json!({ "results": results })))
-    }
-
     #[tool(
         name = "edit_lines",
         description = "Edit file by LINE NUMBERS (precise, surgical edits). Use when you know EXACT line numbers to modify. Operations: replace (change line(s)), insert_before/insert_after (add new lines), delete (remove line(s)). Supports single lines or ranges (startLine-endLine). Returns unified diff. Use this for: fixing specific lines, adding imports at known positions, removing exact lines. Different from edit_file which uses search/replace text matching. Line numbers are 1-indexed."
@@ -6510,122 +5559,6 @@ USE CASES: Patch executables, fix binary data, search-replace in non-text files.
 
     // === Screenshot Tools ===
 
-    #[cfg(feature = "screenshot-tools")]
-    #[tool(
-        name = "screenshot_list_monitors",
-        description = "List all monitors with IDs and dimensions"
-    )]
-    async fn list_monitors(
-        &self,
-        Parameters(_args): Parameters<ListMonitorsArgs>,
-    ) -> Result<CallToolResult, McpError> {
-        let monitors = screenshot::list_monitors()
-            .map_err(|e| McpError::internal_error(e.to_string(), None))?;
-        let payload = json!({ "monitors": monitors });
-        let text =
-            serde_json::to_string_pretty(&payload).unwrap_or_else(|_| format!("{:?}", payload));
-        Ok(CallToolResult::success(vec![ContentBlock::text(text)]).with_structured(payload))
-    }
-
-    #[cfg(feature = "screenshot-tools")]
-    #[tool(
-        name = "screenshot_list_windows",
-        description = "List all visible windows. Optional title_filter."
-    )]
-    async fn list_windows(
-        &self,
-        Parameters(args): Parameters<ListWindowsArgs>,
-    ) -> Result<CallToolResult, McpError> {
-        let mut windows = screenshot::list_windows()
-            .map_err(|e| McpError::internal_error(e.to_string(), None))?;
-        if let Some(filter) = &args.title_filter {
-            let lower = filter.to_lowercase();
-            windows.retain(|w| w.title.to_lowercase().contains(&lower));
-        }
-        let payload = json!({ "windows": windows });
-        let text =
-            serde_json::to_string_pretty(&payload).unwrap_or_else(|_| format!("{:?}", payload));
-        Ok(CallToolResult::success(vec![ContentBlock::text(text)]).with_structured(payload))
-    }
-
-    #[cfg(feature = "screenshot-tools")]
-    #[tool(
-        name = "screenshot_capture_screen",
-        description = "Capture monitor. Args: monitor_id, output (file/clipboard/base64), path"
-    )]
-    async fn capture_screen(
-        &self,
-        Parameters(args): Parameters<CaptureScreenArgs>,
-    ) -> Result<CallToolResult, McpError> {
-        let image = screenshot::capture_monitor(args.monitor_id.get())
-            .map_err(|e| McpError::internal_error(e.to_string(), None))?;
-        self.handle_screenshot_output(&image, args.output, args.path.as_deref())
-            .await
-    }
-
-    #[cfg(feature = "screenshot-tools")]
-    #[tool(
-        name = "screenshot_capture_window",
-        description = "Capture window by window_id or title"
-    )]
-    async fn capture_window(
-        &self,
-        Parameters(args): Parameters<CaptureWindowArgs>,
-    ) -> Result<CallToolResult, McpError> {
-        let image = match (args.window_id.get(), &args.title) {
-            (Some(id), _) => screenshot::capture_window_by_id(id),
-            (None, Some(title)) => screenshot::capture_window_by_title(title),
-            _ => {
-                return Err(McpError::invalid_params(
-                    "window_id or title required",
-                    None,
-                ));
-            }
-        }
-        .map_err(|e| McpError::internal_error(e.to_string(), None))?;
-        self.handle_screenshot_output(&image, args.output, args.path.as_deref())
-            .await
-    }
-
-    #[cfg(feature = "screenshot-tools")]
-    #[tool(
-        name = "screenshot_capture_region",
-        description = "Capture region. Args: x, y, width, height, monitor_id, output, path"
-    )]
-    async fn capture_region(
-        &self,
-        Parameters(args): Parameters<CaptureRegionArgs>,
-    ) -> Result<CallToolResult, McpError> {
-        let image = screenshot::capture_region(
-            args.monitor_id.get(),
-            *args.x,
-            *args.y,
-            *args.width,
-            *args.height,
-        )
-        .map_err(|e| McpError::internal_error(e.to_string(), None))?;
-        self.handle_screenshot_output(&image, args.output, args.path.as_deref())
-            .await
-    }
-
-    #[cfg(feature = "screenshot-tools")]
-    #[tool(
-        name = "screenshot_copy_to_clipboard",
-        description = "Copy image file to clipboard"
-    )]
-    async fn copy_to_clipboard(
-        &self,
-        Parameters(args): Parameters<CopyToClipboardArgs>,
-    ) -> Result<CallToolResult, McpError> {
-        let path = self.resolve(&args.path).await?;
-        screenshot::copy_file(&path).map_err(|e| McpError::internal_error(e.to_string(), None))?;
-        Ok(CallToolResult::success(vec![ContentBlock::text(format!(
-            "Copied to clipboard: {}",
-            path.display()
-        ))])
-        .with_structured(json!({ "path": path.display().to_string() })))
-    }
-
     // ==================== THINKING TOOLS ====================
 
     #[tool(
@@ -7281,6 +6214,1089 @@ USE CASES: Patch executables, fix binary data, search-replace in non-text files.
         }
     }
 }
+/// HTTP/HTTPS request tools, in their own router.
+///
+/// A separate impl block because `#[tool_router]` collects every `#[tool]` function in the
+/// block and emits its route unconditionally - it never reads the `#[cfg]` on the function
+/// (`rmcp-macros-3.1.3/src/tool_router.rs:41-59`). A gate on the method therefore removed the
+/// method and kept the route calling it, and every build without this feature failed on a name
+/// that no longer existed. Gating the whole block is what works, and is the shape the
+/// computer-control domains already use; [`FileSystemServer::build_tool_router`] merges this
+/// router under the matching `cfg`.
+#[cfg(feature = "http-tools")]
+#[tool_router(router = http_router, vis = "pub(crate)")]
+impl FileSystemServer {
+    #[tool(
+        name = "http_request",
+        description = "HTTP/HTTPS request with method, headers, cookies, query params, and body. Requires allowlisted domains."
+    )]
+    async fn http_request(
+        &self,
+        Parameters(args): Parameters<HttpRequestArgs>,
+    ) -> Result<CallToolResult, McpError> {
+        let _parsed = self.ensure_http_allowed(&args.url)?;
+
+        let mut body_bytes = None;
+        if let Some(path) = &args.body_path {
+            let resolved = self.resolve(path).await?;
+            body_bytes = Some(
+                fs::read(&resolved)
+                    .await
+                    .map_err(internal_err("Failed to read body file"))?,
+            );
+        }
+
+        let params = HttpRequestParams {
+            method: args.method.clone(),
+            url: args.url.clone(),
+            headers: args.headers.clone(),
+            cookies: args.cookies.clone(),
+            query: args.query.clone(),
+            body: args.body.clone(),
+            body_base64: *args.body_base64,
+            body_bytes,
+            timeout_ms: args.timeout_ms,
+            max_bytes: args.max_bytes,
+        };
+
+        let client = self.http_client(*args.follow_redirects);
+        let resp = http_request(client, params)
+            .await
+            .map_err(|e| McpError::internal_error(format!("HTTP request failed: {e}"), None))?;
+
+        let accept = args.accept.as_deref().unwrap_or("bytes");
+        let (body_text, body_base64, json_value, parse_error) = match accept {
+            "text" => (Some(decode_body_text(&resp.body)), None, None, None),
+            "json" => match serde_json::from_slice::<Value>(&resp.body) {
+                Ok(v) => (None, None, Some(v), None),
+                Err(e) => (None, None, None, Some(format!("Invalid JSON: {e}"))),
+            },
+            _ => (None, Some(to_base64(&resp.body)), None, None),
+        };
+
+        let text = format!(
+            "HTTP {} {} (truncated: {})",
+            resp.status, resp.url, resp.truncated
+        );
+
+        let structured = json!({
+            "status": resp.status,
+            "url": resp.url,
+            "headers": resp.headers,
+            "contentType": resp.content_type,
+            "contentLength": resp.content_length,
+            "truncated": resp.truncated,
+            "bodyText": body_text,
+            "bodyBase64": body_base64,
+            "json": json_value,
+            "parseError": parse_error,
+        });
+
+        Ok(CallToolResult::success(vec![ContentBlock::text(text)]).with_structured(structured))
+    }
+    #[tool(
+        name = "http_request_batch",
+        description = "Batch HTTP requests. Each request supports method, headers, cookies, query params, and body. Requires allowlisted domains."
+    )]
+    async fn http_request_batch(
+        &self,
+        Parameters(args): Parameters<HttpRequestBatchArgs>,
+    ) -> Result<CallToolResult, McpError> {
+        let mut results: Vec<Option<Value>> = vec![None; args.requests.len()];
+        let mut batch_follow = Vec::new();
+        let mut batch_no_follow = Vec::new();
+
+        for (index, item) in args.requests.into_iter().enumerate() {
+            let _parsed = match self.ensure_http_allowed(&item.request.url) {
+                Ok(p) => p,
+                Err(e) => {
+                    results[index] = Some(json!({
+                        "id": item.id,
+                        "ok": false,
+                        "error": e.to_string(),
+                    }));
+                    continue;
+                }
+            };
+
+            let mut body_bytes = None;
+            if let Some(path) = &item.request.body_path {
+                match self.resolve(path).await {
+                    Ok(resolved) => match fs::read(&resolved).await {
+                        Ok(bytes) => body_bytes = Some(bytes),
+                        Err(e) => {
+                            results[index] = Some(json!({
+                                "id": item.id,
+                                "ok": false,
+                                "error": format!("Failed to read body file: {e}"),
+                            }));
+                            continue;
+                        }
+                    },
+                    Err(e) => {
+                        results[index] = Some(json!({
+                            "id": item.id,
+                            "ok": false,
+                            "error": e.to_string(),
+                        }));
+                        continue;
+                    }
+                }
+            }
+
+            let params = HttpRequestParams {
+                method: item.request.method.clone(),
+                url: item.request.url.clone(),
+                headers: item.request.headers.clone(),
+                cookies: item.request.cookies.clone(),
+                query: item.request.query.clone(),
+                body: item.request.body.clone(),
+                body_base64: *item.request.body_base64,
+                body_bytes,
+                timeout_ms: item.request.timeout_ms,
+                max_bytes: item.request.max_bytes,
+            };
+
+            let request_item = crate::tools::http_tools::HttpRequestItem {
+                id: item.id,
+                params,
+            };
+
+            if *item.request.follow_redirects {
+                batch_follow.push((index, request_item));
+            } else {
+                batch_no_follow.push((index, request_item));
+            }
+        }
+
+        for (follow, items) in [(true, batch_follow), (false, batch_no_follow)] {
+            if items.is_empty() {
+                continue;
+            }
+
+            let client = self.http_client(follow);
+            let (indices, batch_items): (
+                Vec<usize>,
+                Vec<crate::tools::http_tools::HttpRequestItem>,
+            ) = items.into_iter().unzip();
+            let batch_results = http_request_batch(client, batch_items).await;
+
+            for (index, result) in indices.into_iter().zip(batch_results) {
+                let crate::tools::http_tools::HttpBatchResult {
+                    id,
+                    ok,
+                    response,
+                    error,
+                } = result;
+                let json_result = if let Some(resp) = response {
+                    let mut payload = json!({
+                        "id": id,
+                        "ok": ok,
+                        "status": resp.status,
+                        "url": resp.url,
+                        "headers": resp.headers,
+                        "contentType": resp.content_type,
+                        "contentLength": resp.content_length,
+                        "truncated": resp.truncated,
+                        "bodyBase64": to_base64(&resp.body),
+                    });
+                    if !ok {
+                        let err_msg =
+                            error.unwrap_or_else(|| format!("HTTP status {}", resp.status));
+                        if let Some(map) = payload.as_object_mut() {
+                            map.insert("error".to_string(), Value::String(err_msg));
+                        }
+                    }
+                    payload
+                } else {
+                    json!({ "id": id, "ok": false, "error": error.unwrap_or_else(|| "Missing response".to_string()) })
+                };
+                results[index] = Some(json_result);
+            }
+        }
+
+        let results: Vec<Value> = results
+            .into_iter()
+            .map(|r| r.unwrap_or_else(|| json!({ "ok": false, "error": "Missing result" })))
+            .collect();
+
+        Ok(CallToolResult::success(vec![ContentBlock::text(format!(
+            "Batch results: {}",
+            results.len()
+        ))])
+        .with_structured(json!({ "results": results })))
+    }
+    #[tool(
+        name = "http_download",
+        description = "Download an HTTP/HTTPS resource to a local file path. Requires allowlisted domains."
+    )]
+    async fn http_download(
+        &self,
+        Parameters(args): Parameters<HttpDownloadArgs>,
+    ) -> Result<CallToolResult, McpError> {
+        let _parsed = self.ensure_http_allowed(&args.url)?;
+
+        let params = HttpRequestParams {
+            method: "GET".to_string(),
+            url: args.url.clone(),
+            headers: args.headers.clone(),
+            cookies: args.cookies.clone(),
+            query: args.query.clone(),
+            body: None,
+            body_base64: false,
+            body_bytes: None,
+            timeout_ms: args.timeout_ms,
+            max_bytes: args.max_bytes,
+        };
+
+        let client = self.http_client(*args.follow_redirects);
+        let resp = http_request(client, params)
+            .await
+            .map_err(|e| McpError::internal_error(format!("HTTP request failed: {e}"), None))?;
+
+        if resp.status >= 400 {
+            return Err(McpError::internal_error(
+                format!("HTTP status {} for {}", resp.status, resp.url),
+                None,
+            ));
+        }
+
+        // A truncated body means the resource exceeded maxBytes. Writing it would
+        // leave a silently-incomplete file on disk under a success response, so
+        // refuse instead (BH-17). Nothing has been written yet, so no cleanup.
+        if resp.truncated {
+            return Err(McpError::internal_error(
+                format!(
+                    "Download of {} exceeded maxBytes ({}); refusing to write a truncated file. \
+                     Raise maxBytes to fetch the full resource.",
+                    resp.url, args.max_bytes
+                ),
+                None,
+            ));
+        }
+
+        let path = self.resolve(&args.path).await?;
+        fs::write(&path, &resp.body)
+            .await
+            .map_err(internal_err("Failed to write download"))?;
+
+        let text = format!("Downloaded {} bytes to {}", resp.body.len(), path.display());
+        Ok(
+            CallToolResult::success(vec![ContentBlock::text(text)]).with_structured(json!({
+                "path": path.to_string_lossy(),
+                "bytes": resp.body.len(),
+                "status": resp.status,
+                "url": resp.url,
+                "truncated": resp.truncated,
+            })),
+        )
+    }
+    #[tool(
+        name = "http_download_batch",
+        description = "Batch HTTP downloads to local file paths. Requires allowlisted domains."
+    )]
+    async fn http_download_batch(
+        &self,
+        Parameters(args): Parameters<HttpDownloadBatchArgs>,
+    ) -> Result<CallToolResult, McpError> {
+        let mut results = Vec::new();
+        for item in args.downloads {
+            let _parsed = match self.ensure_http_allowed(&item.url) {
+                Ok(p) => p,
+                Err(e) => {
+                    results.push(json!({
+                        "url": item.url,
+                        "path": item.path,
+                        "ok": false,
+                        "error": e.to_string(),
+                    }));
+                    continue;
+                }
+            };
+
+            let params = HttpRequestParams {
+                method: "GET".to_string(),
+                url: item.url.clone(),
+                headers: item.headers.clone(),
+                cookies: item.cookies.clone(),
+                query: item.query.clone(),
+                body: None,
+                body_base64: false,
+                body_bytes: None,
+                timeout_ms: item.timeout_ms,
+                max_bytes: item.max_bytes,
+            };
+
+            let client = self.http_client(*item.follow_redirects);
+            match http_request(client, params).await {
+                Ok(resp) => {
+                    if resp.status >= 400 {
+                        results.push(json!({
+                            "url": item.url,
+                            "path": item.path,
+                            "ok": false,
+                            "status": resp.status,
+                            "error": format!("HTTP status {}", resp.status),
+                        }));
+                        continue;
+                    }
+                    // Refuse to write a truncated (over-maxBytes) download as success.
+                    if resp.truncated {
+                        results.push(json!({
+                            "url": item.url,
+                            "path": item.path,
+                            "ok": false,
+                            "status": resp.status,
+                            "truncated": true,
+                            "error": format!(
+                                "Download exceeded maxBytes ({}); refusing to write a truncated file",
+                                item.max_bytes
+                            ),
+                        }));
+                        continue;
+                    }
+                    match self.resolve(&item.path).await {
+                        Ok(path) => {
+                            if let Err(e) = fs::write(&path, &resp.body).await {
+                                results.push(json!({
+                                    "url": item.url,
+                                    "path": item.path,
+                                    "ok": false,
+                                    "error": format!("Failed to write file: {e}"),
+                                }));
+                                continue;
+                            }
+                            results.push(json!({
+                                "url": item.url,
+                                "path": path.to_string_lossy(),
+                                "ok": true,
+                                "status": resp.status,
+                                "bytes": resp.body.len(),
+                                "truncated": resp.truncated,
+                            }));
+                        }
+                        Err(e) => {
+                            results.push(json!({
+                                "url": item.url,
+                                "path": item.path,
+                                "ok": false,
+                                "error": e.to_string(),
+                            }));
+                        }
+                    }
+                }
+                Err(e) => {
+                    results.push(json!({
+                        "url": item.url,
+                        "path": item.path,
+                        "ok": false,
+                        "error": e.to_string(),
+                    }));
+                }
+            }
+        }
+
+        Ok(CallToolResult::success(vec![ContentBlock::text(format!(
+            "Batch downloads: {}",
+            results.len()
+        ))])
+        .with_structured(json!({ "results": results })))
+    }
+}
+
+/// S3 object-store tools, in their own router.
+///
+/// A separate impl block because `#[tool_router]` collects every `#[tool]` function in the
+/// block and emits its route unconditionally - it never reads the `#[cfg]` on the function
+/// (`rmcp-macros-3.1.3/src/tool_router.rs:41-59`). A gate on the method therefore removed the
+/// method and kept the route calling it, and every build without this feature failed on a name
+/// that no longer existed. Gating the whole block is what works, and is the shape the
+/// computer-control domains already use; [`FileSystemServer::build_tool_router`] merges this
+/// router under the matching `cfg`.
+#[cfg(feature = "s3-tools")]
+#[tool_router(router = s3_router, vis = "pub(crate)")]
+impl FileSystemServer {
+    #[tool(
+        name = "s3_list_buckets",
+        description = "List S3 buckets for the current credentials. Requires allowlisted buckets (use '*' to allow all)."
+    )]
+    async fn s3_list_buckets(
+        &self,
+        Parameters(args): Parameters<S3ListBucketsArgs>,
+    ) -> Result<CallToolResult, McpError> {
+        if self.s3_allowlist_buckets.is_empty() {
+            return Err(McpError::invalid_params(
+                "S3 allowlist is empty; use FS_MCP_S3_ALLOW_LIST or --s3-allowlist-bucket",
+                None,
+            ));
+        }
+        if !self.s3_allowlist_buckets.iter().any(|b| b == "*") {
+            return Err(McpError::invalid_params(
+                "S3 allowlist must include '*' to list all buckets",
+                None,
+            ));
+        }
+
+        let client = self.s3_client_for(&args.credentials).await?;
+        let buckets = list_buckets(&client)
+            .await
+            .map_err(|e| McpError::internal_error(format!("S3 list buckets failed: {e}"), None))?;
+
+        let text = format!("S3 buckets: {}", buckets.len());
+        Ok(
+            CallToolResult::success(vec![ContentBlock::text(text)]).with_structured(json!({
+                "buckets": buckets.iter().map(|b| json!({
+                    "name": b.name,
+                    "createdAt": b.created_at,
+                })).collect::<Vec<_>>(),
+            })),
+        )
+    }
+    #[tool(
+        name = "s3_list",
+        description = "List S3 objects and common prefixes. Requires allowlisted buckets."
+    )]
+    async fn s3_list(
+        &self,
+        Parameters(args): Parameters<S3ListArgs>,
+    ) -> Result<CallToolResult, McpError> {
+        if !is_bucket_allowed(&args.bucket, &self.s3_allowlist_buckets) {
+            return Err(McpError::invalid_params(
+                format!("S3 bucket '{}' is not in allowlist", args.bucket),
+                None,
+            ));
+        }
+
+        let client = self.s3_client_for(&args.credentials).await?;
+        let params = S3ListParams {
+            bucket: args.bucket.clone(),
+            prefix: args.prefix.clone(),
+            delimiter: args.delimiter.clone(),
+            max_keys: args.max_keys.get(),
+            continuation_token: args.continuation_token.clone(),
+        };
+        let result = list_objects(&client, params)
+            .await
+            .map_err(|e| McpError::internal_error(format!("S3 list failed: {e}"), None))?;
+
+        let text = format!(
+            "S3 list: {} objects, {} prefixes",
+            result.objects.len(),
+            result.prefixes.len()
+        );
+        Ok(
+            CallToolResult::success(vec![ContentBlock::text(text)]).with_structured(json!({
+                "objects": result.objects.iter().map(|o| json!({
+                    "key": o.key,
+                    "size": o.size,
+                    "eTag": o.e_tag,
+                    "lastModified": o.last_modified,
+                    "storageClass": o.storage_class,
+                })).collect::<Vec<_>>(),
+                "prefixes": result.prefixes,
+                "isTruncated": result.is_truncated,
+                "nextToken": result.next_token,
+            })),
+        )
+    }
+    #[tool(
+        name = "s3_stat",
+        description = "Fetch S3 object metadata. Requires allowlisted buckets."
+    )]
+    async fn s3_stat(
+        &self,
+        Parameters(args): Parameters<S3StatArgs>,
+    ) -> Result<CallToolResult, McpError> {
+        if !is_bucket_allowed(&args.bucket, &self.s3_allowlist_buckets) {
+            return Err(McpError::invalid_params(
+                format!("S3 bucket '{}' is not in allowlist", args.bucket),
+                None,
+            ));
+        }
+
+        let client = self.s3_client_for(&args.credentials).await?;
+        let result = stat_object(&client, &args.bucket, &args.key)
+            .await
+            .map_err(|e| McpError::internal_error(format!("S3 stat failed: {e}"), None))?;
+
+        let text = format!("S3 stat: {}/{}", result.bucket, result.key);
+        Ok(
+            CallToolResult::success(vec![ContentBlock::text(text)]).with_structured(json!({
+                "bucket": result.bucket,
+                "key": result.key,
+                "size": result.size,
+                "eTag": result.e_tag,
+                "contentType": result.content_type,
+                "lastModified": result.last_modified,
+                "metadata": result.metadata,
+            })),
+        )
+    }
+    #[tool(
+        name = "s3_get",
+        description = "Get S3 object bytes or write to file. Requires allowlisted buckets."
+    )]
+    async fn s3_get(
+        &self,
+        Parameters(args): Parameters<S3GetArgs>,
+    ) -> Result<CallToolResult, McpError> {
+        if !is_bucket_allowed(&args.bucket, &self.s3_allowlist_buckets) {
+            return Err(McpError::invalid_params(
+                format!("S3 bucket '{}' is not in allowlist", args.bucket),
+                None,
+            ));
+        }
+
+        let output_path = if let Some(path) = &args.output_path {
+            Some(self.resolve(path).await?.to_string_lossy().to_string())
+        } else {
+            None
+        };
+
+        let client = self.s3_client_for(&args.credentials).await?;
+        let params = S3GetParams {
+            bucket: args.bucket.clone(),
+            key: args.key.clone(),
+            range: args.range.clone(),
+            output_path,
+            max_bytes: Some(args.max_bytes),
+            accept_text: *args.accept_text,
+        };
+        let result = get_object(&client, params)
+            .await
+            .map_err(|e| McpError::internal_error(format!("S3 get failed: {e}"), None))?;
+
+        let text = if let Some(path) = &result.output_path {
+            format!("Downloaded to {}", path)
+        } else {
+            format!("S3 get: {}/{}", result.bucket, result.key)
+        };
+        Ok(
+            CallToolResult::success(vec![ContentBlock::text(text)]).with_structured(json!({
+                "bucket": result.bucket,
+                "key": result.key,
+                "size": result.size,
+                "contentType": result.content_type,
+                "bodyBase64": result.body.as_ref().map(|b| to_base64(b)),
+                "text": result.text,
+                "outputPath": result.output_path,
+                "truncated": result.truncated,
+            })),
+        )
+    }
+    #[tool(
+        name = "s3_put",
+        description = "Upload data to S3. Supports path or body. Requires allowlisted buckets."
+    )]
+    async fn s3_put(
+        &self,
+        Parameters(args): Parameters<S3PutArgs>,
+    ) -> Result<CallToolResult, McpError> {
+        if !is_bucket_allowed(&args.bucket, &self.s3_allowlist_buckets) {
+            return Err(McpError::invalid_params(
+                format!("S3 bucket '{}' is not in allowlist", args.bucket),
+                None,
+            ));
+        }
+
+        let path = if let Some(p) = &args.path {
+            Some(self.resolve(p).await?.to_string_lossy().to_string())
+        } else {
+            None
+        };
+
+        let client = self.s3_client_for(&args.credentials).await?;
+        let params = S3PutParams {
+            bucket: args.bucket.clone(),
+            key: args.key.clone(),
+            path,
+            body: args.body.clone(),
+            body_base64: *args.body_base64,
+            content_type: args.content_type.clone(),
+            cache_control: args.cache_control.clone(),
+            metadata: args.metadata.clone(),
+        };
+        put_object(&client, params)
+            .await
+            .map_err(|e| McpError::internal_error(format!("S3 put failed: {e}"), None))?;
+
+        Ok(CallToolResult::success(vec![ContentBlock::text(
+            "S3 put ok",
+        )]))
+    }
+    #[tool(
+        name = "s3_copy",
+        description = "Copy S3 object. Requires allowlisted buckets."
+    )]
+    async fn s3_copy(
+        &self,
+        Parameters(args): Parameters<S3CopyArgs>,
+    ) -> Result<CallToolResult, McpError> {
+        if !is_bucket_allowed(&args.source_bucket, &self.s3_allowlist_buckets)
+            || !is_bucket_allowed(&args.dest_bucket, &self.s3_allowlist_buckets)
+        {
+            return Err(McpError::invalid_params(
+                "S3 bucket is not in allowlist",
+                None,
+            ));
+        }
+
+        let client = self.s3_client_for(&args.credentials).await?;
+        let params = S3CopyParams {
+            source_bucket: args.source_bucket.clone(),
+            source_key: args.source_key.clone(),
+            dest_bucket: args.dest_bucket.clone(),
+            dest_key: args.dest_key.clone(),
+        };
+        copy_object(&client, params)
+            .await
+            .map_err(|e| McpError::internal_error(format!("S3 copy failed: {e}"), None))?;
+
+        Ok(CallToolResult::success(vec![ContentBlock::text(
+            "S3 copy ok",
+        )]))
+    }
+    #[tool(
+        name = "s3_delete",
+        description = "Delete S3 object. Requires allowlisted buckets."
+    )]
+    async fn s3_delete(
+        &self,
+        Parameters(args): Parameters<S3DeleteArgs>,
+    ) -> Result<CallToolResult, McpError> {
+        if !is_bucket_allowed(&args.bucket, &self.s3_allowlist_buckets) {
+            return Err(McpError::invalid_params(
+                format!("S3 bucket '{}' is not in allowlist", args.bucket),
+                None,
+            ));
+        }
+
+        let client = self.s3_client_for(&args.credentials).await?;
+        delete_object(
+            &client,
+            S3DeleteParams {
+                bucket: args.bucket,
+                key: args.key,
+            },
+        )
+        .await
+        .map_err(|e| McpError::internal_error(format!("S3 delete failed: {e}"), None))?;
+
+        Ok(CallToolResult::success(vec![ContentBlock::text(
+            "S3 delete ok",
+        )]))
+    }
+    #[tool(
+        name = "s3_delete_batch",
+        description = "Delete multiple S3 objects. Requires allowlisted buckets."
+    )]
+    async fn s3_delete_batch(
+        &self,
+        Parameters(args): Parameters<S3DeleteBatchArgs>,
+    ) -> Result<CallToolResult, McpError> {
+        if !is_bucket_allowed(&args.bucket, &self.s3_allowlist_buckets) {
+            return Err(McpError::invalid_params(
+                format!("S3 bucket '{}' is not in allowlist", args.bucket),
+                None,
+            ));
+        }
+        let client = self.s3_client_for(&args.credentials).await?;
+        delete_objects(&client, &args.bucket, args.keys)
+            .await
+            .map_err(|e| McpError::internal_error(format!("S3 delete batch failed: {e}"), None))?;
+        Ok(CallToolResult::success(vec![ContentBlock::text(
+            "S3 delete batch ok",
+        )]))
+    }
+    #[tool(
+        name = "s3_presign",
+        description = "Generate a presigned S3 URL for GET or PUT. Requires allowlisted buckets."
+    )]
+    async fn s3_presign(
+        &self,
+        Parameters(args): Parameters<S3PresignArgs>,
+    ) -> Result<CallToolResult, McpError> {
+        if !is_bucket_allowed(&args.bucket, &self.s3_allowlist_buckets) {
+            return Err(McpError::invalid_params(
+                format!("S3 bucket '{}' is not in allowlist", args.bucket),
+                None,
+            ));
+        }
+        let client = self.s3_client_for(&args.credentials).await?;
+        let url = presign(
+            &client,
+            S3PresignParams {
+                bucket: args.bucket,
+                key: args.key,
+                method: args.method,
+                expires_in_seconds: args.expires_in_seconds,
+            },
+        )
+        .await
+        .map_err(|e| McpError::internal_error(format!("S3 presign failed: {e}"), None))?;
+
+        Ok(
+            CallToolResult::success(vec![ContentBlock::text(url.clone())])
+                .with_structured(json!({ "url": url })),
+        )
+    }
+    #[tool(
+        name = "s3_get_batch",
+        description = "Batch S3 get. Requires allowlisted buckets."
+    )]
+    async fn s3_get_batch(
+        &self,
+        Parameters(args): Parameters<S3GetBatchArgs>,
+    ) -> Result<CallToolResult, McpError> {
+        let mut results = Vec::new();
+
+        for req in args.requests {
+            if !is_bucket_allowed(&req.bucket, &self.s3_allowlist_buckets) {
+                results.push(json!({
+                    "bucket": req.bucket,
+                    "key": req.key,
+                    "ok": false,
+                    "error": "Bucket not in allowlist",
+                }));
+                continue;
+            }
+
+            let client = match self.s3_client_for(&req.credentials).await {
+                Ok(client) => client,
+                Err(e) => {
+                    results.push(json!({
+                        "bucket": req.bucket,
+                        "key": req.key,
+                        "ok": false,
+                        "error": e.to_string(),
+                    }));
+                    continue;
+                }
+            };
+
+            let output_path = if let Some(path) = &req.output_path {
+                match self.resolve(path).await {
+                    Ok(resolved) => Some(resolved.to_string_lossy().to_string()),
+                    Err(e) => {
+                        results.push(json!({
+                            "bucket": req.bucket,
+                            "key": req.key,
+                            "ok": false,
+                            "error": e.to_string(),
+                        }));
+                        continue;
+                    }
+                }
+            } else {
+                None
+            };
+
+            let params = S3GetParams {
+                bucket: req.bucket.clone(),
+                key: req.key.clone(),
+                range: req.range.clone(),
+                output_path,
+                max_bytes: Some(req.max_bytes),
+                accept_text: *req.accept_text,
+            };
+
+            match get_object(&client, params).await {
+                Ok(result) => results.push(json!({
+                    "bucket": result.bucket,
+                    "key": result.key,
+                    "ok": true,
+                    "size": result.size,
+                    "contentType": result.content_type,
+                    "bodyBase64": result.body.as_ref().map(|b| to_base64(b)),
+                    "text": result.text,
+                    "outputPath": result.output_path,
+                    "truncated": result.truncated,
+                })),
+                Err(e) => results.push(json!({
+                    "bucket": req.bucket,
+                    "key": req.key,
+                    "ok": false,
+                    "error": e.to_string(),
+                })),
+            }
+        }
+
+        Ok(CallToolResult::success(vec![ContentBlock::text(format!(
+            "Batch S3 get: {}",
+            results.len()
+        ))])
+        .with_structured(json!({ "results": results })))
+    }
+    #[tool(
+        name = "s3_put_batch",
+        description = "Batch S3 put. Requires allowlisted buckets."
+    )]
+    async fn s3_put_batch(
+        &self,
+        Parameters(args): Parameters<S3PutBatchArgs>,
+    ) -> Result<CallToolResult, McpError> {
+        let mut results = Vec::new();
+
+        for req in args.requests {
+            if !is_bucket_allowed(&req.bucket, &self.s3_allowlist_buckets) {
+                results.push(json!({
+                    "bucket": req.bucket,
+                    "key": req.key,
+                    "ok": false,
+                    "error": "Bucket not in allowlist",
+                }));
+                continue;
+            }
+
+            let client = match self.s3_client_for(&req.credentials).await {
+                Ok(client) => client,
+                Err(e) => {
+                    results.push(json!({
+                        "bucket": req.bucket,
+                        "key": req.key,
+                        "ok": false,
+                        "error": e.to_string(),
+                    }));
+                    continue;
+                }
+            };
+
+            let path = if let Some(p) = &req.path {
+                match self.resolve(p).await {
+                    Ok(resolved) => Some(resolved.to_string_lossy().to_string()),
+                    Err(e) => {
+                        results.push(json!({
+                            "bucket": req.bucket,
+                            "key": req.key,
+                            "ok": false,
+                            "error": e.to_string(),
+                        }));
+                        continue;
+                    }
+                }
+            } else {
+                None
+            };
+
+            let params = S3PutParams {
+                bucket: req.bucket.clone(),
+                key: req.key.clone(),
+                path,
+                body: req.body.clone(),
+                body_base64: *req.body_base64,
+                content_type: req.content_type.clone(),
+                cache_control: req.cache_control.clone(),
+                metadata: req.metadata.clone(),
+            };
+
+            match put_object(&client, params).await {
+                Ok(()) => results.push(json!({
+                    "bucket": req.bucket,
+                    "key": req.key,
+                    "ok": true,
+                })),
+                Err(e) => results.push(json!({
+                    "bucket": req.bucket,
+                    "key": req.key,
+                    "ok": false,
+                    "error": e.to_string(),
+                })),
+            }
+        }
+
+        Ok(CallToolResult::success(vec![ContentBlock::text(format!(
+            "Batch S3 put: {}",
+            results.len()
+        ))])
+        .with_structured(json!({ "results": results })))
+    }
+    #[tool(
+        name = "s3_copy_batch",
+        description = "Batch S3 copy. Requires allowlisted buckets."
+    )]
+    async fn s3_copy_batch(
+        &self,
+        Parameters(args): Parameters<S3CopyBatchArgs>,
+    ) -> Result<CallToolResult, McpError> {
+        let mut results = Vec::new();
+
+        for req in args.requests {
+            if !is_bucket_allowed(&req.source_bucket, &self.s3_allowlist_buckets)
+                || !is_bucket_allowed(&req.dest_bucket, &self.s3_allowlist_buckets)
+            {
+                results.push(json!({
+                    "sourceBucket": req.source_bucket,
+                    "destBucket": req.dest_bucket,
+                    "key": req.source_key,
+                    "ok": false,
+                    "error": "Bucket not in allowlist",
+                }));
+                continue;
+            }
+
+            let client = match self.s3_client_for(&req.credentials).await {
+                Ok(client) => client,
+                Err(e) => {
+                    results.push(json!({
+                        "sourceBucket": req.source_bucket,
+                        "destBucket": req.dest_bucket,
+                        "key": req.source_key,
+                        "ok": false,
+                        "error": e.to_string(),
+                    }));
+                    continue;
+                }
+            };
+
+            let params = S3CopyParams {
+                source_bucket: req.source_bucket.clone(),
+                source_key: req.source_key.clone(),
+                dest_bucket: req.dest_bucket.clone(),
+                dest_key: req.dest_key.clone(),
+            };
+
+            match copy_object(&client, params).await {
+                Ok(()) => results.push(json!({
+                    "sourceBucket": req.source_bucket,
+                    "destBucket": req.dest_bucket,
+                    "key": req.source_key,
+                    "ok": true,
+                })),
+                Err(e) => results.push(json!({
+                    "sourceBucket": req.source_bucket,
+                    "destBucket": req.dest_bucket,
+                    "key": req.source_key,
+                    "ok": false,
+                    "error": e.to_string(),
+                })),
+            }
+        }
+
+        Ok(CallToolResult::success(vec![ContentBlock::text(format!(
+            "Batch S3 copy: {}",
+            results.len()
+        ))])
+        .with_structured(json!({ "results": results })))
+    }
+}
+
+/// Screen capture tools, in their own router.
+///
+/// A separate impl block because `#[tool_router]` collects every `#[tool]` function in the
+/// block and emits its route unconditionally - it never reads the `#[cfg]` on the function
+/// (`rmcp-macros-3.1.3/src/tool_router.rs:41-59`). A gate on the method therefore removed the
+/// method and kept the route calling it, and every build without this feature failed on a name
+/// that no longer existed. Gating the whole block is what works, and is the shape the
+/// computer-control domains already use; [`FileSystemServer::build_tool_router`] merges this
+/// router under the matching `cfg`.
+#[cfg(feature = "screenshot-tools")]
+#[tool_router(router = screenshot_router, vis = "pub(crate)")]
+impl FileSystemServer {
+    #[tool(
+        name = "screenshot_list_monitors",
+        description = "List all monitors with IDs and dimensions"
+    )]
+    async fn list_monitors(
+        &self,
+        Parameters(_args): Parameters<ListMonitorsArgs>,
+    ) -> Result<CallToolResult, McpError> {
+        let monitors = screenshot::list_monitors()
+            .map_err(|e| McpError::internal_error(e.to_string(), None))?;
+        let payload = json!({ "monitors": monitors });
+        let text =
+            serde_json::to_string_pretty(&payload).unwrap_or_else(|_| format!("{:?}", payload));
+        Ok(CallToolResult::success(vec![ContentBlock::text(text)]).with_structured(payload))
+    }
+    #[tool(
+        name = "screenshot_list_windows",
+        description = "List all visible windows. Optional title_filter."
+    )]
+    async fn list_windows(
+        &self,
+        Parameters(args): Parameters<ListWindowsArgs>,
+    ) -> Result<CallToolResult, McpError> {
+        let mut windows = screenshot::list_windows()
+            .map_err(|e| McpError::internal_error(e.to_string(), None))?;
+        if let Some(filter) = &args.title_filter {
+            let lower = filter.to_lowercase();
+            windows.retain(|w| w.title.to_lowercase().contains(&lower));
+        }
+        let payload = json!({ "windows": windows });
+        let text =
+            serde_json::to_string_pretty(&payload).unwrap_or_else(|_| format!("{:?}", payload));
+        Ok(CallToolResult::success(vec![ContentBlock::text(text)]).with_structured(payload))
+    }
+    #[tool(
+        name = "screenshot_capture_screen",
+        description = "Capture monitor. Args: monitor_id, output (file/clipboard/base64), path"
+    )]
+    async fn capture_screen(
+        &self,
+        Parameters(args): Parameters<CaptureScreenArgs>,
+    ) -> Result<CallToolResult, McpError> {
+        let image = screenshot::capture_monitor(args.monitor_id.get())
+            .map_err(|e| McpError::internal_error(e.to_string(), None))?;
+        self.handle_screenshot_output(&image, args.output, args.path.as_deref())
+            .await
+    }
+    #[tool(
+        name = "screenshot_capture_window",
+        description = "Capture window by window_id or title"
+    )]
+    async fn capture_window(
+        &self,
+        Parameters(args): Parameters<CaptureWindowArgs>,
+    ) -> Result<CallToolResult, McpError> {
+        let image = match (args.window_id.get(), &args.title) {
+            (Some(id), _) => screenshot::capture_window_by_id(id),
+            (None, Some(title)) => screenshot::capture_window_by_title(title),
+            _ => {
+                return Err(McpError::invalid_params(
+                    "window_id or title required",
+                    None,
+                ));
+            }
+        }
+        .map_err(|e| McpError::internal_error(e.to_string(), None))?;
+        self.handle_screenshot_output(&image, args.output, args.path.as_deref())
+            .await
+    }
+    #[tool(
+        name = "screenshot_capture_region",
+        description = "Capture region. Args: x, y, width, height, monitor_id, output, path"
+    )]
+    async fn capture_region(
+        &self,
+        Parameters(args): Parameters<CaptureRegionArgs>,
+    ) -> Result<CallToolResult, McpError> {
+        let image = screenshot::capture_region(
+            args.monitor_id.get(),
+            *args.x,
+            *args.y,
+            *args.width,
+            *args.height,
+        )
+        .map_err(|e| McpError::internal_error(e.to_string(), None))?;
+        self.handle_screenshot_output(&image, args.output, args.path.as_deref())
+            .await
+    }
+    #[tool(
+        name = "screenshot_copy_to_clipboard",
+        description = "Copy image file to clipboard"
+    )]
+    async fn copy_to_clipboard(
+        &self,
+        Parameters(args): Parameters<CopyToClipboardArgs>,
+    ) -> Result<CallToolResult, McpError> {
+        let path = self.resolve(&args.path).await?;
+        screenshot::copy_file(&path).map_err(|e| McpError::internal_error(e.to_string(), None))?;
+        Ok(CallToolResult::success(vec![ContentBlock::text(format!(
+            "Copied to clipboard: {}",
+            path.display()
+        ))])
+        .with_structured(json!({ "path": path.display().to_string() })))
+    }
+}
 
 #[tool_handler(router = self.tool_router)]
 impl ServerHandler for FileSystemServer {
@@ -7815,6 +7831,7 @@ fn print_features() {
     );
 }
 
+#[cfg(any(feature = "http-tools", feature = "s3-tools"))]
 fn parse_allowlist_env(var_name: &str) -> Vec<String> {
     let Ok(value) = env::var(var_name) else {
         return Vec::new();

@@ -33,10 +33,13 @@ pub enum SubDir {
     /// (see [`crate::core::logging`]).
     Logs,
     /// Downloaded OCR models.
+    #[cfg(feature = "ctl-ocr")]
     Ocrs,
     /// Saved window layouts.
+    #[cfg(feature = "ctl-any")]
     Layouts,
     /// Computer-control safety state.
+    #[cfg(feature = "ctl-any")]
     Safety,
     /// Crash reports, one file per panic under a dated directory (see `install_panic_hook`).
     Panics,
@@ -55,8 +58,11 @@ impl SubDir {
     pub fn as_str(&self) -> &'static str {
         match self {
             SubDir::Logs => "logs",
+            #[cfg(feature = "ctl-ocr")]
             SubDir::Ocrs => "ocrs",
+            #[cfg(feature = "ctl-any")]
             SubDir::Layouts => "layouts",
+            #[cfg(feature = "ctl-any")]
             SubDir::Safety => "safety",
             SubDir::Panics => "panics",
             SubDir::Stats => "stats",
@@ -712,6 +718,7 @@ pub fn legacy_local_dir() -> Option<PathBuf> {
 ///
 /// Returns the file, not the directory it sits in, so no caller can hand a directory to
 /// [`migrate`], which refuses those.
+#[cfg(feature = "ctl-any")]
 pub fn legacy_ctl_audit() -> Option<PathBuf> {
     dirs::data_dir().map(|d| d.join("computer-mcp-rs").join("audit.jsonl"))
 }

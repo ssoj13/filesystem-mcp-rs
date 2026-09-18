@@ -1,6 +1,8 @@
 //! Utility functions - clipboard, env, which.
 
-use anyhow::{Context, Result, bail};
+#[cfg(feature = "screenshot-tools")]
+use anyhow::Context;
+use anyhow::{Result, bail};
 use serde_json::{Value, json};
 use std::env;
 use std::path::PathBuf;
