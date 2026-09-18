@@ -36,7 +36,7 @@ use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use rusqlite::{Connection, TransactionBehavior, params};
-use tracing::warn;
+use tracing::{error, warn};
 
 use super::collect::{Collector, Delta};
 use super::db;
@@ -56,6 +56,24 @@ pub const HEARTBEAT: Duration = Duration::from_secs(60);
 /// forever. Re-rolled on every tick rather than once per process, so two processes that happen to
 /// draw the same first offset still drift apart.
 const JITTER_PERCENT: u64 = 20;
+
+/// The shortest interval [`jittered`] will return, whatever it is given.
+///
+/// `flush_secs()` already clamps a configured zero up to one second, so no operator can reach
+/// this - but [`spawn`] is `pub`, and a caller inside this crate passing [`Duration::ZERO`] would
+/// otherwise turn the loop into a busy loop that pins a core and takes the collector lock as fast
+/// as it can. A public function should not depend on a validation two modules away for its own
+/// safety. 100 ms is two orders of magnitude below the smallest interval anything can actually
+/// configure, so it never changes a real flush; it only bounds a mistake to ten ticks a second.
+const MIN_INTERVAL: Duration = Duration::from_millis(100);
+
+/// Consecutive failures after which the log stops describing a hiccup and says statistics have
+/// stopped.
+///
+/// About five minutes at the default five-second interval - long past anything a busy database or
+/// a resuming laptop explains. Deliberately a power of two, so it *replaces* the `warn!` that
+/// [`note`] would have emitted at that count rather than adding a second line beside it.
+const ESCALATE_AFTER: u32 = 64;
 
 /// Who is writing: the four columns that identify this process's rows.
 ///
@@ -223,14 +241,32 @@ pub fn spawn(collector: Arc<Collector>, db_path: PathBuf, id: Identity, every: D
 /// Record a failed flush and report it without flooding the log.
 ///
 /// Counted in [`super::collect::Health`] every time, because that is what the health tool reads
-/// and an operator must be able to see that flushing is failing at all. Logged only on the 1st,
-/// 2nd, 4th, 8th, ... consecutive failure: a database that is unusable for a day would otherwise
-/// write seventeen thousand identical lines into the log directory that another sweep then has to
+/// and an operator must be able to see that flushing is failing at all. Logged on the 1st, 2nd,
+/// 4th, 8th, ... consecutive failure: a database that is unusable for a day would otherwise write
+/// seventeen thousand identical lines into the log directory that another sweep then has to
 /// reclaim.
+///
+/// At [`ESCALATE_AFTER`] the level rises to `error!` **once**, because by then this is no longer a
+/// hiccup and the log should say so itself rather than wait for someone to think of asking the
+/// health tool - with per-process file logging on by default, that line lands somewhere a person
+/// will find it. After that the loop goes quiet until it succeeds again and `failures` is reset
+/// to zero by the caller; the error line was the whole statement, and repeating it in different
+/// words every few minutes would only bury it.
+///
+/// Going quiet past [`ESCALATE_AFTER`] also settles what the saturating counter would otherwise
+/// do: nothing reads its exact value up there, so it cannot matter that a count stuck at
+/// `u32::MAX` is not a power of two and would have silenced the `warn!` arm forever. A saturating
+/// counter feeding a predicate that only fires on exact values is a shape worth not leaving
+/// behind, even six centuries out of reach.
 fn note(collector: &Collector, failures: &mut u32, reason: &str) {
     collector.note_flush_failure();
     *failures = failures.saturating_add(1);
-    if failures.is_power_of_two() {
+    if *failures == ESCALATE_AFTER {
+        error!(
+            "Statistics: flush has failed {failures} times in a row - counters are no longer \
+             being written and are accumulating in memory: {reason}"
+        );
+    } else if *failures < ESCALATE_AFTER && failures.is_power_of_two() {
         warn!("Statistics: flush failed ({failures} in a row, counters kept in memory): {reason}");
     }
 }
@@ -250,7 +286,8 @@ fn beat_due(last_beat: Option<SystemTime>, now: SystemTime) -> bool {
     }
 }
 
-/// `every`, moved by up to [`JITTER_PERCENT`] in either direction.
+/// `every`, moved by up to [`JITTER_PERCENT`] in either direction, and never below
+/// [`MIN_INTERVAL`].
 ///
 /// Randomness comes from a v4 uuid rather than a new dependency: this needs to spread processes
 /// apart, not to resist anyone, and `uuid` is already how [`crate::core::instance::id`] draws its
@@ -264,7 +301,7 @@ fn jittered(every: Duration) -> Duration {
     } else {
         (uuid::Uuid::new_v4().as_u64_pair().0) % (span + 1)
     };
-    Duration::from_millis(base.saturating_sub(fifth).saturating_add(offset))
+    Duration::from_millis(base.saturating_sub(fifth).saturating_add(offset)).max(MIN_INTERVAL)
 }
 
 /// Whole seconds since the epoch, for `sessions.last_seen`.
@@ -546,5 +583,44 @@ mod tests {
             seen.insert(d);
         }
         assert!(seen.len() > 1, "a constant interval is not jitter");
+    }
+
+    /// An interval of zero cannot make the loop spin.
+    ///
+    /// Unreachable through configuration - `flush_secs()` clamps zero up to one second - but
+    /// [`spawn`] is `pub`, and a function should not depend on a validation two modules away to
+    /// stay safe. Without the floor this returns `Duration::ZERO`, the loop's `sleep` returns
+    /// immediately, and it pins a core while taking the collector lock as fast as it can.
+    #[test]
+    fn a_zero_interval_is_floored_rather_than_spinning() {
+        assert_eq!(jittered(Duration::ZERO), MIN_INTERVAL);
+        assert!(jittered(Duration::from_millis(1)) >= MIN_INTERVAL);
+    }
+
+    /// Every failure is counted, and the escalation replaces a warning rather than joining it.
+    ///
+    /// The log level is not observable from here, so what is pinned is the arithmetic the levels
+    /// are chosen by: the count rises on every call, [`ESCALATE_AFTER`] is a power of two - so the
+    /// `error!` takes the place of the `warn!` that count would have produced - and `Health` keeps
+    /// counting past it, including the failures the loop deliberately stops logging.
+    #[test]
+    fn every_failure_is_counted_and_escalation_replaces_a_warning() {
+        assert!(
+            ESCALATE_AFTER.is_power_of_two(),
+            "otherwise the escalation prints beside a warning instead of replacing it"
+        );
+
+        let c = collector();
+        let mut failures = 0u32;
+        let total = ESCALATE_AFTER + 4;
+        for expected in 1..=total {
+            note(&c, &mut failures, "a reason");
+            assert_eq!(failures, expected, "the count rises on every failure");
+        }
+        assert_eq!(
+            c.health().flush_failures,
+            u64::from(total),
+            "health counts them all, including the ones past escalation that are never logged"
+        );
     }
 }
