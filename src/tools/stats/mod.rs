@@ -32,6 +32,7 @@
 )]
 
 pub mod db;
+pub mod outcome;
 
 use std::path::PathBuf;
 
