@@ -7292,13 +7292,26 @@ impl ServerHandler for FileSystemServer {
         request: CallToolRequestParams,
         context: RequestContext<RoleServer>,
     ) -> Result<CallToolResponse, McpError> {
-        // The name is interned *before* dispatch, where the request still owns it, and the
-        // result recorded after: an `Arc` clone of a name the router already holds, so the hot
-        // path allocates nothing. With statistics off this `map` is the only work the seam does.
-        let measured = self
-            .stats
-            .as_ref()
-            .map(|stats| (stats.intern(&request.name), Instant::now()));
+        // Everything the seam needs from *before* the dispatch, taken in one expression:
+        //
+        // - the tool name, interned while the request still owns it (an `Arc` clone of a name the
+        //   router already holds, so the hot path allocates nothing);
+        // - the monotonic instant that measures how long the call took;
+        // - the wall-clock instant that decides which ten-minute bucket it is counted in. This is
+        //   the START of the call, deliberately: bucketed at completion, a 45-minute
+        //   `run_command` would report its whole latency - `ns_max` included - against a window
+        //   in which the server was in fact idle, and the window it really ran in would look
+        //   empty. Two clocks and not one because `Instant` cannot name a wall-clock window and
+        //   `SystemTime` is not monotonic, so neither can do the other's job.
+        //
+        // With statistics off this `map` over a `None` is the only work the seam does.
+        let measured = self.stats.as_ref().map(|stats| {
+            (
+                stats.intern(&request.name),
+                Instant::now(),
+                SystemTime::now(),
+            )
+        });
 
         let ctx = rmcp::handler::server::tool::ToolCallContext::new(self, request, context);
         // Deliberately not `?`: the `Err` arm is half of what `classify` scores, and propagating
@@ -7306,14 +7319,14 @@ impl ServerHandler for FileSystemServer {
         // uncounted - which is much of what an operator opens this table to find.
         let result = self.tool_router.call(ctx).await;
 
-        if let (Some(stats), Some((tool, started))) = (self.stats.as_ref(), measured) {
+        if let (Some(stats), Some((tool, timer, started_at))) = (self.stats.as_ref(), measured) {
             // Measured against the router's own answer, before the session footer is stamped on
             // to it. The footer is a constant per call, so counting it would inflate the tools
             // that return least by the largest relative amount, for a reason that has nothing to
             // do with the tool. Task 2 established that stamping does not touch `is_error`, so
             // classifying on either side of it is equivalent; this side also keeps the seam
             // independent of whether the footer is switched on at all.
-            let bytes_out = match &result {
+            let content_bytes = match &result {
                 Ok(CallToolResponse::Complete(complete)) => {
                     tools::stats::collect::bytes_of(&complete.content)
                 }
@@ -7323,9 +7336,9 @@ impl ServerHandler for FileSystemServer {
                 tool,
                 tools::stats::outcome::classify(&result),
                 // A single call would have to run for 584 years to saturate this.
-                started.elapsed().as_nanos().min(u128::from(u64::MAX)) as u64,
-                bytes_out,
-                SystemTime::now(),
+                timer.elapsed().as_nanos().min(u128::from(u64::MAX)) as u64,
+                content_bytes,
+                started_at,
             );
         }
 

@@ -85,20 +85,30 @@ const JOURNAL_SIZE_LIMIT: i64 = 16 * 1024 * 1024;
 /// Errors are counters only, never message text: a message would drag filesystem paths into a
 /// database that lives for years. `cwd` is stored, because the file is per-user and already sits
 /// under that user's own home directory.
+///
+/// `content_bytes` is named for what it holds and not for what a reader might wish it held: the
+/// summed length of the **content blocks** a tool returned, and nothing else. Around ninety call
+/// sites in `main.rs` put a short text summary in the content and the real payload in
+/// `structured_content`, whose size is deliberately *not* measured - the `Value` is already
+/// materialised, so sizing it would mean serialising it a second time and doubling the cost of
+/// every large response, which is the one thing this subsystem may not do. So a tool that answers
+/// in structured output will show a small `content_bytes`, and the column name must not invite
+/// anyone to read that as "this tool returns little". `bytes_in` is absent for the same reason:
+/// measuring it would mean re-serialising the arguments on every call.
 const SCHEMA: &str = r#"
 CREATE TABLE IF NOT EXISTS tool_agg (
-    bucket       INTEGER NOT NULL,          -- floor(unix_epoch / 600), UTC
-    tool         TEXT    NOT NULL,
-    instance_id  TEXT    NOT NULL,
-    session_id   TEXT    NOT NULL,
-    ok           INTEGER NOT NULL,
-    err_flagged  INTEGER NOT NULL,          -- an Ok result carrying is_error = true
-    err_params   INTEGER NOT NULL,          -- rmcp -32602: the caller got the schema wrong
-    err_internal INTEGER NOT NULL,          -- rmcp -32603: the tool broke
-    deferred     INTEGER NOT NULL,          -- InputRequired / Task: not a completion
-    ns_total     INTEGER NOT NULL,
-    ns_max       INTEGER NOT NULL,
-    bytes_out    INTEGER NOT NULL,
+    bucket        INTEGER NOT NULL,         -- floor(unix_epoch / 600), UTC: when the call STARTED
+    tool          TEXT    NOT NULL,
+    instance_id   TEXT    NOT NULL,
+    session_id    TEXT    NOT NULL,
+    ok            INTEGER NOT NULL,
+    err_flagged   INTEGER NOT NULL,         -- an Ok result carrying is_error = true
+    err_params    INTEGER NOT NULL,         -- rmcp -32602: the caller got the schema wrong
+    err_internal  INTEGER NOT NULL,         -- rmcp -32603: the tool broke
+    deferred      INTEGER NOT NULL,         -- InputRequired / Task: not a completion
+    ns_total      INTEGER NOT NULL,
+    ns_max        INTEGER NOT NULL,
+    content_bytes INTEGER NOT NULL,         -- content blocks only; see the rustdoc above
     PRIMARY KEY (bucket, tool, instance_id, session_id)
 ) STRICT, WITHOUT ROWID;
 
@@ -106,16 +116,16 @@ CREATE TABLE IF NOT EXISTS tool_agg (
 CREATE INDEX IF NOT EXISTS ix_agg_session ON tool_agg(session_id, bucket);
 
 CREATE TABLE IF NOT EXISTS tool_daily (
-    day          TEXT    NOT NULL,          -- YYYY-MM-DD, UTC
-    tool         TEXT    NOT NULL,
-    ok           INTEGER NOT NULL,
-    err_flagged  INTEGER NOT NULL,
-    err_params   INTEGER NOT NULL,
-    err_internal INTEGER NOT NULL,
-    deferred     INTEGER NOT NULL,
-    ns_total     INTEGER NOT NULL,
-    ns_max       INTEGER NOT NULL,
-    bytes_out    INTEGER NOT NULL,
+    day           TEXT    NOT NULL,         -- YYYY-MM-DD, UTC
+    tool          TEXT    NOT NULL,
+    ok            INTEGER NOT NULL,
+    err_flagged   INTEGER NOT NULL,
+    err_params    INTEGER NOT NULL,
+    err_internal  INTEGER NOT NULL,
+    deferred      INTEGER NOT NULL,
+    ns_total      INTEGER NOT NULL,
+    ns_max        INTEGER NOT NULL,
+    content_bytes INTEGER NOT NULL,
     PRIMARY KEY (day, tool)
 ) STRICT, WITHOUT ROWID;
 
@@ -155,17 +165,17 @@ CREATE TABLE IF NOT EXISTS sessions (
 pub const UPSERT_AGG: &str = r#"
 INSERT INTO tool_agg (bucket, tool, instance_id, session_id,
                       ok, err_flagged, err_params, err_internal, deferred,
-                      ns_total, ns_max, bytes_out)
+                      ns_total, ns_max, content_bytes)
 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)
 ON CONFLICT (bucket, tool, instance_id, session_id) DO UPDATE SET
-    ok           = tool_agg.ok           + excluded.ok,
-    err_flagged  = tool_agg.err_flagged  + excluded.err_flagged,
-    err_params   = tool_agg.err_params   + excluded.err_params,
-    err_internal = tool_agg.err_internal + excluded.err_internal,
-    deferred     = tool_agg.deferred     + excluded.deferred,
-    ns_total     = tool_agg.ns_total     + excluded.ns_total,
-    ns_max       = max(tool_agg.ns_max,    excluded.ns_max),
-    bytes_out    = tool_agg.bytes_out    + excluded.bytes_out
+    ok            = tool_agg.ok            + excluded.ok,
+    err_flagged   = tool_agg.err_flagged   + excluded.err_flagged,
+    err_params    = tool_agg.err_params    + excluded.err_params,
+    err_internal  = tool_agg.err_internal  + excluded.err_internal,
+    deferred      = tool_agg.deferred      + excluded.deferred,
+    ns_total      = tool_agg.ns_total      + excluded.ns_total,
+    ns_max        = max(tool_agg.ns_max,     excluded.ns_max),
+    content_bytes = tool_agg.content_bytes + excluded.content_bytes
 "#;
 
 /// Open the statistics database for writing, creating and migrating it as needed.
@@ -345,7 +355,7 @@ mod tests {
     use super::*;
 
     /// The eight counters of one delta row, in the order [`UPSERT_AGG`] binds them:
-    /// `ok, err_flagged, err_params, err_internal, deferred, ns_total, ns_max, bytes_out`.
+    /// `ok, err_flagged, err_params, err_internal, deferred, ns_total, ns_max, content_bytes`.
     ///
     /// A fixed-width array rather than eight arguments so that a test can state the whole
     /// expected row in one literal and compare it in one assertion - which is what makes a
@@ -386,7 +396,7 @@ mod tests {
     fn row_of(conn: &Connection, tool: &str, instance_id: &str) -> Counts {
         conn.query_row(
             "SELECT ok, err_flagged, err_params, err_internal, deferred, ns_total, ns_max, \
-             bytes_out FROM tool_agg WHERE tool = ?1 AND instance_id = ?2",
+             content_bytes FROM tool_agg WHERE tool = ?1 AND instance_id = ?2",
             [tool, instance_id],
             |r| {
                 Ok([

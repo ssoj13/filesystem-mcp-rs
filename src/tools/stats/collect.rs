@@ -7,10 +7,13 @@
 //!
 //! Three rules decide the shape, each of them paid for:
 //!
-//! 1. **The bucket is computed at call time and is part of the key.** Taken at flush time
-//!    instead, a long-lived session would attribute every call it ever made to whichever ten
-//!    minutes the flush happened to land in. Wave 1 shipped a sweep that aged entries by the
-//!    wrong clock for exactly this reason.
+//! 1. **The bucket is the ten minutes the call STARTED in, and is part of the key.** The seam
+//!    takes that instant before the dispatch and hands it down; nothing here reads a clock.
+//!    Taken at flush time instead, a long-lived session would attribute every call it ever made
+//!    to whichever ten minutes the flush happened to land in - wave 1 shipped a sweep that aged
+//!    entries by the wrong clock for exactly this reason. Taken at *completion*, which is a far
+//!    subtler version of the same mistake, a 45-minute `run_command` would report its whole
+//!    latency against a window in which the server was idle.
 //! 2. **The tool name is interned against the router's own list** and anything else becomes
 //!    [`UNKNOWN_TOOL`]. A name arrives from the wire *before* the router rejects it - rmcp
 //!    answers an unknown tool with `invalid_params("tool not found")`, which
@@ -62,18 +65,27 @@ pub struct Counts {
     pub ns_total: u64,
     /// The slowest single call counted here, in nanoseconds.
     pub ns_max: u64,
-    /// Summed content-block payload bytes returned by the calls counted here.
-    pub bytes_out: u64,
+    /// Summed length of the **content blocks** the calls counted here returned.
+    ///
+    /// Named for what it holds rather than for what a reader might wish it held. Around ninety
+    /// call sites in `main.rs` return a short text summary in the content and the real payload in
+    /// `structured_content`, which is deliberately **not** measured: that `Value` is already
+    /// materialised, so sizing it would mean serialising it a second time and doubling the cost
+    /// of every large response. A tool that answers in structured output therefore shows a small
+    /// `content_bytes`, and nobody may read that as "this tool returns little". `bytes_in` is
+    /// absent for the same reason - it would mean re-serialising the arguments on every call.
+    pub content_bytes: u64,
 }
 
 impl Counts {
-    /// Merge `other` into `self` with the database's semantics: add, except `ns_max`, which takes
-    /// the larger.
+    /// Merge `other` into `self`: add, except `ns_max`, which takes the larger.
     ///
-    /// Saturating rather than wrapping because a counter that silently restarts at zero after
-    /// `u64::MAX` would make a rate look negative; saturating at least stops being wrong in a
-    /// direction anyone can misread. Neither is reachable - `ns_total` would need ~584 years of
-    /// accumulated tool time - but the arithmetic must not be a debug-build panic on the hot path.
+    /// The same *shape* as [`super::db::UPSERT_AGG`]'s conflict clause, and it has to be, or an
+    /// in-memory merge and a flushed one would disagree about the same two rows. It is not the
+    /// same arithmetic: SQLite adds with `+` and this adds with `saturating_add`, because a
+    /// debug-build overflow panic on the hot path is not acceptable and a counter that silently
+    /// restarted at zero would make a rate look negative. The two can only diverge past
+    /// `u64::MAX`, which `ns_total` would need ~584 years of accumulated tool time to reach.
     fn merge(&mut self, other: Self) {
         self.ok = self.ok.saturating_add(other.ok);
         self.err_flagged = self.err_flagged.saturating_add(other.err_flagged);
@@ -82,17 +94,21 @@ impl Counts {
         self.deferred = self.deferred.saturating_add(other.deferred);
         self.ns_total = self.ns_total.saturating_add(other.ns_total);
         self.ns_max = self.ns_max.max(other.ns_max);
-        self.bytes_out = self.bytes_out.saturating_add(other.bytes_out);
+        self.content_bytes = self.content_bytes.saturating_add(other.content_bytes);
     }
 }
 
-/// What one map entry is keyed by: the bucket the call happened in, and the interned tool name.
+/// What one map entry is keyed by: the bucket the call *started* in, and the interned tool name.
 ///
 /// `bucket` first because that is the order `tool_agg`'s primary key uses, so a drained delta
 /// binds straight into it without re-ordering.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct Key {
-    /// `floor(unix_epoch / 600)`, UTC, taken when the call finished.
+    /// `floor(unix_epoch / 600)`, UTC, of the instant the call **started**.
+    ///
+    /// Start and not completion, which is not a detail: a 45-minute `run_command` bucketed at
+    /// completion would attribute its whole latency - `ns_max` included - to a ten-minute window
+    /// in which the server was in fact idle, and the window it really ran in would look empty.
     pub bucket: i64,
     /// An interned name: either one the router serves, or [`UNKNOWN_TOOL`].
     pub tool: Arc<str>,
@@ -175,13 +191,19 @@ impl Collector {
     /// Infallible by signature, and the body keeps that promise: a poisoned mutex is recovered
     /// from rather than unwrapped, because a panic somewhere else in the process is no reason for
     /// the *next* tool call to panic too.
+    ///
+    /// `started` is the wall-clock instant the call **began**, and the caller owns that choice -
+    /// this function reads no clock of its own. Passing the instant it *finished* instead is a
+    /// mistake no test in this file can catch, because every test injects the value: the seam's
+    /// choice of instant is verified by reading `call_tool`, where `started` is captured in the
+    /// same expression as the `Instant` that measures `ns`, and nowhere else.
     pub fn record_interned(
         &self,
         tool: Arc<str>,
         outcome: Outcome,
         ns: u64,
-        bytes_out: u64,
-        now: SystemTime,
+        content_bytes: u64,
+        started: SystemTime,
     ) {
         self.calls.fetch_add(1, Ordering::Relaxed);
         if outcome == Outcome::UnknownShape {
@@ -191,7 +213,7 @@ impl Collector {
         let mut one = Counts {
             ns_total: ns,
             ns_max: ns,
-            bytes_out,
+            content_bytes,
             ..Counts::default()
         };
         match outcome {
@@ -205,7 +227,7 @@ impl Collector {
         }
 
         let key = Key {
-            bucket: bucket_of(now),
+            bucket: bucket_of(started),
             tool,
         };
         self.lock().entry(key).or_default().merge(one);
@@ -215,8 +237,15 @@ impl Collector {
     ///
     /// The plain form, used by the tests and by any caller that holds the name and not the
     /// interned handle. Delegates, so there is one accumulation path and not two.
-    pub fn record(&self, tool: &str, outcome: Outcome, ns: u64, bytes_out: u64, now: SystemTime) {
-        self.record_interned(self.intern(tool), outcome, ns, bytes_out, now);
+    pub fn record(
+        &self,
+        tool: &str,
+        outcome: Outcome,
+        ns: u64,
+        content_bytes: u64,
+        started: SystemTime,
+    ) {
+        self.record_interned(self.intern(tool), outcome, ns, content_bytes, started);
     }
 
     /// Take everything accumulated so far, leaving the map empty.
@@ -251,6 +280,13 @@ impl Collector {
 
     /// Take the counter lock, recovering a poisoned one.
     ///
+    /// The critical section is one `entry(..).or_default()` and eight integer adds - well under a
+    /// microsecond, and never an allocation unless the `(bucket, tool)` pair is new. That is the
+    /// whole argument for a plain `Mutex` here, and it must not be replaced by "calls are
+    /// serialised anyway": they are under stdio, but the server is cloned per connection for the
+    /// HTTP transport, so over HTTP tool calls really are concurrent and really do contend for
+    /// this lock. The section is short enough that they may.
+    ///
     /// Nothing inside the critical section can panic - it is integer arithmetic on a map entry -
     /// so poisoning can only arrive from a panic elsewhere while this lock happened to be held,
     /// and the counters behind it are still consistent. Propagating that panic into every later
@@ -262,13 +298,14 @@ impl Collector {
     }
 }
 
-/// The 10-minute bucket a call belongs to: `floor(unix_epoch / 600)`, UTC.
+/// The 10-minute bucket a call belongs to: `floor(unix_epoch / 600)`, UTC, of the instant it
+/// started.
 ///
-/// A `SystemTime` before the epoch cannot come from a call that just finished, but the clock is
+/// A `SystemTime` before the epoch cannot come from a call this server just ran, but the clock is
 /// the operator's and this function may not fail, so it floors to bucket zero rather than
 /// panicking: one misattributed row beats a dead tool call.
-fn bucket_of(now: SystemTime) -> i64 {
-    let secs = now
+fn bucket_of(started: SystemTime) -> i64 {
+    let secs = started
         .duration_since(UNIX_EPOCH)
         .map(|since| since.as_secs())
         .unwrap_or(0);
@@ -371,7 +408,7 @@ mod tests {
                 err_flagged: 1,
                 ns_total: 12,
                 ns_max: 7,
-                bytes_out: 24,
+                content_bytes: 24,
                 ..Counts::default()
             }
         );
@@ -425,7 +462,7 @@ mod tests {
                 ok: 2,
                 ns_total: 12,
                 ns_max: 7,
-                bytes_out: 5,
+                content_bytes: 5,
                 ..Counts::default()
             },
             "the returned delta is added to what arrived while the flush ran"
