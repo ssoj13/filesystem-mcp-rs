@@ -688,6 +688,15 @@ where
 }
 
 /// Merge a nested `credentials` object (or JSON string) into top-level keys for flattened S3 args.
+///
+/// Callers nest the four credential fields under `credentials` as often as they spread them, and
+/// a double-serializing client sends that object as a string. Both are accepted and neither is
+/// advertised: the schema asks for the flattened fields, which keeps nine S3 tools inside the
+/// surface budget. Top-level keys win - `or_insert` never overwrites one already there.
+///
+/// Called from one place, `main.rs`'s `S3Args<T>`. That it is reached from a wrapper and never
+/// from an argument type's own `Deserialize` is the point; see that type for what the other
+/// arrangement cost.
 #[cfg(feature = "s3-tools")]
 pub fn hoist_s3_credentials_blob(map: &mut serde_json::Map<String, serde_json::Value>) {
     let Some(cred) = map.remove("credentials") else {
@@ -703,20 +712,6 @@ pub fn hoist_s3_credentials_blob(map: &mut serde_json::Map<String, serde_json::V
             map.entry(k).or_insert(v);
         }
     }
-}
-
-/// Deserialize S3 tool args: hoists optional `credentials` blob, then deserializes `T`.
-#[cfg(feature = "s3-tools")]
-pub fn deserialize_s3_args<'de, D, T>(deserializer: D) -> Result<T, D::Error>
-where
-    D: Deserializer<'de>,
-    T: serde::de::DeserializeOwned,
-{
-    let mut value = serde_json::Value::deserialize(deserializer)?;
-    if let serde_json::Value::Object(ref mut map) = value {
-        hoist_s3_credentials_blob(map);
-    }
-    serde_json::from_value(value).map_err(serde::de::Error::custom)
 }
 
 /// Like [`vec_or_string`] for `Option<Vec<T>>` (null stays None).
@@ -1040,20 +1035,5 @@ mod tests {
         let mut expected = std::collections::BTreeMap::new();
         expected.insert("k".to_string(), "v".to_string());
         assert_eq!(result.meta, expected);
-    }
-
-    #[cfg(feature = "s3-tools")]
-    #[test]
-    fn test_hoist_s3_credentials_blob() {
-        let mut map = serde_json::Map::new();
-        map.insert("bucket".into(), serde_json::json!("b"));
-        map.insert(
-            "credentials".into(),
-            serde_json::json!({"accessKeyId": "AKIA", "region": "eu-west-1"}),
-        );
-        hoist_s3_credentials_blob(&mut map);
-        assert!(!map.contains_key("credentials"));
-        assert_eq!(map["accessKeyId"], "AKIA");
-        assert_eq!(map["region"], "eu-west-1");
     }
 }

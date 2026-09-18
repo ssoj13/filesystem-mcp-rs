@@ -48,8 +48,6 @@ use crate::core::dollar_guard;
 use crate::core::format;
 use crate::core::path::resolve_validated_path;
 use crate::core::schema::normalize_tool_schemas;
-#[cfg(feature = "s3-tools")]
-use crate::core::serde::deserialize_s3_args;
 use crate::core::serde::{
     FlexBool, FlexU32, FlexU64, FlexUsize, RU16, RU32, RU64, RUsize, ShellArg, ShellKind,
     default_flex_true, number_or_string, option_object_or_json_string, vec_or_string,
@@ -1333,6 +1331,52 @@ struct HttpDownloadBatchArgs {
     downloads: Vec<HttpDownloadArgs>,
 }
 
+/// An S3 argument type, deserialized after the optional `credentials` blob has been folded into
+/// the flattened credential fields.
+///
+/// **One wrapper rather than a `Deserialize` per argument type.** The nine hand-written impls this
+/// replaces each ended in `serde_json::from_value::<Self>(value)`, which resolves back to the impl
+/// making the call: every S3 tool recursed until the worker thread overflowed its stack and took
+/// the process with it, before any allowlist or credential check could run. Here the inner type
+/// keeps its ordinary derive, so the only deserialization it can reach is the derived one and the
+/// cycle cannot be written.
+///
+/// **The blob is a tolerance, not a parameter**, so [`JsonSchema`] delegates to `T` and the
+/// schema is exactly the inner type's. Callers are told to pass the credential fields; a caller
+/// who nests them under `credentials` - or sends that object as a JSON string, as a
+/// double-serializing client does - is accommodated silently. That is the same bargain
+/// `vec_or_string` and `map_or_json_string` strike elsewhere in this file, and it keeps nine tool
+/// schemas inside the budget `tool_surface_guard` enforces.
+#[cfg(feature = "s3-tools")]
+#[derive(Debug, Clone)]
+struct S3Args<T>(T);
+
+#[cfg(feature = "s3-tools")]
+impl<'de, T: serde::de::DeserializeOwned> serde::Deserialize<'de> for S3Args<T> {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let mut value = serde_json::Value::deserialize(deserializer)?;
+        if let serde_json::Value::Object(ref mut map) = value {
+            crate::core::serde::hoist_s3_credentials_blob(map);
+        }
+        serde_json::from_value(value)
+            .map(S3Args)
+            .map_err(serde::de::Error::custom)
+    }
+}
+
+#[cfg(feature = "s3-tools")]
+impl<T: JsonSchema> JsonSchema for S3Args<T> {
+    fn schema_name() -> std::borrow::Cow<'static, str> {
+        T::schema_name()
+    }
+    fn json_schema(generator: &mut schemars::SchemaGenerator) -> schemars::Schema {
+        T::json_schema(generator)
+    }
+}
+
 #[cfg(feature = "s3-tools")]
 fn default_s3_max_bytes() -> usize {
     5_000_000
@@ -1353,21 +1397,9 @@ struct S3CredentialsArgs {
 }
 
 #[cfg(feature = "s3-tools")]
-macro_rules! impl_s3_args_deserialize {
-    ($ty:ty) => {
-        impl<'de> serde::Deserialize<'de> for $ty {
-            fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-            where
-                D: serde::Deserializer<'de>,
-            {
-                deserialize_s3_args(deserializer)
-            }
-        }
-    };
-}
-
-#[cfg(feature = "s3-tools")]
 impl S3CredentialsArgs {
+    /// The credentials this call carries, or `None` when it carries none and the environment's
+    /// own chain should be used.
     fn to_credentials(&self) -> Option<S3Credentials> {
         if self.access_key_id.is_none()
             && self.secret_access_key.is_none()
@@ -1386,17 +1418,15 @@ impl S3CredentialsArgs {
 }
 
 #[cfg(feature = "s3-tools")]
-#[derive(Debug, Clone, Serialize, JsonSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 struct S3ListBucketsArgs {
     #[serde(flatten)]
     credentials: S3CredentialsArgs,
 }
-#[cfg(feature = "s3-tools")]
-impl_s3_args_deserialize!(S3ListBucketsArgs);
 
 #[cfg(feature = "s3-tools")]
-#[derive(Debug, Clone, Serialize, JsonSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 struct S3ListArgs {
     bucket: String,
@@ -1411,11 +1441,9 @@ struct S3ListArgs {
     #[serde(flatten)]
     credentials: S3CredentialsArgs,
 }
-#[cfg(feature = "s3-tools")]
-impl_s3_args_deserialize!(S3ListArgs);
 
 #[cfg(feature = "s3-tools")]
-#[derive(Debug, Clone, Serialize, JsonSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 struct S3StatArgs {
     bucket: String,
@@ -1423,11 +1451,9 @@ struct S3StatArgs {
     #[serde(flatten)]
     credentials: S3CredentialsArgs,
 }
-#[cfg(feature = "s3-tools")]
-impl_s3_args_deserialize!(S3StatArgs);
 
 #[cfg(feature = "s3-tools")]
-#[derive(Debug, Clone, Serialize, JsonSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 struct S3GetArgs {
     bucket: String,
@@ -1443,11 +1469,9 @@ struct S3GetArgs {
     #[serde(flatten)]
     credentials: S3CredentialsArgs,
 }
-#[cfg(feature = "s3-tools")]
-impl_s3_args_deserialize!(S3GetArgs);
 
 #[cfg(feature = "s3-tools")]
-#[derive(Debug, Clone, Serialize, JsonSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 struct S3PutArgs {
     bucket: String,
@@ -1467,11 +1491,9 @@ struct S3PutArgs {
     #[serde(flatten)]
     credentials: S3CredentialsArgs,
 }
-#[cfg(feature = "s3-tools")]
-impl_s3_args_deserialize!(S3PutArgs);
 
 #[cfg(feature = "s3-tools")]
-#[derive(Debug, Clone, Serialize, JsonSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 struct S3CopyArgs {
     source_bucket: String,
@@ -1481,11 +1503,9 @@ struct S3CopyArgs {
     #[serde(flatten)]
     credentials: S3CredentialsArgs,
 }
-#[cfg(feature = "s3-tools")]
-impl_s3_args_deserialize!(S3CopyArgs);
 
 #[cfg(feature = "s3-tools")]
-#[derive(Debug, Clone, Serialize, JsonSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 struct S3DeleteArgs {
     bucket: String,
@@ -1493,11 +1513,9 @@ struct S3DeleteArgs {
     #[serde(flatten)]
     credentials: S3CredentialsArgs,
 }
-#[cfg(feature = "s3-tools")]
-impl_s3_args_deserialize!(S3DeleteArgs);
 
 #[cfg(feature = "s3-tools")]
-#[derive(Debug, Clone, Serialize, JsonSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 struct S3DeleteBatchArgs {
     bucket: String,
@@ -1506,11 +1524,9 @@ struct S3DeleteBatchArgs {
     #[serde(flatten)]
     credentials: S3CredentialsArgs,
 }
-#[cfg(feature = "s3-tools")]
-impl_s3_args_deserialize!(S3DeleteBatchArgs);
 
 #[cfg(feature = "s3-tools")]
-#[derive(Debug, Clone, Serialize, JsonSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 struct S3PresignArgs {
     bucket: String,
@@ -1521,8 +1537,6 @@ struct S3PresignArgs {
     #[serde(flatten)]
     credentials: S3CredentialsArgs,
 }
-#[cfg(feature = "s3-tools")]
-impl_s3_args_deserialize!(S3PresignArgs);
 
 #[cfg(feature = "s3-tools")]
 fn default_s3_presign_ttl() -> u64 {
@@ -1799,6 +1813,78 @@ struct LineEditInstruction {
     /// Text content for replace/insert operations
     #[serde(skip_serializing_if = "Option::is_none")]
     text: Option<String>,
+}
+
+#[cfg(all(test, feature = "s3-tools"))]
+mod s3_args_tests {
+    use super::*;
+
+    /// Every shape the wire may carry credentials in reaches the same result.
+    ///
+    /// This is the property the old `hoist_s3_credentials_blob` was written for, asserted against
+    /// the real argument type rather than against a helper that rewrote the JSON on its way past:
+    /// what matters is that `s3_stat` accepts all three forms, not that some map got edited.
+    #[test]
+    fn credentials_are_accepted_flat_nested_or_stringified() {
+        // Compared field by field: `S3Credentials` carries secrets and deliberately derives
+        // neither `PartialEq` nor `Debug`, and a test is no reason to widen that.
+        let same = |c: &S3Credentials| {
+            (
+                c.access_key_id.as_deref(),
+                c.secret_access_key.as_deref(),
+                c.session_token.as_deref(),
+                c.region.as_deref(),
+            ) == (Some("AKIA"), None, None, Some("eu-west-1"))
+        };
+        for json in [
+            r#"{"bucket":"b","key":"k","accessKeyId":"AKIA","region":"eu-west-1"}"#,
+            r#"{"bucket":"b","key":"k","credentials":{"accessKeyId":"AKIA","region":"eu-west-1"}}"#,
+            r#"{"bucket":"b","key":"k","credentials":"{\"accessKeyId\":\"AKIA\",\"region\":\"eu-west-1\"}"}"#,
+        ] {
+            let S3Args(args): S3Args<S3StatArgs> = serde_json::from_str(json).expect(json);
+            let got = args.credentials.to_credentials().expect(json);
+            assert!(same(&got), "{json}");
+        }
+    }
+
+    /// A field given plainly wins over the same field nested, and absent credentials stay absent
+    /// so the environment's own chain is used rather than an empty set. The precedence is
+    /// `or_insert`'s in `hoist_s3_credentials_blob`; it is asserted here, where a caller would
+    /// meet it.
+    #[test]
+    fn the_plain_field_wins_and_nothing_given_stays_nothing() {
+        let json = r#"{"bucket":"b","key":"k","region":"us-east-1","credentials":{"accessKeyId":"AKIA","region":"eu-west-1"}}"#;
+        let S3Args(args): S3Args<S3StatArgs> = serde_json::from_str(json).expect("parses");
+        let got = args.credentials.to_credentials().expect("some");
+        assert_eq!(
+            got.region.as_deref(),
+            Some("us-east-1"),
+            "plain beats nested"
+        );
+        assert_eq!(
+            got.access_key_id.as_deref(),
+            Some("AKIA"),
+            "nested still fills gaps"
+        );
+
+        let S3Args(bare): S3Args<S3StatArgs> =
+            serde_json::from_str(r#"{"bucket":"b","key":"k"}"#).expect("parses");
+        assert!(bare.credentials.to_credentials().is_none());
+    }
+
+    /// Deserializing an S3 argument struct terminates.
+    ///
+    /// It did not: the hand-written `Deserialize` ended in `from_value::<Self>`, which resolved
+    /// back to itself, so every S3 call recursed until the worker thread overflowed its stack and
+    /// took the process down - before any allowlist or credential check ran. A unit test is the
+    /// right place for it: a stack overflow aborts, so an end-to-end call cannot report it.
+    #[test]
+    fn s3_args_deserialize_without_recursing() {
+        let args: S3PutArgs =
+            serde_json::from_str(r#"{"bucket":"b","key":"k","body":"x","metadata":{"a":"1"}}"#)
+                .expect("parses");
+        assert_eq!(args.metadata.get("a").map(String::as_str), Some("1"));
+    }
 }
 
 #[cfg(test)]
@@ -6622,7 +6708,7 @@ impl FileSystemServer {
     )]
     async fn s3_list_buckets(
         &self,
-        Parameters(args): Parameters<S3ListBucketsArgs>,
+        Parameters(S3Args(args)): Parameters<S3Args<S3ListBucketsArgs>>,
     ) -> Result<CallToolResult, McpError> {
         if self.s3_allowlist_buckets.is_empty() {
             return Err(McpError::invalid_params(
@@ -6658,7 +6744,7 @@ impl FileSystemServer {
     )]
     async fn s3_list(
         &self,
-        Parameters(args): Parameters<S3ListArgs>,
+        Parameters(S3Args(args)): Parameters<S3Args<S3ListArgs>>,
     ) -> Result<CallToolResult, McpError> {
         if !is_bucket_allowed(&args.bucket, &self.s3_allowlist_buckets) {
             return Err(McpError::invalid_params(
@@ -6705,7 +6791,7 @@ impl FileSystemServer {
     )]
     async fn s3_stat(
         &self,
-        Parameters(args): Parameters<S3StatArgs>,
+        Parameters(S3Args(args)): Parameters<S3Args<S3StatArgs>>,
     ) -> Result<CallToolResult, McpError> {
         if !is_bucket_allowed(&args.bucket, &self.s3_allowlist_buckets) {
             return Err(McpError::invalid_params(
@@ -6738,7 +6824,7 @@ impl FileSystemServer {
     )]
     async fn s3_get(
         &self,
-        Parameters(args): Parameters<S3GetArgs>,
+        Parameters(S3Args(args)): Parameters<S3Args<S3GetArgs>>,
     ) -> Result<CallToolResult, McpError> {
         if !is_bucket_allowed(&args.bucket, &self.s3_allowlist_buckets) {
             return Err(McpError::invalid_params(
@@ -6790,7 +6876,7 @@ impl FileSystemServer {
     )]
     async fn s3_put(
         &self,
-        Parameters(args): Parameters<S3PutArgs>,
+        Parameters(S3Args(args)): Parameters<S3Args<S3PutArgs>>,
     ) -> Result<CallToolResult, McpError> {
         if !is_bucket_allowed(&args.bucket, &self.s3_allowlist_buckets) {
             return Err(McpError::invalid_params(
@@ -6830,7 +6916,7 @@ impl FileSystemServer {
     )]
     async fn s3_copy(
         &self,
-        Parameters(args): Parameters<S3CopyArgs>,
+        Parameters(S3Args(args)): Parameters<S3Args<S3CopyArgs>>,
     ) -> Result<CallToolResult, McpError> {
         if !is_bucket_allowed(&args.source_bucket, &self.s3_allowlist_buckets)
             || !is_bucket_allowed(&args.dest_bucket, &self.s3_allowlist_buckets)
@@ -6862,7 +6948,7 @@ impl FileSystemServer {
     )]
     async fn s3_delete(
         &self,
-        Parameters(args): Parameters<S3DeleteArgs>,
+        Parameters(S3Args(args)): Parameters<S3Args<S3DeleteArgs>>,
     ) -> Result<CallToolResult, McpError> {
         if !is_bucket_allowed(&args.bucket, &self.s3_allowlist_buckets) {
             return Err(McpError::invalid_params(
@@ -6892,7 +6978,7 @@ impl FileSystemServer {
     )]
     async fn s3_delete_batch(
         &self,
-        Parameters(args): Parameters<S3DeleteBatchArgs>,
+        Parameters(S3Args(args)): Parameters<S3Args<S3DeleteBatchArgs>>,
     ) -> Result<CallToolResult, McpError> {
         if !is_bucket_allowed(&args.bucket, &self.s3_allowlist_buckets) {
             return Err(McpError::invalid_params(
@@ -6914,7 +7000,7 @@ impl FileSystemServer {
     )]
     async fn s3_presign(
         &self,
-        Parameters(args): Parameters<S3PresignArgs>,
+        Parameters(S3Args(args)): Parameters<S3Args<S3PresignArgs>>,
     ) -> Result<CallToolResult, McpError> {
         if !is_bucket_allowed(&args.bucket, &self.s3_allowlist_buckets) {
             return Err(McpError::invalid_params(
@@ -6946,7 +7032,7 @@ impl FileSystemServer {
     )]
     async fn s3_get_batch(
         &self,
-        Parameters(args): Parameters<S3GetBatchArgs>,
+        Parameters(S3Args(args)): Parameters<S3Args<S3GetBatchArgs>>,
     ) -> Result<CallToolResult, McpError> {
         let mut results = Vec::new();
 
@@ -7033,7 +7119,7 @@ impl FileSystemServer {
     )]
     async fn s3_put_batch(
         &self,
-        Parameters(args): Parameters<S3PutBatchArgs>,
+        Parameters(S3Args(args)): Parameters<S3Args<S3PutBatchArgs>>,
     ) -> Result<CallToolResult, McpError> {
         let mut results = Vec::new();
 
@@ -7116,7 +7202,7 @@ impl FileSystemServer {
     )]
     async fn s3_copy_batch(
         &self,
-        Parameters(args): Parameters<S3CopyBatchArgs>,
+        Parameters(S3Args(args)): Parameters<S3Args<S3CopyBatchArgs>>,
     ) -> Result<CallToolResult, McpError> {
         let mut results = Vec::new();
 
