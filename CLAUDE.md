@@ -29,7 +29,7 @@ crate is behind `#[cfg(windows)]` and a Linux-only pass never sees the driver.
   hardcode an env key or its default anywhere else; readers must go through `env_spec::get`
   (blank/whitespace = unset) or a blank config value becomes a literal empty path/mode.
 - **Per-process logging** (`src/core/logging.rs`, wave 2): on by default in every transport at
-  `info`, one file per process at `<state>/logs/<YYYY-MM-DD>/<machine>_<timestamp>.log` (host
+  `info`, one file per process at `<state>/logs/<YYYY-MM-DD>/<machine>_<timestamp>_<instance>.log` (host
   name from `sysinfo`, `unknown` if it cannot be read; the stamp carries milliseconds so two
   servers starting in the same second cannot collide). No shared file, therefore no rotation and
   no `tracing-appender`. `--log <FILE>` overrides the path; `FS_MCP_LOG=off` is the only opt-out.
@@ -49,7 +49,7 @@ crate is behind `#[cfg(windows)]` and a Linux-only pass never sees the driver.
   `FS_MCP_TMP_KEEP_HOURS`, default 24), `ocrs/`, `layouts/`, `safety/`, and three that are written
   once per run and never swept: `logs/`, `panics/` (one crash report per panic) and `stats/` (the
   tool-call counters as JSON, wave 3). All three are named
-  `<YYYY-MM-DD>/<machine>_<timestamp>.<ext>` by the one helper `core::paths::run_file(kind, ext)`
+  `<YYYY-MM-DD>/<machine>_<timestamp>_<instance>.<ext>` by the one helper `core::paths::run_file(kind, ext)`
   - the only place the host name, the timestamp format and the dated directory exist.
   `FS_MCP_STATE_DIR` moves the root and must be absolute. The OS temp dir is no longer used.
 - `src/core/paths.rs` is the ONLY resolver. `paths_are_centralized` (src/core/paths_guard.rs) fails

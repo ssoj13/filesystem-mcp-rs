@@ -201,23 +201,29 @@ fn degraded_line(reason: &str) -> String {
 /// file already sitting at that name, a permission set on that one directory. `paths`'
 /// `a_usable_root_can_still_have_an_unusable_subdir` pins that this can happen at all.
 pub fn target_for(mode: TransportMode, log_file: Option<String>, level: Option<&str>) -> Plan {
-    if level.is_some_and(|v| v.eq_ignore_ascii_case("off")) {
-        return Plan::Disabled;
-    }
-    let default = crate::core::paths::run_file(crate::core::paths::SubDir::Logs, "log").ok();
-    target_for_in(default, mode, log_file, level)
+    target_for_in(
+        || crate::core::paths::run_file(crate::core::paths::SubDir::Logs, "log").ok(),
+        mode,
+        log_file,
+        level,
+    )
 }
 
-/// Decide the plan. `default_file` is this run's log file, or `None` when it could not be placed
+/// Decide the plan. `resolve` yields this run's log file, or `None` when it could not be placed
 /// (see [`target_for`]); `level` is the raw `FS_MCP_LOG` value (already blank-filtered).
 ///
-/// Takes the resolved file as an argument, like [`crate::core::paths`]'s own resolvers take a
-/// root, so the decision can be tested against a `TempDir` instead of creating directories under
-/// the real state root on every `cargo test`. It keeps its own `off` check even though
-/// [`target_for`] answers that case first: this function is the one the tests exercise, and a
-/// decision that depended on which wrapper you came through would be a trap.
+/// **A closure, not a path, because resolving has a side effect**: it creates the dated
+/// directory, and nothing deletes one. The two branches that need no default file - `off`, and an
+/// explicit `--log` - must therefore not resolve at all, or a server run with logging off would
+/// leave one empty directory per day forever in a tree with no retention. Passing the resolved
+/// `Option` made that ordering invisible and easy to get wrong, which is exactly how it was got
+/// wrong; as a closure the laziness is the signature, and
+/// `logging_off_never_touches_the_filesystem` can assert it was never called.
+///
+/// Taking the resolution as an argument also keeps the decision testable against a `TempDir`
+/// instead of creating directories under the real state root on every `cargo test`.
 fn target_for_in(
-    default_file: Option<PathBuf>,
+    resolve: impl FnOnce() -> Option<PathBuf>,
     mode: TransportMode,
     log_file: Option<String>,
     level: Option<&str>,
@@ -229,7 +235,7 @@ fn target_for_in(
     // per-process file is only the default location, not a rule about where logs may go.
     let file = match log_file {
         Some(p) => PathBuf::from(p),
-        None => match default_file {
+        None => match resolve() {
             Some(p) => p,
             // `<state>/logs` cannot be made, or the dated directory under it cannot be.
             // stdio still must not touch stderr, so it runs without logs rather than breaking
@@ -450,18 +456,60 @@ mod tests {
     fn off_disables_everything() {
         let dir = scratch();
         for mode in [TransportMode::Stdio, TransportMode::Stream] {
-            let plan = target_for_in(default_in(&dir), mode, None, Some("off"));
+            let plan = target_for_in(|| default_in(&dir), mode, None, Some("off"));
             assert!(matches!(plan, Plan::Disabled), "{plan:?}");
             assert_eq!(sinks(&plan), (None, false));
         }
         // Not even an explicit `--log` reopens the door.
         let plan = target_for_in(
-            default_in(&dir),
+            || default_in(&dir),
             TransportMode::Stream,
             Some("x.log".into()),
             Some("OFF"),
         );
         assert!(matches!(plan, Plan::Disabled), "{plan:?}");
+    }
+
+    /// Logging off resolves no path at all — the branch that needs no file must not create the
+    /// directory that resolving one makes.
+    ///
+    /// The assertion is that the closure was never *called*, not that some directory is absent:
+    /// the side effect lives inside `core::paths`, and reaching for it here would mean pointing a
+    /// test at the real state root. `run_file` creates the dated directory, nothing deletes one,
+    /// and `FS_MCP_LOG=off` is a setting a server runs under for months — so an eager resolution
+    /// leaves an empty directory per day, forever. It did, until this test.
+    ///
+    /// An explicit `--log` is checked the same way and for the same reason: it names its own
+    /// file, so the default it will not use must not be built either.
+    #[test]
+    fn logging_off_never_touches_the_filesystem() {
+        for mode in [TransportMode::Stdio, TransportMode::Stream] {
+            let mut resolved = false;
+            let plan = target_for_in(
+                || {
+                    resolved = true;
+                    None
+                },
+                mode,
+                None,
+                Some("off"),
+            );
+            assert!(matches!(plan, Plan::Disabled), "{plan:?}");
+            assert!(!resolved, "`off` must not resolve a log path: {mode:?}");
+        }
+
+        let mut resolved = false;
+        let plan = target_for_in(
+            || {
+                resolved = true;
+                None
+            },
+            TransportMode::Stdio,
+            Some("named.log".into()),
+            None,
+        );
+        assert!(matches!(plan, Plan::File(_)), "{plan:?}");
+        assert!(!resolved, "an explicit --log must not resolve the default");
     }
 
     /// stdio never gets a stderr sink, whatever else is configured — stderr during the handshake
@@ -474,16 +522,16 @@ mod tests {
     fn stdio_never_writes_to_stderr() {
         let dir = scratch();
         let stdio = [
-            target_for_in(default_in(&dir), TransportMode::Stdio, None, None),
+            target_for_in(|| default_in(&dir), TransportMode::Stdio, None, None),
             target_for_in(
-                default_in(&dir),
+                || default_in(&dir),
                 TransportMode::Stdio,
                 Some("x.log".into()),
                 None,
             ),
-            target_for_in(default_in(&dir), TransportMode::Stdio, None, Some("off")),
+            target_for_in(|| default_in(&dir), TransportMode::Stdio, None, Some("off")),
             // The degraded branch: no usable state directory at all.
-            target_for_in(None, TransportMode::Stdio, None, None),
+            target_for_in(|| None, TransportMode::Stdio, None, None),
         ];
         for plan in &stdio {
             assert!(!sinks(plan).1, "stdio must never write to stderr: {plan:?}");
@@ -492,7 +540,7 @@ mod tests {
         assert!(matches!(stdio[1], Plan::File(_)), "{:?}", stdio[1]);
 
         // Stream is the only mode that may, and does.
-        let stream = target_for_in(default_in(&dir), TransportMode::Stream, None, None);
+        let stream = target_for_in(|| default_in(&dir), TransportMode::Stream, None, None);
         assert!(matches!(stream, Plan::FileAndStderr(_)), "{stream:?}");
         assert!(sinks(&stream).1);
     }
@@ -508,16 +556,16 @@ mod tests {
     #[test]
     fn an_unusable_log_directory_degrades_per_transport() {
         assert_eq!(
-            target_for_in(None, TransportMode::Stdio, None, None),
+            target_for_in(|| None, TransportMode::Stdio, None, None),
             Plan::Disabled
         );
         assert_eq!(
-            target_for_in(None, TransportMode::Stream, None, None),
+            target_for_in(|| None, TransportMode::Stream, None, None),
             Plan::Stderr
         );
         // An explicit `--log` needs no log directory at all, so it survives one being unusable.
         assert!(matches!(
-            target_for_in(None, TransportMode::Stdio, Some("x.log".into()), None),
+            target_for_in(|| None, TransportMode::Stdio, Some("x.log".into()), None),
             Plan::File(_)
         ));
     }
@@ -529,7 +577,7 @@ mod tests {
         let dir = scratch();
         let named = dir.path().join("explicit.log");
         match target_for_in(
-            default_in(&dir),
+            || default_in(&dir),
             TransportMode::Stdio,
             Some(named.to_string_lossy().into_owned()),
             None,

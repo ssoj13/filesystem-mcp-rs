@@ -88,10 +88,10 @@ keys below are listed first because the locations named further down resolve rel
 
 #### Logs
 **Logging is on by default in every transport mode**, at `info`. Each run writes its own file,
-`<state>/logs/<YYYY-MM-DD>/<machine>_<timestamp>.log` — one file per process, so dozens of
+`<state>/logs/<YYYY-MM-DD>/<machine>_<timestamp>_<instance>.log` — one file per process, so dozens of
 servers on one machine never contend for a shared file and there is no rotation to arbitrate. The
-stamp carries milliseconds, so two servers starting in the same second on one machine still get
-their own file. A new day is a new directory; a process that outlives midnight keeps the file it
+stamp carries milliseconds and the name ends in the run's instance id, so even a dozen servers
+launched together — which start inside the same millisecond routinely — each get their own file. A new day is a new directory; a process that outlives midnight keeps the file it
 opened. `--log <FILE>` writes to that path instead, and `FS_MCP_LOG=off` is the way out: no
 subscriber, no file.
 
@@ -104,12 +104,12 @@ Under stdio the file is the *only* sink — anything on stderr during the MCP ha
 connection — so a log file that cannot be opened leaves that run silent rather than breaking the
 transport. Stream mode also writes to stderr, which nobody is parsing.
 
-A panic writes its own crash report, `<state>/panics/<YYYY-MM-DD>/<machine>_<timestamp>.log` —
+A panic writes its own crash report, `<state>/panics/<YYYY-MM-DD>/<machine>_<timestamp>_<instance>.log` —
 named the same way, one file per panic, so you can tell which run produced which backtrace.
 
 #### Tool-call counters
 Each run counts its own tool calls — how many, how they ended, how long they took — and writes
-them once, on the way out, to `<state>/stats/<YYYY-MM-DD>/<machine>_<timestamp>.json`. Same naming
+them once, on the way out, to `<state>/stats/<YYYY-MM-DD>/<machine>_<timestamp>_<instance>.json`. Same naming
 as the logs, for the same reason: nothing is shared between processes, so nothing has to be
 arbitrated between them.
 

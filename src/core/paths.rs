@@ -11,7 +11,8 @@
 //! `tests/` and fails the build on any call site not listed in that module's `ALLOWED`, so the
 //! drift cannot come back quietly. `ALLOWED` is not only this file: `src/mcp_setup/types.rs` and
 //! `src/mcp_setup/host.rs` are cleared for `dirs::home_dir`, because the installer locates *other*
-//! applications' config files - so the call appears in three files, not one.
+//! applications' config files. With `paths_guard.rs` itself, which names the spellings it forbids,
+//! `ALLOWED` has four entries - so the call appears in four files, not one.
 //!
 //! The guard sees only this repo's tree under `src/` and `tests/`. A path resolved inside a
 //! dependency, in a `build.rs` (crate root, outside both roots) or through a macro expansion is
@@ -80,7 +81,8 @@ pub fn sub_dir(kind: SubDir) -> io::Result<PathBuf> {
     resolve_sub(env_spec::get("FS_MCP_STATE_DIR").map(PathBuf::from), kind)
 }
 
-/// Path for a file this run writes once: `<state>/<kind>/<YYYY-MM-DD>/<machine>_<stamp>.<ext>`.
+/// Path for a file this run writes once:
+/// `<state>/<kind>/<YYYY-MM-DD>/<machine>_<stamp>_<instance>.<ext>`.
 ///
 /// The dated directory is created; the file is not. Three subsystems write such a file - the log
 /// ([`SubDir::Logs`]), a crash report ([`SubDir::Panics`]) and the tool-call counters
@@ -99,12 +101,20 @@ pub fn sub_dir(kind: SubDir) -> io::Result<PathBuf> {
 /// the exit path overwrites it with the final one, so no latch is needed to keep a run to one
 /// counters file.
 ///
-/// **Uniqueness comes from that stamp, not from coordination.** It carries milliseconds, so two
-/// servers starting in the same millisecond on one host are the only collision, and servers on
-/// different hosts differ by the host name even when their clocks agree. Nothing consults a lock,
-/// a pid or another process's files. This is what replaced wave 2's retention layer: that layer
-/// existed only to decide whether another process's file was safe to delete, a question nobody
-/// now asks.
+/// **Uniqueness comes from the name itself, not from coordination.** Nothing consults a lock, a
+/// pid or another process's files. Three parts carry it, and each covers what the others cannot:
+/// the host name separates machines sharing a state root, the millisecond stamp separates runs on
+/// one machine, and [`crate::core::instance::id`] separates the case the stamp cannot - a client
+/// launching a dozen servers at once, which start inside the same millisecond routinely. That
+/// last one is why the instance is in the name at all: without it two such servers resolve the
+/// identical path, and the counters writer truncates rather than appends, so one run's whole
+/// report would be destroyed in silence by the other.
+///
+/// The host name sanitises many-to-one (`a_b` and `a-b` both give `a-b`), so two differently
+/// named hosts sharing one state root can still meet; the instance covers that too.
+///
+/// This is what replaced wave 2's retention layer: that layer existed only to decide whether
+/// another process's file was safe to delete, a question nobody now asks.
 pub fn run_file(kind: SubDir, ext: &str) -> io::Result<PathBuf> {
     run_file_at(
         env_spec::get("FS_MCP_STATE_DIR").map(PathBuf::from),
@@ -124,7 +134,12 @@ fn run_file_at(
 ) -> io::Result<PathBuf> {
     let dated = resolve_sub(root, kind)?.join(utc_day(when));
     mkdir(&dated)?;
-    Ok(dated.join(format!("{}_{}.{ext}", machine(), stamp(when))))
+    Ok(dated.join(format!(
+        "{}_{}_{}.{ext}",
+        machine(),
+        stamp(when),
+        crate::core::instance::id()
+    )))
 }
 
 /// This host's name, reduced to characters every filesystem accepts.
@@ -774,7 +789,14 @@ mod tests {
         assert!(!p.exists(), "the file itself is the caller's to create");
 
         let name = p.file_name().expect("name").to_string_lossy().into_owned();
-        assert_eq!(name, format!("{}_20260910-002640-123.log", machine()));
+        assert_eq!(
+            name,
+            format!(
+                "{}_20260910-002640-123_{}.log",
+                machine(),
+                crate::core::instance::id()
+            )
+        );
     }
 
     /// The kind is the only thing that changes between the three writers, and the extension is
@@ -802,6 +824,36 @@ mod tests {
         );
         assert!(
             stats.extension().expect("ext") == "json" && log.extension().expect("ext") == "log"
+        );
+    }
+
+    /// Two runs that start in the same millisecond on one host still get different files.
+    ///
+    /// This is the case the stamp alone cannot separate and the reason the instance is in the
+    /// name: a client launching several servers at once starts them inside one millisecond
+    /// routinely, and the counters writer truncates rather than appends, so a shared path means
+    /// one run's report silently destroys the other's. Asserted through the parts rather than by
+    /// spawning two processes - `id()` is per-process, so a second run cannot be had in-process -
+    /// which is what `instance`'s own tests cover from the other side.
+    #[test]
+    fn the_stem_separates_two_runs_that_start_in_the_same_millisecond() {
+        let base = tempfile::TempDir::new().expect("scratch dir");
+        let when = std::time::UNIX_EPOCH + std::time::Duration::from_millis(1_789_000_000_123);
+        let p = run_file_at(Some(base.path().to_path_buf()), SubDir::Stats, "json", when)
+            .expect("run file");
+        let name = p.file_name().expect("name").to_string_lossy().into_owned();
+
+        let id = crate::core::instance::id();
+        assert!(
+            name.contains(id),
+            "{name} must carry the instance, or two runs starting in one millisecond collide"
+        );
+        // Everything except the instance is shared by such a pair, so the instance is the only
+        // thing keeping them apart - state that as an assertion rather than as a comment.
+        assert_eq!(
+            name.replace(id, "OTHER-RUN"),
+            format!("{}_20260910-002640-123_OTHER-RUN.json", machine()),
+            "only the instance may differ between two runs of the same millisecond"
         );
     }
 
