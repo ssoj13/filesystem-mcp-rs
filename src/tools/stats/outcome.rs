@@ -19,11 +19,20 @@
 
 use rmcp::ErrorData as McpError;
 use rmcp::model::{CallToolResponse, ErrorCode};
-use tracing::warn;
+
+/// The rmcp release whose response and error shapes the `match` below was written against.
+///
+/// This is the tripwire that stands in for the compiler error we cannot have. Because
+/// [`CallToolResponse`] is `#[non_exhaustive]`, a fourth variant would compile silently here and
+/// be counted [`Outcome::UnknownShape`] for as long as nobody looked. `the_audited_rmcp_version_
+/// is_the_resolved_one` compares this constant against the version `Cargo.lock` actually
+/// resolves, so bumping rmcp fails the build until someone re-reads the catch-all arms and moves
+/// this string deliberately. One edit per bump, which is exactly the review that was lost.
+const AUDITED_RMCP_VERSION: &str = "3.1.3";
 
 /// Which counter a finished tool call increments.
 ///
-/// Five outcomes, not two, because a bare success/failure split cannot tell an operator whether
+/// Six outcomes, not two, because a bare success/failure split cannot tell an operator whether
 /// *they* are calling the tool wrongly ([`Outcome::ErrParams`]) or the tool itself is broken
 /// ([`Outcome::ErrInternal`]), and cannot tell either of those from the tool running to
 /// completion and reporting its own failure ([`Outcome::ErrFlagged`]).
@@ -34,8 +43,15 @@ pub enum Outcome {
     /// The call completed but flagged itself failed: `is_error == Some(true)`. A killed or
     /// timed-out `run_command` lands here, which is why this variant exists at all.
     ErrFlagged,
-    /// rmcp rejected the request's parameters (`-32602`): the caller got the schema wrong, and
-    /// the tool never ran.
+    /// rmcp rejected the request (`-32602`): the caller got the request wrong - bad parameters,
+    /// or a tool name this build does not have - and the tool never ran.
+    ///
+    /// The two readings share a counter but not a remedy: bad parameters mean fix the call, an
+    /// unknown name means the tool was renamed or removed. rmcp raises the same
+    /// `invalid_params("tool not found")` for the second case
+    /// (`rmcp-3.1.3/src/handler/server/router/tool.rs:566,571`), which is also why task 3 must
+    /// decide what tool name such a call is attributed to: there is no registered tool to name,
+    /// so it is attributed to the interned `__unknown`.
     ErrParams,
     /// The call failed below the handler (`-32603`, and every other protocol code): the tool
     /// broke rather than the caller.
@@ -44,7 +60,23 @@ pub enum Outcome {
     /// the client will poll for. Not a completion, so no latency is attributed to it - the
     /// elapsed time here measures how long the server took to *defer*, not how long the work
     /// took.
+    ///
+    /// On this server's paths it should be a constant zero: no tool here returns either shape,
+    /// and rmcp converts both to `internal_error` before they reach the handler. A non-zero
+    /// count is therefore a signal in its own right.
     Deferred,
+    /// The response was a [`CallToolResponse`] variant this build does not know - rmcp grew one
+    /// after [`AUDITED_RMCP_VERSION`] and `#[non_exhaustive]` let it through without a compiler
+    /// error.
+    ///
+    /// Stored with [`Outcome::Deferred`] in the `deferred` column, because the schema has one
+    /// bucket for "did not complete" and an unknown shape is not known to have completed;
+    /// **counted apart** by task 3 in a process-wide counter that task 6's health section
+    /// reports. Folding the two together in the count would leave an operator unable to tell
+    /// "the server deferred" from "this build does not understand rmcp's answer", which are the
+    /// same number and entirely different problems. A log line will not do that job: under stdio
+    /// there may be no subscriber at all.
+    UnknownShape,
 }
 
 /// Score one finished tool call.
@@ -60,10 +92,10 @@ pub enum Outcome {
 ///
 /// - [`CallToolResponse`] is `#[non_exhaustive]`, so rustc *requires* a catch-all in a
 ///   downstream crate; omitting one does not compile. The known variants are still listed
-///   explicitly, and the catch-all scores an unrecognised shape as [`Outcome::Deferred`] and
-///   warns. Deferred, not `Ok`, because the conservative reading of a shape this build does not
-///   understand is "not known to have completed": it inflates no success rate and attributes no
-///   latency.
+///   explicitly, and the catch-all scores an unrecognised shape as its own
+///   [`Outcome::UnknownShape`] - never `Ok`, because a shape this build does not understand is
+///   not known to have completed, so it inflates no success rate and attributes no latency. What
+///   the lost compiler error is replaced by is [`AUDITED_RMCP_VERSION`], not this arm.
 /// - `ErrorCode` is a newtype over `i32`, not an enum, so its patterns are as open as the
 ///   integers are. Unmapped codes are genuine failures whichever number they carry, so they
 ///   score as [`Outcome::ErrInternal`] - the arm folds nothing that was not already an error.
@@ -77,12 +109,12 @@ pub fn classify(result: &Result<CallToolResponse, McpError>) -> Outcome {
             Some(false) | None => Outcome::Ok,
         },
         Ok(CallToolResponse::InputRequired(_) | CallToolResponse::Task(_)) => Outcome::Deferred,
-        Ok(unrecognised) => {
-            warn!("stats: unrecognised tool response shape ({unrecognised:?}); counted deferred");
-            Outcome::Deferred
-        }
+        Ok(_) => Outcome::UnknownShape,
         Err(error) => match error.code {
             ErrorCode::INVALID_PARAMS => Outcome::ErrParams,
+            // Behaviourally identical to the arm below and kept purely as documentation of the
+            // code the name `ErrInternal` comes from. It is not coverage: deleting it changes
+            // nothing and breaks no test.
             ErrorCode::INTERNAL_ERROR => Outcome::ErrInternal,
             _ => Outcome::ErrInternal,
         },
@@ -178,6 +210,60 @@ mod tests {
             classify(&Ok(CallToolResponse::Task(task))),
             Outcome::Deferred
         );
+    }
+
+    /// The audited rmcp version is the one `Cargo.lock` resolves, or the catch-all arms are due
+    /// a re-read.
+    ///
+    /// This is the tripwire described on [`AUDITED_RMCP_VERSION`], and the only protection left
+    /// once `#[non_exhaustive]` took the compiler error away: a new response variant cannot
+    /// arrive without the rmcp version changing, and the version cannot change without this
+    /// failing. Reading the lock file rather than trusting a second copy of the number is what
+    /// makes it deterministic - there is no way to satisfy it except by bumping the constant.
+    #[test]
+    fn the_audited_rmcp_version_is_the_resolved_one() {
+        let lock_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("Cargo.lock");
+        let lock = std::fs::read_to_string(&lock_path).expect("Cargo.lock is readable");
+        let resolved = resolved_version(&lock, "rmcp").expect("Cargo.lock resolves rmcp");
+        assert_eq!(
+            resolved, AUDITED_RMCP_VERSION,
+            "rmcp moved from {AUDITED_RMCP_VERSION} to {resolved}. `CallToolResponse` is \
+             #[non_exhaustive], so a new variant compiles silently into the `Ok(_) => \
+             UnknownShape` catch-all in `classify`. Re-read that arm and the `ErrorCode` arm \
+             against the new release, then move AUDITED_RMCP_VERSION deliberately."
+        );
+    }
+
+    /// The resolved version of `name` in a `Cargo.lock`: the `version` line that follows that
+    /// package's `name` line.
+    ///
+    /// Split out as a pure function so the parse can be checked against a literal lock fragment,
+    /// including the `rmcp-macros` entry that a looser match would seize on first.
+    fn resolved_version(lock: &str, name: &str) -> Option<String> {
+        let needle = format!("name = \"{name}\"");
+        let mut rest = lock.lines().skip_while(|line| line.trim() != needle);
+        rest.next()?;
+        rest.find_map(|line| {
+            line.trim()
+                .strip_prefix("version = \"")
+                .and_then(|value| value.strip_suffix('"'))
+                .map(str::to_owned)
+        })
+    }
+
+    /// The parse takes the package asked for, not one whose name merely begins the same way.
+    #[test]
+    fn the_lock_parse_does_not_confuse_rmcp_with_rmcp_macros() {
+        let lock = concat!(
+            "[[package]]\nname = \"rmcp-macros\"\nversion = \"9.9.9\"\n\n",
+            "[[package]]\nname = \"rmcp\"\nversion = \"3.1.3\"\n"
+        );
+        assert_eq!(resolved_version(lock, "rmcp").as_deref(), Some("3.1.3"));
+        assert_eq!(
+            resolved_version(lock, "rmcp-macros").as_deref(),
+            Some("9.9.9")
+        );
+        assert_eq!(resolved_version(lock, "absent"), None);
     }
 
     /// A protocol code this build does not map is still a failure, never a success.
