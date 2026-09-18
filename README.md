@@ -83,16 +83,16 @@ keys below are listed first because the locations named further down resolve rel
 |----------|---------|-------------|
 | `FS_MCP_STATE_DIR` | *(unset)* | State directory for every file this server owns; must be absolute. Unset = `~/.filesystem-mcp-rs` |
 | `FS_MCP_LOG` | `info` | Level for this server's log under `<state>/logs`: `trace`\|`debug`\|`info`\|`warn`\|`error`, or `off`. Bare words are levels; a target filter needs `=` or `,` (`info,hyper=warn`) |
-| `FS_MCP_LOG_KEEP_DAYS` | `14` | Delete dated log directories under `<state>/logs` older than this many days. `0` = never sweep **by date** — the two rules switch off independently, so `FS_MCP_LOG_MAX_MB` still deletes, today's files included |
-| `FS_MCP_LOG_MAX_MB` | `512` | Total size budget (MiB) for `<state>/logs`; oldest files are deleted first once it is exceeded. `0` = no budget |
 | `FS_MCP_TMP_KEEP_HOURS` | `24` | Delete scratch under `<state>/tmp` older than this many hours. `0` = never sweep |
 
 #### Logs
 **Logging is on by default in every transport mode**, at `info`. Each run writes its own file,
-`<state>/logs/<YYYY-MM-DD>/fsmcp-<pid>-<instance>.log` — one file per process, so dozens of
-servers on one machine never contend for a shared file and there is no rotation to arbitrate. A
-new day is a new directory; a process that outlives midnight keeps the file it opened. `--log
-<FILE>` writes to that path instead, and `FS_MCP_LOG=off` is the way out: no subscriber, no file.
+`<state>/logs/<YYYY-MM-DD>/<machine>_<timestamp>.log` — one file per process, so dozens of
+servers on one machine never contend for a shared file and there is no rotation to arbitrate. The
+stamp carries milliseconds, so two servers starting in the same second on one machine still get
+their own file. A new day is a new directory; a process that outlives midnight keeps the file it
+opened. `--log <FILE>` writes to that path instead, and `FS_MCP_LOG=off` is the way out: no
+subscriber, no file.
 
 If the log cannot be opened at all — a read-only state directory, a full disk, a `--log` pointing
 at a directory — the server still starts, and says why in `<state>/logging-degraded.log`. That
@@ -103,9 +103,9 @@ Under stdio the file is the *only* sink — anything on stderr during the MCP ha
 connection — so a log file that cannot be opened leaves that run silent rather than breaking the
 transport. Stream mode also writes to stderr, which nobody is parsing.
 
-Old logs are reclaimed on start by the same leased housekeeping sweep that clears `<state>/tmp`,
-by age (`FS_MCP_LOG_KEEP_DAYS`) and then by total size (`FS_MCP_LOG_MAX_MB`). A file belonging to
-a live process is never deleted, and today's directory is never touched.
+**Nothing ever deletes a log file.** There is no retention for `<state>/logs`: clear the
+directory by hand when you want it clear. (`<state>/tmp` is a different matter — it is swept by
+age, see `FS_MCP_TMP_KEEP_HOURS`.)
 
 ### Core
 | Variable | Default | Description |

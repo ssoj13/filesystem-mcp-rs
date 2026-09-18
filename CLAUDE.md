@@ -29,12 +29,15 @@ crate is behind `#[cfg(windows)]` and a Linux-only pass never sees the driver.
   hardcode an env key or its default anywhere else; readers must go through `env_spec::get`
   (blank/whitespace = unset) or a blank config value becomes a literal empty path/mode.
 - **Per-process logging** (`src/core/logging.rs`, wave 2): on by default in every transport at
-  `info`, one file per process at `<state>/logs/<YYYY-MM-DD>/fsmcp-<pid>-<instance>.log`. No
-  shared file, therefore no rotation and no `tracing-appender`. `--log <FILE>` overrides the path;
-  `FS_MCP_LOG=off` is the only opt-out. **stdio still never touches stderr** — that rule lives in
-  the pure `sinks(&Plan)`, so any stdio path gaining a stderr sink fails a test. Retention
-  (`FS_MCP_LOG_KEEP_DAYS`/`_MAX_MB`) runs in `core::housekeeping` under wave 1's lease, ages a
-  dated directory by its NAME, and never deletes a file whose pid is still alive.
+  `info`, one file per process at `<state>/logs/<YYYY-MM-DD>/<machine>_<timestamp>.log` (host
+  name from `sysinfo`, `unknown` if it cannot be read; the stamp carries milliseconds so two
+  servers starting in the same second cannot collide). No shared file, therefore no rotation and
+  no `tracing-appender`. `--log <FILE>` overrides the path; `FS_MCP_LOG=off` is the only opt-out.
+  **stdio still never touches stderr** — that rule lives in the pure `sinks(&Plan)`, so any stdio
+  path gaining a stderr sink fails a test. **Nothing deletes a log, ever** — there is no log
+  retention; `core::housekeeping` sweeps `<state>/tmp` only. `FS_MCP_LOG_KEEP_DAYS`/`_MAX_MB` are
+  vestigial: still registered in `env_spec`, read by `core::logging` so the registry's own test
+  passes, acted on by nothing. Remove the registry entries and those readers together.
 - Any live run of the binary must point `FS_MCP_STATE_DIR` at a temp directory, or it writes into
   the developer's real `~/.filesystem-mcp-rs/`. The suite does this for every server it spawns.
 - `src/tools/computer/` — self-contained computer-control module (extractable; recipe in mod.rs):

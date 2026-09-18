@@ -7648,11 +7648,20 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
         Err(e) => warn!("Housekeeping skipped: {e}"),
     }
 
-    // Run in selected mode
-    match mode {
+    // One last dump when the transport returns, so that a short-lived process - which is most of
+    // them - still leaves its counters behind even though it never reached the Nth call. Held as
+    // a clone because the transport consumes the server. This is every shutdown path there is
+    // from inside the process; a `SIGKILL` takes the counters with it, and no amount of
+    // machinery here would change that.
+    let stats_at_exit = server.stats.clone();
+    let served = match mode {
         TransportMode::Stdio => run_stdio_mode(server).await,
         TransportMode::Stream => run_stream_mode(server, &args.bind, args.port).await,
+    };
+    if let Some(collector) = stats_at_exit {
+        collector.dump();
     }
+    served
 }
 
 // init_tracing removed - see main() comment about why we can't use stderr logging

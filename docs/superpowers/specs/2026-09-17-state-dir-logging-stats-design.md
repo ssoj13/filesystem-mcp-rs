@@ -104,11 +104,10 @@ work, so one process per interval acts, not fifty. `core::housekeeping` owns the
 (`lease_due`/`lease_done`, one per `kind`) and each caller's age rule runs under it.
 
 Not yet one *mechanism*: what wave 1 landed is the lease plus a single age rule, `sweep_dir`,
-which deletes entries older than a `max_age`. Two of the retention policies this design calls for
-are not expressible in it and need their own code under the same lease — §5's "files over
-`FS_MCP_LOG_MAX_MB`, oldest first" is a size budget rather than an age cutoff, and §6.4's
-`tool_agg` → `tool_daily` compaction rewrites rows rather than deleting files. Wave 3 should add
-them as further `kind`s, not as a second leasing scheme.
+which deletes entries older than a `max_age`. §6.4's `tool_agg` → `tool_daily` compaction is not
+expressible in it — it rewrites rows rather than deleting files — and should be added as a
+further `kind` under the same lease, not as a second leasing scheme. (§5's log retention, the
+other policy this once listed, no longer exists: nothing deletes a log file.)
 
 ## 4. Wave 1 — unified state directory
 
@@ -141,7 +140,8 @@ under the same lease as §5 so only one process sweeps.
 
 ## 5. Wave 2 — logging that survives dozens of processes
 
-**No shared log file.** Each process writes `logs/<YYYY-MM-DD>/fsmcp-<pid>-<instance>.log`.
+**No shared log file.** Each process writes `logs/<YYYY-MM-DD>/<machine>_<timestamp>.log`, the
+stamp to the millisecond so that two servers starting in the same second cannot collide.
 Rotation as a mechanism disappears: a new process is a new file, a new day is a new directory.
 No renames, no interleaved partial lines, no per-process rotation timers fighting each other.
 
@@ -153,18 +153,14 @@ The level defaults to **`info`**, not the `warn` this section first drafted: "Mi
 "memory tools disabled" and "removed N stale scratch files" are all `info!`, so a warn-only
 default would hide exactly the record this wave exists to put in front of an operator.
 
-**Retention, as built.** The housekeeping sweep deletes dated log directories older than
-`FS_MCP_LOG_KEEP_DAYS` (default 14), aging each by its NAME rather than by walking its tree, and
-then deletes oldest-first across the whole of `logs/` until it is under `FS_MCP_LOG_MAX_MB`. The
-budget is a **soft** limit: the sweep never deletes a file whose pid is still alive and never
-touches today's directory, and it stops at the first file it may not delete. A process that
-outlives midnight keeps writing into its start-of-day directory, so that directory becomes
-deletable only once it holds no live-pid files — on Windows the unlink would fail, and on Unix
-the server would go on writing into an unlinked inode and its logs would vanish with no trace.
-Either knob set to `0` switches that half of the sweep **off**, following `FS_MCP_TMP_KEEP_HOURS`:
-a retention knob whose zero destroys data would fire on every one of dozens of starts. The
-lease is a **marker file per kind**, `<state>/.housekeeping-<kind>`, holding the Unix timestamp of
-the last completed run: one process per interval does the work, the rest skip.
+**No log retention.** Nothing deletes a log file; the operator clears `logs/` by hand. Deleting
+another process's log safely needs a liveness signal a process table cannot give, and the
+machinery that tried cost more than the disk it saved. `logs/` is therefore outside the
+housekeeping sweep entirely, which sweeps `tmp/` and nothing else.
+
+The lease that sweep runs under is a **marker file per kind**, `<state>/.housekeeping-<kind>`,
+holding the Unix timestamp of the last completed run: one process per interval does the work, the
+rest skip.
 
 This is what wave 1 built (`core::housekeeping::lease_due`/`lease_done`), and it replaces the row
 in `stats.db` this section originally specified. The marker needs no database, no lock to release
@@ -301,8 +297,8 @@ Reads use a separate `SQLITE_OPEN_READ_ONLY` connection so a query can never tak
 New `stats_vars()` in `src/env_spec.rs`, extended into `vars()` — the only registration point:
 `FS_MCP_STATS` (`on`), `FS_MCP_STATS_DB` (blank = `~/.filesystem-mcp-rs/stats.db`),
 `FS_MCP_STATS_FLUSH_SEC` (`5`), `FS_MCP_STATS_DETAIL_DAYS` (`14`), `FS_MCP_STATS_LABEL` (blank).
-Waves 1-2 add `FS_MCP_TMP_KEEP_HOURS` (`24`), `FS_MCP_LOG` (`info`, see §5), `FS_MCP_LOG_KEEP_DAYS`
-(`14`), `FS_MCP_LOG_MAX_MB` (`512`). Feature `stats-tools`, added to `default`; the only new
+Waves 1-2 add `FS_MCP_TMP_KEEP_HOURS` (`24`) and `FS_MCP_LOG` (`info`, see §5). Feature
+`stats-tools`, added to `default`; the only new
 dependency surface is `rusqlite`, already unconditional, so no cross-platform build risk.
 
 If WAL cannot be established (network share, sync-backed directory), stats are **disabled with

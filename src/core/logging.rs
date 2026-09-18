@@ -1,16 +1,19 @@
 //! What this process logs, and where it writes it.
 //!
-//! One file per process, `<state>/logs/<YYYY-MM-DD>/fsmcp-<pid>-<instance>.log`, on by default in
+//! One file per process, `<state>/logs/<YYYY-MM-DD>/<machine>_<timestamp>.log`, on by default in
 //! every transport mode. Dozens of these servers run at once on one machine, so there is no
 //! shared log file — and therefore no rotation to arbitrate: a new process is a new file, a new
 //! day is a new directory. `tracing-appender` exists to rotate a shared file and is deliberately
 //! not used.
 //!
+//! **Nothing ever deletes a log file.** There is no retention here and none in
+//! [`crate::core::housekeeping`]; the operator clears `<state>/logs` by hand when they want it
+//! clear. That is a deliberate trade: the machinery needed to delete another process's log
+//! safely cost more than the disk it saved.
+//!
 //! A process that outlives midnight keeps the file it opened at startup. That is the cost of
 //! having exactly one writer path: reopening would mean a second one plus the rotation mechanism
-//! this design exists to avoid, and the file is still found by the day the process started. The
-//! retention sweep must therefore never delete a file whose process is still alive, however old
-//! the directory holding it looks.
+//! this design exists to avoid, and the file is still found by the day the process started.
 //!
 //! **stdio never writes to stderr.** Any stderr output during the handshake closes the connection
 //! in MCP clients, so under stdio the file is the only sink — and if it cannot be opened, this
@@ -139,10 +142,9 @@ pub fn init_logging(mode: TransportMode, log_file: Option<String>) -> Logging {
 
 /// The marker file, directly in the state root beside `panic.log`.
 ///
-/// The state root and not `<state>/logs`: a stray file under `logs/` is something the retention
-/// sweep walks past and warns about on every pass, and this marker exists precisely when `logs/`
-/// may be what is broken. `panic.log` already sets the precedent for an out-of-band record left
-/// by a process that could not report through its usual channel.
+/// The state root and not `<state>/logs`: this marker exists precisely when `logs/` may be what
+/// is broken, so it must not be placed inside it. `panic.log` already sets the precedent for an
+/// out-of-band record left by a process that could not report through its usual channel.
 ///
 /// One fixed name, overwritten by whichever process degraded last. The question it answers is
 /// "why is this machine's server logging nothing", which is not per process, and a per-process
@@ -327,40 +329,21 @@ static DEGRADED: OnceLock<String> = OnceLock::new();
 /// `logging_keys_are_registered_and_agree_with_the_code` asserts the two agree.
 pub const LEVEL_DEFAULT: &str = "info";
 
-/// How many days of dated log directories the housekeeping sweep keeps.
+/// The value [`keep_days`] reports when `FS_MCP_LOG_KEEP_DAYS` is unset.
 ///
-/// Two weeks is long enough to cover "it started misbehaving some time last week" and short
-/// enough that the directory stays browsable. **Zero switches the sweep off**, following
-/// [`crate::core::paths::TMP_KEEP_HOURS_DEFAULT`]'s convention: a retention knob whose zero
-/// destroys data is a foot-gun, and with dozens of processes it would fire on every start.
+/// Vestigial, like its reader: nothing deletes a log file any more. It stays only because the
+/// key is still registered in [`crate::env_spec`], which asserts that the advertised default is
+/// the one the code applies.
 pub const KEEP_DAYS_DEFAULT: u64 = 14;
 
-/// The longest log retention accepted, ten years.
-///
-/// Clamped for the same reason as [`crate::core::paths::TMP_KEEP_HOURS_MAX`]: the sweep turns
-/// this into a `Duration`, and an absurd value from the environment must not overflow that —
-/// in debug an overflow panics, and a panic in housekeeping would keep the transport from ever
-/// starting. See [`MAX_MB_MAX`] for the same hazard on the size budget.
+/// The largest `FS_MCP_LOG_KEEP_DAYS` accepted, ten years. Vestigial, see [`KEEP_DAYS_DEFAULT`].
 pub const KEEP_DAYS_MAX: u64 = 365 * 10;
 
-/// Total size budget for `<state>/logs`, in MiB, beyond which the sweep deletes oldest first.
-///
-/// A second bound because age alone does not cap a directory: one chatty process at `trace` can
-/// fill a disk well inside [`KEEP_DAYS_DEFAULT`]. **Zero switches the budget off**, as above.
+/// The value [`max_mb`] reports when `FS_MCP_LOG_MAX_MB` is unset. Vestigial, see
+/// [`KEEP_DAYS_DEFAULT`].
 pub const MAX_MB_DEFAULT: u64 = 512;
 
-/// The largest size budget accepted, one TiB.
-///
-/// The budget is in MiB and the directory it is compared against is measured in bytes, so the
-/// sweep must multiply by 1 MiB before comparing — and `FS_MCP_LOG_MAX_MB=18446744073709551615`
-/// parses perfectly well, so without this bound that multiplication overflows: a debug panic
-/// inside housekeeping, before the transport starts, which is exactly what [`KEEP_DAYS_MAX`]
-/// exists to prevent for ages.
-///
-/// **The call site must still use `saturating_mul`.** The clamp and the arithmetic live in
-/// different modules, so the safety of the multiplication must not depend on a constant over
-/// here staying small; wave 1 clamps in [`crate::core::paths::tmp_keep_hours`] *and* saturates
-/// in [`crate::core::housekeeping`] for that reason, and the log sweep follows it.
+/// The largest `FS_MCP_LOG_MAX_MB` accepted, one TiB. Vestigial, see [`KEEP_DAYS_DEFAULT`].
 pub const MAX_MB_MAX: u64 = 1024 * 1024;
 
 /// The configured `FS_MCP_LOG` value, or `None` when it is unset or blank.
@@ -375,23 +358,25 @@ pub fn level() -> Option<String> {
 
 /// How many days of dated log directories to keep; `0` means never sweep by age.
 ///
-/// Lives beside the module that owns the logs, the way [`crate::core::paths::tmp_keep_hours`]
-/// lives beside the directory it governs, and is read by
-/// [`crate::core::housekeeping::sweep_logs`].
+/// **Nothing acts on this any more.** Log retention was removed — the server never deletes a log
+/// file — and this reader is kept only so that `FS_MCP_LOG_KEEP_DAYS`, still registered in
+/// [`crate::env_spec`], has the reader the registry's own test requires. It goes when the
+/// registry entry does; the `allow` is what keeps that pairing visible instead of silent.
+#[allow(dead_code)]
 pub fn keep_days() -> u64 {
     retention("FS_MCP_LOG_KEEP_DAYS", KEEP_DAYS_DEFAULT, KEEP_DAYS_MAX)
 }
 
-/// The total MiB budget for `<state>/logs`; `0` means no budget. See [`MAX_MB_DEFAULT`], and
-/// [`MAX_MB_MAX`] for why the sweep must still saturate when it converts this to bytes.
+/// The total MiB budget for `<state>/logs`; `0` means no budget.
 ///
-/// Read by [`crate::core::housekeeping::sweep_logs`], like [`keep_days`].
+/// **Nothing acts on this any more**, for the same reason as [`keep_days`], and it is kept on
+/// the same terms.
+#[allow(dead_code)]
 pub fn max_mb() -> u64 {
     retention("FS_MCP_LOG_MAX_MB", MAX_MB_DEFAULT, MAX_MB_MAX)
 }
 
-/// Read a retention knob: a whole number, `0` meaning "switch this half of the sweep off",
-/// bounded by `max`.
+/// Read a retention knob: a whole number, `0` meaning "off", bounded by `max`.
 ///
 /// One function for both knobs so the two cannot drift in how they treat a typo or an absurd
 /// value, and so the whole path is testable against an injected key rather than by mutating a
@@ -477,7 +462,12 @@ fn open(path: &Path) -> std::io::Result<std::fs::File> {
         .open(path)
 }
 
-/// `<root>/<YYYY-MM-DD>/fsmcp-<pid>-<instance>.log`, directory created.
+/// `<root>/<YYYY-MM-DD>/<machine>_<timestamp>.log`, directory created.
+///
+/// The name says which host wrote it and when that run started, which is what an operator
+/// sorting a shared state directory actually wants. The stamp carries milliseconds because two
+/// servers launched together by one client start inside the same second routinely, and the name
+/// is the only thing keeping their files apart.
 ///
 /// The dated directory is made here rather than at open time so that a root which cannot hold it
 /// is discovered while the plan is still being decided, instead of after the plan has promised a
@@ -486,10 +476,54 @@ fn log_path_in(root: &Path, day: &str) -> std::io::Result<PathBuf> {
     let dir = root.join(day);
     std::fs::create_dir_all(&dir)?;
     Ok(dir.join(format!(
-        "fsmcp-{}-{}.log",
-        crate::core::instance::pid(),
-        crate::core::instance::id()
+        "{}_{}.log",
+        machine(),
+        stamp(std::time::SystemTime::now())
     )))
+}
+
+/// This host's name, reduced to characters every filesystem accepts.
+///
+/// `unknown` rather than an error when the name cannot be read, or survives sanitising as
+/// nothing: a log file that cannot be named is a log that does not exist, and logging must never
+/// be the reason the server fails to start. `_` is folded away with everything else, so the
+/// separator in the file name stays unambiguous.
+fn machine() -> String {
+    let safe: String = sysinfo::System::host_name()
+        .unwrap_or_default()
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '-' || c == '.' {
+                c
+            } else {
+                '-'
+            }
+        })
+        .collect();
+    if safe.is_empty() {
+        "unknown".to_owned()
+    } else {
+        safe
+    }
+}
+
+/// `when` in UTC as `YYYYMMDD-HHMMSS-mmm`.
+///
+/// UTC and hand-formatted for the same reasons as [`utc_day`], and fixed-width in every field so
+/// that a plain lexical sort of a directory listing is a sort by time.
+fn stamp(when: std::time::SystemTime) -> String {
+    let t = time::OffsetDateTime::from(when);
+    let d = t.date();
+    format!(
+        "{:04}{:02}{:02}-{:02}{:02}{:02}-{:03}",
+        d.year(),
+        u8::from(d.month()),
+        d.day(),
+        t.hour(),
+        t.minute(),
+        t.second(),
+        t.millisecond()
+    )
 }
 
 /// Today in UTC as `YYYY-MM-DD`: the directory this process's log file belongs in.
@@ -504,12 +538,9 @@ fn today() -> String {
 /// rather than through `time`'s format descriptions, which would need a feature this crate does
 /// not enable for three integers.
 ///
-/// One formatter for both the writer here and [`crate::core::housekeeping`]'s retention, which
-/// parses these names back to age them: a second spelling of the format would be a silent way
-/// for the sweep to stop recognising the directories this module creates. It takes the instant
-/// rather than reading the clock so that the sweep, which is driven by an injected `now`, is
-/// answered entirely in terms of that time.
-pub(crate) fn utc_day(when: std::time::SystemTime) -> String {
+/// Takes the instant rather than reading the clock so that the format is testable against a
+/// fixed time.
+fn utc_day(when: std::time::SystemTime) -> String {
     let d = time::OffsetDateTime::from(when).date();
     format!("{:04}-{:02}-{:02}", d.year(), u8::from(d.month()), d.day())
 }
@@ -524,22 +555,48 @@ mod tests {
         tempfile::TempDir::new().expect("tempdir")
     }
 
-    /// The name carries both pid and instance id, and lives under a dated directory, so two
-    /// concurrent servers — or one pid reused tomorrow — never share a file.
+    /// The name is `<machine>_<timestamp>.log` under a dated directory.
     #[test]
-    fn file_name_is_unique_per_process_and_dated() {
+    fn file_name_carries_the_machine_and_the_time_and_is_dated() {
         let dir = scratch();
         let p = log_path_in(dir.path(), "2026-09-17").expect("path");
         let parent = p.parent().expect("parent");
         assert_eq!(parent.file_name().expect("name"), "2026-09-17");
         let name = p.file_name().expect("name").to_string_lossy().into_owned();
-        assert!(name.starts_with("fsmcp-"), "{name}");
-        assert!(
-            name.contains(&crate::core::instance::pid().to_string()),
-            "{name}"
+        let rest = name
+            .strip_prefix(&format!("{}_", machine()))
+            .unwrap_or_else(|| panic!("{name} must be named for this machine"));
+        assert_eq!(
+            rest.len(),
+            "20260917-000000-000.log".len(),
+            "{name} must carry a fixed-width stamp"
         );
-        assert!(name.contains(crate::core::instance::id()), "{name}");
         assert!(name.ends_with(".log"), "{name}");
+    }
+
+    /// The host name is usable as a file name component, whatever the machine is called.
+    #[test]
+    fn the_machine_name_is_never_empty_and_never_carries_the_separator() {
+        let m = machine();
+        assert!(!m.is_empty());
+        assert!(!m.contains('_'), "{m}");
+        assert!(
+            m.chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '.'),
+            "{m}"
+        );
+    }
+
+    /// The stamp is UTC, fixed-width, and resolves to the millisecond — the resolution that
+    /// keeps two servers started in the same second apart.
+    #[test]
+    fn the_stamp_resolves_to_the_millisecond() {
+        let when = std::time::UNIX_EPOCH + std::time::Duration::from_millis(1_789_000_000_123);
+        assert_eq!(stamp(when), "20260910-002640-123");
+        assert_ne!(
+            stamp(when),
+            stamp(when + std::time::Duration::from_millis(1))
+        );
     }
 
     /// `FS_MCP_LOG=off` means no subscriber and no file — the only way to opt out.
@@ -766,9 +823,9 @@ mod tests {
         assert_eq!(level(), env_spec::get("FS_MCP_LOG"));
     }
 
-    /// A retention knob parses, keeps `0` — which means "switch this half of the sweep off",
-    /// not "delete everything now" — clamps an absurd value, and survives a typo by applying
-    /// the default instead of refusing to start.
+    /// A retention knob parses, keeps `0` — which means "off", not "delete everything now" —
+    /// clamps an absurd value, and survives a typo by applying the default instead of refusing
+    /// to start.
     ///
     /// Driven through a probe key, never a real `FS_MCP_LOG_*` one. `set_var` is unsafe in
     /// edition 2024 because a concurrent `std::env::var` is undefined behaviour, and cargo runs
