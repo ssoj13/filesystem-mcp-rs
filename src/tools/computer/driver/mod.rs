@@ -33,7 +33,9 @@ pub mod win32;
 
 mod null;
 
-pub use portable::{layout_load, layout_save, resolve_target, to_monitor};
+#[cfg(feature = "ctl-capture")]
+pub use portable::to_monitor;
+pub use portable::{layout_load, layout_save, resolve_target};
 
 /// Modifier keys, platform-neutral (wire + macro steps use these names).
 #[derive(

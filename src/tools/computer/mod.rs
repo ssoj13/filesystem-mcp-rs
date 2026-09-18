@@ -34,13 +34,13 @@ pub mod wait;
 pub mod driver;
 
 // Passive capture extensions (cursor-anchor, dhash) — needs xcap/image.
-#[cfg(any(feature = "ctl-input", feature = "ctl-ocr"))]
+#[cfg(feature = "ctl-capture")]
 pub mod capture;
 // Template matching (find_image) — same passive class, same deps.
-#[cfg(any(feature = "ctl-input", feature = "ctl-ocr"))]
+#[cfg(feature = "ctl-capture")]
 pub mod find;
 // Draw found rects back onto a capture (verify coordinates before clicking).
-#[cfg(any(feature = "ctl-input", feature = "ctl-ocr"))]
+#[cfg(feature = "ctl-capture")]
 pub mod annotate;
 
 // Screen understanding. The engines differ per OS (WinRT OCR lives in the

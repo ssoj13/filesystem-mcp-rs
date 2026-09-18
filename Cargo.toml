@@ -135,18 +135,25 @@ computer-tools = ["ctl-input", "ctl-uia", "ctl-ocr", "ctl-notify", "ctl-clip-fil
 # previously spelled out in ten places and which had to be edited in all ten whenever a domain
 # was added. Never enable this directly: on its own it selects no domain and builds nothing.
 ctl-any = []
+# "a capture source is available": `tools/computer/capture` and the window helpers built on
+# it. Enabled by the two domains that pull xcap/image (`ctl-input`, `ctl-ocr`), so code needing
+# a screen source names that requirement once instead of listing those two domains at each
+# site - the same reason as `ctl-any`. Never enable directly; it selects no domain.
+ctl-capture = []
 # Input core: SendInput mouse/keys, arm gate, window mgmt, macro/wait, capture extensions.
 # Pulls screenshot-tools for xcap/arboard (capture + paste-mode clipboard).
-ctl-input = ["ctl-any", "dep:windows", "screenshot-tools", "dep:font8x8"]
+ctl-input = ["ctl-any", "ctl-capture", "dep:windows", "screenshot-tools", "dep:font8x8"]
 # UI Automation (COM): ui/ui_click/ui_set. Requires ctl-input: the click
 # fallback needs SendInput, and Invoke-only clicking is a broken half-state.
 ctl-uia = ["ctl-any", "ctl-input", "dep:uiautomation"]
 # WinRT OCR (Windows.Media.Ocr): text + bbox find. Needs a capture source.
-ctl-ocr = ["ctl-any", "dep:windows", "dep:ocrs", "dep:rten", "screenshot-tools", "dep:font8x8"]
+ctl-ocr = ["ctl-any", "ctl-capture", "dep:windows", "dep:ocrs", "dep:rten", "screenshot-tools", "dep:font8x8"]
 # Toast notifications.
 ctl-notify = ["ctl-any", "dep:tauri-winrt-notification"]
 # CF_HDROP clipboard file lists.
-ctl-clip-files = ["ctl-any", "dep:clipboard-win"]
+# Its Win32 backend reads the clipboard sequence number through `windows`, so that dependency is
+# declared here rather than borrowed from whichever other domain happened to be on.
+ctl-clip-files = ["ctl-any", "dep:windows", "dep:clipboard-win"]
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
@@ -171,7 +178,10 @@ windows = { version = "0.62", optional = true, features = [
 ] }
 uiautomation = { version = "0.25", optional = true }
 tauri-winrt-notification = { version = "0.7", optional = true }
-clipboard-win = { version = "5.4", optional = true }
+# `std` gives `error-code::ErrorCode` its `std::error::Error` impl, which `anyhow::Context`
+# requires and this crate's clipboard code uses. Without it the build only worked because
+# another dependency happened to unify that feature in.
+clipboard-win = { version = "5.4", features = ["std"], optional = true }
 
 # --- Computer control, mac/Linux backends ----------------------------------
 # Own backends, not a third-party input crate: the X11 path is pure Rust
