@@ -137,11 +137,15 @@ pub struct WinInfo {
 }
 
 /// Window filter (case-insensitive substrings).
-///
-/// The fields are read by [`WinQuery::accepts`], which only the win32 backend calls; off Windows
-/// the type still exists because it is `win_list`'s parameter and part of the tool schema that
-/// every build serves. Remove the attribute when a second backend enumerates windows - it is a
-/// dated note, not blanket permission.
+//
+// A `//` note, not rustdoc: `schemars` turns a doc comment on a wire type into a `description` in
+// the JSON schema, which ships to every client on every `tools/list`. Adding this as `///` pushed
+// `wait` - which embeds this type - past its schema budget, and the surface guard caught it.
+//
+// The fields are read by `WinQuery::accepts`, which only the win32 backend calls; off Windows the
+// type still exists because it is `win_list`'s parameter and part of the schema every build
+// serves. Remove the attribute when a second backend enumerates windows - a dated note, not
+// blanket permission.
 #[derive(Debug, Clone, Default, serde::Deserialize, schemars::JsonSchema)]
 #[cfg(feature = "ctl-desktop")]
 #[cfg_attr(not(windows), allow(dead_code))]
