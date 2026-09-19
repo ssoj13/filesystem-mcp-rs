@@ -160,7 +160,7 @@ pub fn ensure_dpi_aware() -> anyhow::Result<()> {
         // pixels already, and Wayland/macOS scaling is per-surface, handled by
         // the compositor. Nothing to assert, so this is a genuine no-op rather
         // than a papered-over failure.
-        return Ok(());
+        Ok(())
     }
     #[cfg(windows)]
     {

@@ -137,14 +137,21 @@ pub struct WinInfo {
 }
 
 /// Window filter (case-insensitive substrings).
+///
+/// The fields are read by [`WinQuery::accepts`], which only the win32 backend calls; off Windows
+/// the type still exists because it is `win_list`'s parameter and part of the tool schema that
+/// every build serves. Remove the attribute when a second backend enumerates windows - it is a
+/// dated note, not blanket permission.
 #[derive(Debug, Clone, Default, serde::Deserialize, schemars::JsonSchema)]
 #[cfg(feature = "ctl-desktop")]
+#[cfg_attr(not(windows), allow(dead_code))]
 pub struct WinQuery {
     pub title: Option<String>,
     pub exe: Option<String>,
 }
 
 #[cfg(feature = "ctl-desktop")]
+#[cfg_attr(not(windows), allow(dead_code))]
 impl WinQuery {
     /// Does a window pass this filter? Lives here so every backend applies the
     /// SAME rule (absent field = no constraint, present = case-insensitive

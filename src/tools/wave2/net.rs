@@ -208,7 +208,7 @@ fn get_connections_linux() -> Result<Vec<Connection>> {
         let pid = parts.last().and_then(|s| {
             s.find("pid=")
                 .map(|i| &s[i + 4..])
-                .and_then(|s| s.split(|c| c == ',' || c == ')').next())
+                .and_then(|s| s.split([',', ')']).next())
                 .and_then(|s| s.parse().ok())
         });
 
