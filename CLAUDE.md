@@ -70,6 +70,44 @@ crate is behind `#[cfg(windows)]` and a Linux-only pass never sees the driver.
   is deliberate - do not "fix" that. `Migrated::Ambiguous` carries a `Cause` so the two cases get
   different advice; a failed move is usually an older instance still holding the file open.
 
+## Guards (each was proven by breaking it on purpose)
+
+A guard nobody has tried to break is a claim about quality, not a check. Every one of these was
+verified by reintroducing the defect it exists for and watching it fail, then restoring the code.
+
+- `paths_are_centralized` (`core/paths_guard.rs`) - nothing outside `core::paths` resolves a
+  platform directory.
+- `no_item_re_tests_its_own_feature_gate` (`core/cfg_guard.rs`) - an item gated on `feature = "X"`
+  may not test `X` inside itself, in any of three spellings including `cfg!`, which no search for
+  `#[cfg(` finds. This shape shipped a defect: `Backend::screen`'s attribute was widened while its
+  body kept the old feature, and an OCR-only build compiled, claimed `capture: true`, and refused
+  every screen query at runtime.
+- `seam_reachable` (`tools/computer/driver/mod.rs`) - an accessor that exists in this build must
+  hand out its seam, and `ctl_caps` must agree with the seams. **This is the only check that can
+  see the class above**: an unused trait impl is neither an error nor a warning, so a build matrix
+  says nothing about it.
+- `every_registered_key_is_read_somewhere_in_the_sources` and
+  `every_key_the_sources_read_is_registered` (`env_spec.rs`) - both directions. The second is a
+  grep, so it works whatever the feature set; what it cannot see is a key registered under a
+  narrower gate than it is read, which only a build in that configuration shows.
+- `tool_surface_stays_within_budget` (`core/tool_surface_guard.rs`) - description + schema per
+  tool. Note the floor differs for a reduced build: `ctl-ocr` alone serves 96 tools, not 132.
+  **`schemars` turns a doc comment on a parameter type into schema text that ships to every
+  client** - a `///` on a wire type is not free, use `//`.
+
+## Checking that actually checks
+
+- **`cargo test` on one OS proves one OS.** Half this crate is `#[cfg(windows)]`; the other half a
+  Windows developer never compiles. CI was red on Linux and macOS for the whole of waves 1-3 while
+  every local gate was green, and the reason was clippy errors in code Windows does not build.
+- **Ten green build configurations proved nothing** about the `screen` defect. Compilation checks
+  types; an unreachable branch and an unused impl are valid code.
+- **`cargo test | grep FAILED && git push` is backwards** - `grep` succeeds when it *finds* the
+  word, so a failing suite reads as a passing gate. Check the exit code.
+- The feature configurations CI runs (`.github/workflows/ci.yml`, job `Feature configurations`)
+  were chosen for what their tests can assert, not to cover the flag list: `seam_reachable` is a
+  tautology in the default build and only says something where the domains come apart.
+
 ## Verified facts (do not re-derive)
 - rmcp 3.1.3 (Cargo.toml:26 - these notes said 3.1.4 until 2026-09-17): with_structured is fs's own WithStructured trait (main.rs); ToolRouter::merge exists;
   tool_router attr takes router=/vis=/server_handler=; rmcp CANNOT cfg-gate #[tool] methods in one

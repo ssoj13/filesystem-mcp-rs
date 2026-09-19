@@ -16,25 +16,51 @@ Linux (X11 и Wayland) и macOS, не размазывая `#[cfg]` по все�
 
 ## Доменные трейты
 
-| Трейт | Операции | Кто реализует |
-|---|---|---|
-| `InputDrv` | move_cursor, click, drag, scroll, key_tap, type_text, cursor_pos, focus | все |
-| `WinDrv` | list, focus_window, geom, close, active, alive | все |
-| `ScreenDrv` | virtual_screen, color_at | все |
-| `ClipDrv` | get_files, set_files, seq | win32; на Unix — позже |
-| `NotifyDrv` | notify | win32; на Unix — позже |
-| UIA (флаг `has_uia`) | дерево элементов | только win32 |
+| Трейт | Операции | Гейт | Кто реализует |
+|---|---|---|---|
+| `InputDrv` | move_cursor, click, drag, scroll, key_tap, type_text, focus | `ctl-input` | все |
+| `WinDrv` | **чтение:** list · **управление:** focus_window, geom, close, alive | `list` — весь шов, остальное `ctl-input` | все |
+| `ScreenDrv` | virtual_screen, color_at, cursor_pos | `ctl-desktop` | все |
+| `ClipDrv` | **счётчик:** seq (`ctl-input`) · **файлы:** get_files, set_files (`ctl-clip-files`) | union обоих | win32; на Unix — позже |
+| `NotifyDrv` | notify | `ctl-notify` | win32; на Unix — позже |
+| UIA (флаг `has_uia`) | дерево элементов | `ctl-uia` | только win32 |
+
+**Границы проведены по аудитории, а не по имени.** 2026-09-19: три трейта
+смешивали два разных предмета, и из-за этого их нельзя было чисто загейтить.
+`InputDrv` держал действия (берут арм-гейт) вместе с запросом `cursor_pos`
+(`GetCursorPos`); `WinDrv` — чтение списка окон (нужно OCR) вместе с
+управлением ими; `ClipDrv` — счётчик изменений (опрашивает `wait`) вместе со
+списками файлов. `color_at` и `cursor_pos` вообще лежали в `win32/input.rs`,
+хотя это чтение экрана.
+
+Цена путаницы была не косметической: сборка `--features ctl-ocr` компилировалась,
+но не могла снять монитор — `virtual_screen` шёл через `ScreenDrv`, чья
+реализация была привязана к домену ввода, и в рантайме отвечала «не
+поддерживается».
+
+**Правило на будущее.** Гейт элемента = самый широкий его потребитель; гейт
+реализации в бэкенде = гейт того платформенного модуля, в который она зовёт.
+Проверять `grep`ом по вызывающим, а не по смыслу имени.
 
 Отсутствующий домен — это `None`, из которого фасад делает громкий
 `unsupported on this platform (<backend>): <что именно>`. Тихих no-op нет
 нигде: молчаливый фолбэк порождает «плавающие» баги, которые потом ловятся
 днями.
 
+**Но `None` обязан означать «домена нет», а не «аксессор забыли».** Ровно это
+и случилось: у `Backend::screen` атрибут расширили до `ctl-desktop`, а тело
+оставили на `ctl-input`, и OCR-сборка получала `None` при живом экране.
+Компилятор молчит — неиспользуемая реализация трейта не даёт ни ошибки, ни
+предупреждения. Сторож `seam_reachable` (в `mod.rs`) теперь утверждает
+обратное: если аксессор в этой сборке скомпилирован, бэкенд обязан выдать шов.
+Второй тест сверяет с этим же `ctl_caps` — клиент читает карту возможностей,
+чтобы не звать заведомо отказной инструмент.
+
 ## Матрица бэкендов и статус верификации
 
 | Бэкенд | Ввод | Окна | Экран | Буфер | Тосты | UIA | Статус |
 |---|---|---|---|---|---|---|---|
-| `win32` | SendInput | HWND/Win32 | GDI + SystemMetrics | CF_HDROP | WinRT toast | UIAutomation | **проверен живьём** |
+| `win32` | SendInput | HWND/Win32 | GDI + SystemMetrics | CF_HDROP | WinRT toast | UIAutomation | **проверен живьём** (2026-09-19: `win_list`, `ui`-обход дерева, `monitors`) |
 | `x11` | XTEST (x11rb) | ICCCM/EWMH | RandR | — | — | — | не начат |
 | `wayland` | wlr-virtual-\* / libei | wlr-foreign-toplevel | wl_output | — | — | — | не начат |
 | `mac` | CGEventPost | CGWindowList + AX | CGDisplay | — | — | AX (позже) | не начат |

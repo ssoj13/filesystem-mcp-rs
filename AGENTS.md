@@ -1,7 +1,7 @@
 # AGENTS.md — filesystem-mcp-rs (working notes)
 
 ## What this is
-Rust MCP server (rmcp 3.1.4 + axum, tokio, edition 2024), 130 tools: filesystem, grep, run_command,
+Rust MCP server (rmcp 3.1.3 + axum, tokio, edition 2024), 132 tools: filesystem, grep, run_command,
 process mgmt, S3, HTTP, screenshots (xcap), clipboard (arboard), memory (SQLite), and computer
 control (26 ctl-tools behind ctl-* features). Published crate, consumed from GitHub (ssh ref).
 Build: `cargo build` / test: `cargo test` / lint: `cargo clippy`.
@@ -21,7 +21,7 @@ Build: `cargo build` / test: `cargo test` / lint: `cargo clippy`.
 - v0.2.1: BUG.md resolved (tolerant ContentRef, line/column errors, 64 KiB inline/chunk limits).
 
 ## Verified facts (do not re-derive)
-- rmcp 3.1.4: with_structured is fs's own WithStructured trait (main.rs); ToolRouter::merge exists;
+- rmcp 3.1.3: with_structured is fs's own WithStructured trait (main.rs); ToolRouter::merge exists;
   tool_router attr takes router=/vis=/server_handler=; rmcp CANNOT cfg-gate #[tool] methods in one
   impl (S1 spike) — per-domain routers + ToolRouter::merge.
 - windows 0.62: SendInput(&[INPUT], i32); IsWindow(Option<HWND>); GetProcessDpiAwarenessContext
