@@ -109,6 +109,13 @@ pub type Table = HashMap<Arc<str>, Counts>;
 pub struct Health {
     /// Every call this process has recorded since it started.
     ///
+    /// **A call that panics is not here at all.** The seam records after the dispatch returns, and
+    /// a panic unwinds straight past it, so a tool that panicked leaves no row, no column and no
+    /// increment - it appears only as a crash report under `<state>/panics`. Verified by forcing
+    /// one: two calls went out, the file recorded one. Counting it would mean wrapping every
+    /// dispatch in `catch_unwind`, which changes what a panic means for the whole server; the
+    /// crash report is the better record of it anyway.
+    ///
     /// **Do not expect this to equal the sum of the rows.** It comes from an atomic that
     /// [`Collector::record_interned`] bumps *before* it takes the counter lock, so under HTTP,
     /// where many calls are in flight at once, it can lead the table by however many are between
