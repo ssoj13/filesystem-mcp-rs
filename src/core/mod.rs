@@ -1,5 +1,8 @@
 pub mod agent_policy;
 pub mod allowed;
+/// Test-only guard: refuses an item that re-tests its own feature gate inside itself.
+#[cfg(test)]
+pub mod cfg_guard;
 pub mod content_plane;
 pub mod dollar_guard;
 pub mod format;

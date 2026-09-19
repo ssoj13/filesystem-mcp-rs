@@ -331,11 +331,37 @@ mod tests {
     ///
     /// Every rule here is a loop over the surface, so an empty surface satisfies all of them
     /// vacuously and the guard would go green over a `tools/list` that serves nothing. A floor,
-    /// not the exact count (132 under the features `cargo test` builds), because the count moves
-    /// with the feature flags, and an equality would have to be edited on every legitimate
-    /// change, which is how a number stops being read and starts being updated reflexively. This
-    /// floor sits below every supported feature combination and still nowhere near zero.
+    /// not the exact count (132 with every feature on), because the count moves with the feature
+    /// flags, and an equality would have to be edited on every legitimate change, which is how a
+    /// number stops being read and starts being updated reflexively.
+    ///
+    /// Two floors, because one was a lie. The doc here used to claim this number sat below every
+    /// supported combination; it does not, and CI running the feature configurations is what
+    /// proved it - `ctl-ocr` alone serves 96 tools and `ctl-notify,ctl-clip-files` 85. The rules
+    /// themselves apply to whatever is served; only the "is this surface real?" check needs to
+    /// know which build it is looking at.
     const MIN_TOOLS: usize = 100;
+
+    /// The floor for a build with features switched off.
+    ///
+    /// The always-on families - files, search, edit, memory, thinking, wave2 - are most of the
+    /// surface in any build, so this still catches a router that came up empty or lost a whole
+    /// family, which is all this check is for.
+    const MIN_TOOLS_REDUCED: usize = 80;
+
+    /// Is every optional family compiled in? Only then does [`MIN_TOOLS`] apply.
+    const fn full_surface() -> bool {
+        cfg!(all(
+            feature = "http-tools",
+            feature = "s3-tools",
+            feature = "screenshot-tools",
+            feature = "ctl-input",
+            feature = "ctl-uia",
+            feature = "ctl-ocr",
+            feature = "ctl-notify",
+            feature = "ctl-clip-files"
+        ))
+    }
 
     /// The tool surface as `tools/list` serves it: name -> (description, compact schema).
     ///
@@ -352,9 +378,14 @@ mod tests {
                 (name.to_string(), (description, schema))
             })
             .collect();
+        let floor = if full_surface() {
+            MIN_TOOLS
+        } else {
+            MIN_TOOLS_REDUCED
+        };
         assert!(
-            surface.len() >= MIN_TOOLS,
-            "the tool router served {} tools; under {MIN_TOOLS} every rule here passes vacuously",
+            surface.len() >= floor,
+            "the tool router served {} tools; under {floor} every rule here passes vacuously",
             surface.len()
         );
         surface

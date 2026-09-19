@@ -81,3 +81,50 @@ jobs:
           name: ${{ matrix.artifact }}
           path: target/release/${{ env.BINARY_NAME }}.exe
           retention-days: 30
+
+  # One job, five configurations, in sequence on one runner - not a job each.
+  #
+  # The point is not coverage of the feature list. Of the defects this matrix exists for, almost
+  # none are compile errors: `cargo check` accepts an unreachable `#[cfg(not(...))]` branch and an
+  # unused trait impl without a word, so a build that compiles proves very little. What earns the
+  # runner time is a configuration where the guards in `cargo test` have something to assert -
+  # `seam_reachable` is a tautology in the default build, where every domain is on and every seam
+  # is present, and only says something where the domains come apart.
+  #
+  # Windows, because the control domains have a backend only there; a Linux run would exercise the
+  # `null` backend and assert nothing. Sequential on one runner so `target/` is shared: the
+  # unconditional dependencies - rusqlite's bundled SQLite above all - are built once for all five
+  # rather than once per job.
+  features:
+    name: Feature configurations
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+
+      # `ctl-desktop` without `ctl-input`: the only place `seam_reachable` checks the screen and
+      # window seams in isolation. An accessor whose gate and body disagree fails here and nowhere
+      # else - that defect shipped once and every other configuration stayed green.
+      - name: ctl-ocr alone (test)
+        run: cargo test --no-default-features --features ctl-ocr
+
+      # Desktop without OCR: the only place the capability map can be caught claiming the portable
+      # OCR engine it does not have, and the only place `ClipDrv` compiles for its change counter
+      # alone, without the file-list half.
+      - name: ctl-input alone (test)
+        run: cargo test --no-default-features --features ctl-input
+
+      # `ctl-any` on, `ctl-desktop` off: the widest gate over the least code. If this fails, the
+      # derived flag itself is wrong.
+      - name: ctl-notify + ctl-clip-files (test)
+        run: cargo test --no-default-features --features ctl-notify,ctl-clip-files
+
+      # Nothing optional at all - the cheapest build here, and the only proof the crate stands
+      # without a single feature.
+      - name: no features (check)
+        run: cargo check --no-default-features --all-targets
+
+      # The opt-out path README and Cargo.toml promise, so it has to work; also the only place
+      # `screenshot-tools` is on without a `ctl-*` feature dragging it in.
+      - name: tools without computer control (check)
+        run: cargo check --no-default-features --features http-tools,s3-tools,screenshot-tools --all-targets

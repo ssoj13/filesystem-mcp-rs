@@ -692,7 +692,7 @@ mod seam_reachable {
         let c = caps();
         #[cfg(feature = "ctl-input")]
         assert_eq!(c.input, b.input().is_some());
-        #[cfg(feature = "ctl-desktop")]
+        // No gate: this test is already `ctl-desktop`, and the window seam is too.
         assert_eq!(c.window, b.win().is_some());
         #[cfg(feature = "ctl-clip-files")]
         assert_eq!(c.clip_files, b.clip().is_some());
