@@ -1,5 +1,14 @@
 # Wave 3 — Tool-Call Statistics Implementation Plan
 
+
+> **Superseded — kept as a record of intent, not as a description of the code.**
+>
+> Wave 3 was replanned mid-flight and built far smaller than this. There is no SQLite file, no flush task, no lease, no compaction and no reader tool: counters live in memory and are written once, as JSON, to `<state>/stats/<date>/<machine>_<timestamp>_<instance>.json`. `FS_MCP_STATS` is the only key; `FS_MCP_STATS_DB`, `_FLUSH_SEC`, `_EVERY`, `_DETAIL_DAYS` and `_LABEL` never shipped.
+>
+> The body below is left exactly as it was written, because a plan edited after the fact stops
+> being evidence of what was decided and why. For what the code actually does now, read
+> `README.md`, `CLAUDE.md` and the rustdoc on the modules named there.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Know which of this server's 132 tools are used, which fail and how, across the dozens of processes that run at once — including the tools nobody ever calls.

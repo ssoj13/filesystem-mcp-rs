@@ -1,5 +1,14 @@
 # Wave 2 — Per-Process Logging Implementation Plan
 
+
+> **Superseded — kept as a record of intent, not as a description of the code.**
+>
+> Wave 2's retention half was removed after it shipped. There is no log sweep, no lease for one, and no `FS_MCP_LOG_KEEP_DAYS` / `FS_MCP_LOG_MAX_MB`: nothing ever deletes a log. The file is named `<machine>_<timestamp>_<instance>.log`, not `fsmcp-<pid>-<instance>.log`. What is left of this plan is the per-process file itself and the stdio-never-touches-stderr rule.
+>
+> The body below is left exactly as it was written, because a plan edited after the fact stops
+> being evidence of what was decided and why. For what the code actually does now, read
+> `README.md`, `CLAUDE.md` and the rustdoc on the modules named there.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Give this server logging that works when dozens of its processes run at once: one log file per process under `~/.filesystem-mcp-rs/logs/`, on by default in every transport mode, with retention under the housekeeping lease wave 1 built.

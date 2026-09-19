@@ -1,5 +1,14 @@
 # Wave 1 — Unified State Directory Implementation Plan
 
+
+> **Superseded — kept as a record of intent, not as a description of the code.**
+>
+> Wave 1 shipped essentially as planned. Two later changes moved past it: `panic.log` in the state root became one crash report per panic under `<state>/panics/`, and the naming of every per-run file moved into a single helper, `core::paths::run_file`.
+>
+> The body below is left exactly as it was written, because a plan edited after the fact stops
+> being evidence of what was decided and why. For what the code actually does now, read
+> `README.md`, `CLAUDE.md` and the rustdoc on the modules named there.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Move every piece of `filesystem-mcp-rs` durable and scratch state under one per-user root, `~/.filesystem-mcp-rs/`, identical on Windows, macOS and Linux, with an explicit migration for existing data.

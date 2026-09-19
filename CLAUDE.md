@@ -45,9 +45,8 @@ crate is behind `#[cfg(windows)]` and a Linux-only pass never sees the driver.
   no `tracing-appender`. `--log <FILE>` overrides the path; `FS_MCP_LOG=off` is the only opt-out.
   **stdio still never touches stderr** — that rule lives in the pure `sinks(&Plan)`, so any stdio
   path gaining a stderr sink fails a test. **Nothing deletes a log, ever** — there is no log
-  retention; `core::housekeeping` sweeps `<state>/tmp` only. `FS_MCP_LOG_KEEP_DAYS`/`_MAX_MB` are
-  vestigial: still registered in `env_spec`, read by `core::logging` so the registry's own test
-  passes, acted on by nothing. Remove the registry entries and those readers together.
+  retention; `core::housekeeping` sweeps `<state>/tmp` only, and the keys that once configured a
+  log sweep are gone from `env_spec` along with their readers.
 - Any live run of the binary must point `FS_MCP_STATE_DIR` at a temp directory, or it writes into
   the developer's real `~/.filesystem-mcp-rs/`. The suite does this for every server it spawns.
 - `src/tools/computer/` — self-contained computer-control module (extractable; recipe in mod.rs):

@@ -1,6 +1,15 @@
 # Design: unified state dir, multi-process logging, tool-call statistics
 
-Date: 2026-09-17 · Status: approved design, not yet implemented · Crate: filesystem-mcp-rs
+
+> **Superseded — kept as a record of intent, not as a description of the code.**
+>
+> The state-directory section describes what shipped. The logging section's retention and the whole statistics design did not: retention was removed, and the statistics subsystem has no database, no background task and no query tool.
+>
+> The body below is left exactly as it was written, because a plan edited after the fact stops
+> being evidence of what was decided and why. For what the code actually does now, read
+> `README.md`, `CLAUDE.md` and the rustdoc on the modules named there.
+
+Date: 2026-09-17 · Status: partly shipped, partly superseded - see the banner above · Crate: filesystem-mcp-rs
 
 ## 1. Why
 
