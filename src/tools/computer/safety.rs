@@ -90,13 +90,6 @@ pub const ENV_ARM_TTL_MS: &str = "FS_MCP_CTL_ARM_TTL_MS";
 /// Input ops per minute runaway cap.
 pub const ENV_OPS_PER_MIN: &str = "FS_MCP_CTL_OPS_PER_MIN";
 
-fn env_trimmed(name: &str) -> Option<String> {
-    std::env::var(name)
-        .ok()
-        .map(|v| v.trim().to_string())
-        .filter(|v| !v.is_empty())
-}
-
 /// Effective paste flag: explicit arg > env > default (paste).
 /// Unknown env values are a loud error, never a silent fallback.
 #[cfg(feature = "ctl-input")]
@@ -104,7 +97,7 @@ pub fn resolve_paste(explicit: Option<bool>) -> anyhow::Result<bool> {
     if let Some(p) = explicit {
         return Ok(p);
     }
-    match env_trimmed(ENV_TYPE_MODE) {
+    match crate::env_spec::get(ENV_TYPE_MODE) {
         None => Ok(true),
         Some(v) if v.eq_ignore_ascii_case("paste") => Ok(true),
         Some(v) if v.eq_ignore_ascii_case("chars") => Ok(false),
@@ -122,7 +115,7 @@ pub fn resolve_interval_ms(explicit: Option<u32>, paste: bool) -> anyhow::Result
     if let Some(v) = explicit {
         return Ok(v);
     }
-    match env_trimmed(ENV_TYPE_INTERVAL_MS) {
+    match crate::env_spec::get(ENV_TYPE_INTERVAL_MS) {
         Some(v) => v
             .parse::<u32>()
             .map_err(|_| anyhow::anyhow!("{ENV_TYPE_INTERVAL_MS}={v:?} is not a number (ms)")),
@@ -134,7 +127,7 @@ pub fn resolve_interval_ms(explicit: Option<u32>, paste: bool) -> anyhow::Result
 #[cfg(feature = "ctl-input")]
 pub fn resolve_arm_ttl_ms(explicit: Option<u32>) -> u32 {
     explicit
-        .or_else(|| env_trimmed(ENV_ARM_TTL_MS).and_then(|v| v.parse().ok()))
+        .or_else(|| crate::env_spec::get(ENV_ARM_TTL_MS).and_then(|v| v.parse().ok()))
         .unwrap_or(30_000)
 }
 
@@ -142,7 +135,7 @@ pub fn resolve_arm_ttl_ms(explicit: Option<u32>) -> u32 {
 #[cfg(feature = "ctl-input")]
 pub fn resolve_ops_per_min(explicit: Option<u32>) -> u32 {
     explicit
-        .or_else(|| env_trimmed(ENV_OPS_PER_MIN).and_then(|v| v.parse().ok()))
+        .or_else(|| crate::env_spec::get(ENV_OPS_PER_MIN).and_then(|v| v.parse().ok()))
         .unwrap_or(240)
 }
 

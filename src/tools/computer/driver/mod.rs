@@ -411,10 +411,9 @@ pub fn caps() -> Caps {
         input: b.input().is_some(),
         #[cfg(not(feature = "ctl-input"))]
         input: false,
-        #[cfg(feature = "ctl-desktop")]
+        // No `cfg` pair here, unlike the fields around it: this function is `ctl-desktop`, so a
+        // build without that feature has no `caps()` to fill in.
         window: b.win().is_some(),
-        #[cfg(not(feature = "ctl-desktop"))]
-        window: false,
         #[cfg(feature = "ctl-uia")]
         uia: b.has_uia(),
         #[cfg(not(feature = "ctl-uia"))]
@@ -633,13 +632,30 @@ pub fn notify(title: Option<&str>, msg: &str) -> anyhow::Result<()> {
 mod seam_reachable {
     use super::*;
 
+    /// The live backend, or `None` when this run legitimately has none.
+    ///
+    /// **Not `if b.name() == "null" { return }`.** That reads as a skip for the pinned-null case
+    /// and is one, but it also turns both tests below into a green no-op for anyone who happens
+    /// to have `FS_MCP_CTL_BACKEND=null` exported - a developer shell, a CI step, anything. A
+    /// guard that passes without checking is the exact failure it was written against, so a
+    /// `null` backend that nobody asked for is a hard failure instead.
+    fn real_backend_or_skip() -> Option<&'static dyn Backend> {
+        let b = backend();
+        if b.name() != "null" {
+            return Some(b);
+        }
+        assert_eq!(
+            crate::env_spec::get("FS_MCP_CTL_BACKEND").as_deref(),
+            Some("null"),
+            "the backend is `null` but nothing pinned it: this guard would have passed              without testing anything"
+        );
+        None
+    }
+
     #[test]
     fn every_compiled_seam_answers_some() {
-        let b = backend();
-        // `null` is pinned in some test runs and legitimately answers `None` to everything.
-        if b.name() == "null" {
-            return;
-        }
+        let b = real_backend_or_skip();
+        let Some(b) = b else { return };
         #[cfg(feature = "ctl-input")]
         assert!(
             b.input().is_some(),
@@ -671,10 +687,8 @@ mod seam_reachable {
     #[cfg(feature = "ctl-desktop")]
     #[test]
     fn the_capability_map_matches_the_seams() {
-        let b = backend();
-        if b.name() == "null" {
-            return;
-        }
+        let b = real_backend_or_skip();
+        let Some(b) = b else { return };
         let c = caps();
         #[cfg(feature = "ctl-input")]
         assert_eq!(c.input, b.input().is_some());

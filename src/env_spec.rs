@@ -417,6 +417,63 @@ mod tests {
         }
     }
 
+    /// The other direction: a key the sources read must appear in the table.
+    ///
+    /// The guard above checks registered-then-read, and its doc long claimed the reverse could not
+    /// be checked because a source gated out of this build still sits on disk. That is true of a
+    /// *compiler*, and this test is a grep: it scans the text for `FS_MCP_*` literals regardless of
+    /// which features are on, and asks whether each one is in `vars()` under **some** feature. So
+    /// the half it can reach - "read but registered nowhere at all" - it reaches without a build
+    /// matrix. `FS_MCP_CTL_BACKEND` was exactly that shape for a while: `driver::backend()`
+    /// consulted it in every control build while the table listed it only for the input domains,
+    /// so `--list-env` and the installed agent context never mentioned the variable steering the
+    /// backend.
+    ///
+    /// The half it cannot reach is a key that *is* registered but under a narrower gate than it is
+    /// read. Nothing textual can see that; only building a configuration where the two disagree
+    /// shows it.
+    #[test]
+    fn every_key_the_sources_read_is_registered() {
+        let src = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+        let mut haystack = String::new();
+        collect(&src, &mut haystack);
+
+        // Every key this build does not compile is still in the table's text, so read the
+        // declarations from this file rather than from `vars()`, which is feature-dependent.
+        let declared = std::fs::read_to_string(src.join("env_spec.rs")).expect("read env_spec.rs");
+
+        let mut missing: Vec<String> = Vec::new();
+        let bytes = haystack.as_bytes();
+        let mut i = 0;
+        while let Some(at) = haystack[i..].find("FS_MCP_") {
+            let start = i + at;
+            let mut end = start;
+            while end < bytes.len()
+                && (bytes[end].is_ascii_uppercase()
+                    || bytes[end].is_ascii_digit()
+                    || bytes[end] == b'_')
+            {
+                end += 1;
+            }
+            let key = &haystack[start..end];
+            // `FS_MCP_*` in prose, and `starts_with("FS_MCP_")` in code, leave the bare prefix
+            // behind; a key needs a name after it. The blank-handling probe owns a key of its own
+            // and is deliberately unregistered.
+            if key != "FS_MCP_"
+                && key != "FS_MCP_ENV_SPEC_BLANK_PROBE"
+                && !declared.contains(&format!("key: \"{key}\""))
+                && !missing.iter().any(|m| m == key)
+            {
+                missing.push(key.to_owned());
+            }
+            i = end.max(start + 1);
+        }
+        assert!(
+            missing.is_empty(),
+            "read by the sources but absent from the registry, so `--list-env` and the installed              agent context never mention them: {missing:?}"
+        );
+    }
+
     /// Every `.rs` file under `dir`, concatenated, **except this one** - the registry is where
     /// the key literals are declared, so counting them would be counting the declaration.
     fn collect(dir: &std::path::Path, out: &mut String) {
