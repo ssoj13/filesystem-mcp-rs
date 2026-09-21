@@ -2,6 +2,17 @@
 
 ## [Unreleased]
 
+Post-0.2.1 work on `main`. The crate version is still 0.2.1 until the next tag.
+
+### `rmcp` 3.1.3 → 3.4.0
+
+- **`ServerInfo` is deprecated** in rmcp 3.4.0: it was an alias for `InitializeResult` whose name collided with the protocol's `serverInfo` identity field (`server_info.server_info`). `ServerHandler::get_info` now returns `ServerConfig` (the same type). The wire field `server_info: Implementation` is unchanged.
+- **`cargo install` ignores `Cargo.lock`**, so the caret range `rmcp = "3.1.3"` compiled against 3.4.0 and warned. The dependency is now 3.4.0. Use `cargo install --path . --locked` so the binary matches the lockfile.
+
+### Session-lock reminder is periodic, not every call
+
+- The MCP session-lock footer used to be appended to **every** tool result. It now appears on the first result, then every 7 tool calls. `FS_MCP_SESSION_FOOTER_EVERY` / `--session-footer-every` sets the interval (`0` disables it); `--no-session-footer` still disables it. `mcp-setup` still embeds the full policy in `CLAUDE.md` / `AGENTS.md` at install.
+
 ### Tool-call statistics: one file per run, and nothing else
 
 - **Every run counts its own tool calls and writes them once**, on the way out or from the panic
@@ -247,6 +258,10 @@
   (479 unit + 4 + 64 integration), and a project-scope `install` writes all 10 keys plus the
   rendered `SUPPORTED ENV` block into the client's context file.
 
+---
+
+## [0.2.1] - 2026-08-29
+
 ### Content Plane: tolerant `content` parsing, actionable errors, 64 KiB inline (BUG.md resolution)
 
 - **`content` accepts bare strings** (write_file / edit_file sides / run_command stdin /
@@ -258,6 +273,10 @@
   the JSON type received.
 - **Inline/chunk limits raised 8 → 64 KiB** — real files (8.4 KB) no longer force blob staging.
 - Regression tests for all tolerance paths in `content_plane.rs`.
+
+---
+
+## [0.2.0] - 2026-08-29
 
 ### Computer control behind feature flags (`computer-tools` umbrella + `ctl-*` domains)
 
@@ -274,7 +293,7 @@
 - **Feature matrix:** `computer-tools` = umbrella over `ctl-input` / `ctl-uia`
   (implies ctl-input: the click fallback needs SendInput) / `ctl-ocr` /
   `ctl-notify` / `ctl-clip-files`. Introduced as opt-in; promoted to a default
-  feature later in this same unreleased cycle (see the section above).
+  feature later (see Unreleased: computer-tools on by default).
 - **Safety model:** process-global arm gate (`arm {ttl_ms}`, TTL auto-expiry,
   ops-per-minute cap, JSONL audit), pastes are refused when focus moved,
   `win_close` is a separate tool name so per-tool allowlists can exclude it.
@@ -288,8 +307,8 @@
   `FS_MCP_CTL_ARM_TTL_MS`, `FS_MCP_CTL_OPS_PER_MIN`) with precedence arg > env > default.
   `install` writes them into every client config's `env` with their default values
   (JSON configs cannot hold comments — flipping behavior = editing the value; empty = unset;
-  invalid value = loud error); this later grew to cover every supported key, see above.
-  rmcp bumped to 3.1.4 (latest).
+  invalid value = loud error); this later grew to cover every supported key, see Unreleased.
+  Built against rmcp 3.1.3.
 - Install hints append the arm-gate policy only when the feature is built in.
 - Real-machine canary (interactive desktop): spawn Notepad → focus-verify →
   type ASCII+Unicode → hash-change → OCR match → cleanup
@@ -348,6 +367,12 @@
   in `src/setup.rs` (`default_install_dirs`, `with_default_dirs`), covered by unit tests.
 - Verified `src/mcp_setup/` (the vendored `mcp-setup-rs` copy) is still pinned to and in sync with
   the upstream commit recorded in `src/mcp_setup/VENDOR.md` — no resync was needed.
+
+---
+
+## [0.1.25] - 2026-08-17
+
+`0.1.24` was the initial import of this tree. `0.1.25` is the first tagged release after that (rmcp 3.1.3, Content Plane SSOT, the BH correctness audit).
 
 ### Upgrade — `rmcp` 2.2.0 → 3.1.3
 

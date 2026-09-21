@@ -11,29 +11,33 @@ It's not about "memory safety" or something like that, I'm doing that just becau
 
 ## What's new
 
-> **Computer control ships in the default build.** `computer-tools` (mouse, keyboard, windows,
-> UI Automation, OCR, notifications) is no longer opt-in — a server that silently lacks half its
-> tools is worse than a longer build. Input tools still require `arm {ttl_ms}` first; read-only
-> ones (`capture`, `monitors`, `win_list`) do not. Opt out with
-> `--no-default-features --features http-tools,s3-tools,screenshot-tools`.
->
-> **You can now ask which environment variables exist:** `filesystem-mcp-rs --list-env` prints
-> every key this build supports with its default and what it does. One registry
-> (`src/env_spec.rs`) feeds that listing, the `install` config block, and the policy text written
-> into `CLAUDE.md` / `AGENTS.md` — they can no longer drift apart.
->
-> **`install` writes the whole knob set, not just two keys.** Every supported `FS_MCP_*` variable
-> lands in the client's `env` with its default value, so the config documents itself (JSON cannot
-> hold comments — a key present with its default is the equivalent of a commented-out line).
-> Optional knobs are written blank, and **blank now consistently means "unset"**: previously an
-> empty `FS_MCP_MEMORY_ACCESS_MODE` aborted startup and an empty `FS_MCP_MEMORY_DB` became a
-> literal empty path that killed the memory store.
->
-> **`install` also snapshots `PATH`.** The installing process PATH is written into every client's
-> `env.PATH` (not read from the registry). GUI-launched Cursor often cannot see `git`; run
-> `filesystem-mcp-rs install` from a terminal that can, or edit `env.PATH` by hand.
->
-> See [CHANGELOG.md](CHANGELOG.md) for the full history, earlier releases, and migration examples.
+Crate version is still **0.2.1**; everything after that lives on `main` as Unreleased. Full write-up: [CHANGELOG.md](CHANGELOG.md).
+
+### Unreleased (on `main`)
+
+- **One state root:** `~/.filesystem-mcp-rs/` (or `FS_MCP_STATE_DIR`). Logs, panics and tool-call counters are one file per run: `<state>/{logs,panics,stats}/<YYYY-MM-DD>/<machine>_<timestamp>_<instance>.*`. `FS_MCP_STATS=off` / `FS_MCP_LOG=off` are the opt-outs. Nothing deletes a log.
+- **Logging is on by default** at `info`, every transport. stdio still never writes stderr (that would close the handshake).
+- **`shell: "bash"` on Windows is git-bash**, not `System32\bash.exe` (WSL). A WSL-only host is refused.
+- **Feature-gated tool families each have their own router**, so `http-tools` / `s3-tools` / `screenshot-tools` / each `ctl-*` domain can actually be compiled out. S3 args no longer overflow the stack. Six computer-control knobs (`wait.kind`, mouse buttons, `win_geom.state`, …) are real enums on the wire.
+- **`tools/list` is ~23% smaller** and a test guard keeps descriptions honest. Session-lock footer: first result, then every 7 calls (`FS_MCP_SESSION_FOOTER_EVERY`).
+- **`rmcp` 3.4.0.** `ServerHandler::get_info` returns `ServerConfig` (`ServerInfo` was a deprecated alias). `cargo install --path . --locked` keeps the binary on the lockfile.
+- **`computer-tools` is a default feature**; `--list-env` and `install` both come from `src/env_spec.rs`. Blank env values mean unset. `install` snapshots `PATH`.
+
+### [0.2.1](CHANGELOG.md#021---2026-08-29) — 2026-08-29
+
+- **ContentRef is tolerant:** a bare string is inline text; a `{`-prefixed string is unwrapped if a host double-encoded the object. Errors name line/column/field. Inline/chunk limit **8 → 64 KiB**.
+
+### [0.2.0](CHANGELOG.md#020---2026-08-29) — 2026-08-29
+
+- **Computer control** (`src/tools/computer/`): mouse, keyboard, windows, capture, macros, UI Automation, OCR, toasts, clipboard files. Input tools need `arm {ttl_ms}` first; read-only (`capture`, `monitors`, `win_list`) do not. Shipped opt-in; default since Unreleased.
+- **`install --force`** takes over a foreign MCP entry (backup first). **`install` with no dirs** allowlists `/` or every Windows drive root. Vendored `mcp-setup` reports `broken` when the stored command is gone.
+
+### [0.1.25](CHANGELOG.md#0125---2026-08-17) — 2026-08-17
+
+- **`rmcp` 2.2 → 3.1.3** (`RequestMetaObject`, `CallToolResponse`).
+- **Content Plane SSOT:** writes/edits/`run_command.stdin` go through `ContentRef` / `blob_*`. Then the BH correctness audit (silent data-loss-as-success across grep, `run_command`, HTTP/S3, PDF, memory).
+
+Opt out of computer control with `--no-default-features --features http-tools,s3-tools,screenshot-tools`.
 
 **LLM-friendly type coercion**: All parameters use flexible types that tolerate common LLM serialization quirks:
 - **Numbers**: `42` and `"42"` both work (`FlexU32`, `FlexUsize`, etc.)
@@ -1071,11 +1075,11 @@ async fn test_http_server_health_check() {
 ```
 
 ### Transport Modes Implementation
-- **stdio**: `rmcp::transport::stdio()` - no stderr logging by default
+- **stdio**: `rmcp::transport::stdio()` — log file only (never stderr; that would close the handshake)
 - **HTTP**: `StreamableHttpService` + `LocalSessionManager` - SSE streaming
 
 ### Key Dependencies
-- `rmcp 0.9.0` - MCP SDK (features: `transport-io`, `server`, `transport-streamable-http-server`)
+- `rmcp 3.4.0` - MCP SDK (features: `transport-io`, `server`, `macros`, `transport-streamable-http-server`)
 - `axum 0.8` - HTTP server framework
 - `tokio` - Async runtime
 
