@@ -267,9 +267,9 @@ pub fn click(
 }
 
 /// Temporized drag: press at `from` (`hold_ms` settle with button down),
-/// then move in ~16 ms chunks over `duration_ms` (0 = instant single batch),
+/// then move in ~16 ms chunks over `duration_ms` (0 = immediate),
 /// then release. Chunked timing is what makes apps track the movement —
-/// a single instant batch lands before drag targets notice the press.
+/// an immediate path can land before drag targets notice the press.
 pub fn drag(
     gate: &SafetyGate,
     from: (i32, i32),
@@ -281,9 +281,10 @@ pub fn drag(
 ) -> anyhow::Result<FocusInfo> {
     gate.check()?;
     let (down, up) = btn.flags();
-    let (fx, fy) = to_abs(from.0, from.1);
-    let batch = vec![mouse(down, fx as i32, fy as i32, 0)];
-    send_batch(&batch)?;
+    // Button-only events ignore dx/dy. Move to the requested start before pressing;
+    // otherwise the drag starts under the old cursor and only the later path moves.
+    move_cursor(from.0, from.1)?;
+    send_batch(&[mouse(down, 0, 0, 0)])?;
     if hold_ms > 0 {
         std::thread::sleep(std::time::Duration::from_millis(hold_ms as u64));
     }

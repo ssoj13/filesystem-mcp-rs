@@ -196,9 +196,9 @@ fn run_step(gate: &SafetyGate, step: &Step) -> anyhow::Result<serde_json::Value>
                 start,
                 (to.x, to.y),
                 btn,
-                duration_ms.unwrap_or(0),
+                duration_ms.unwrap_or(driver::DEFAULT_DRAG_DURATION_MS),
                 ease.unwrap_or(super::driver::Ease::Linear),
-                hold_ms.unwrap_or(0),
+                hold_ms.unwrap_or(driver::DEFAULT_DRAG_HOLD_MS),
             )?;
             Ok(serde_json::json!({ "focus": f }))
         }

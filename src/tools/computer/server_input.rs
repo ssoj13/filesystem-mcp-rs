@@ -67,8 +67,8 @@ impl FileSystemServer {
     #[tool(
         name = "mouse_drag",
         description = "Drag from {x,y} to {x,y} with an interpolated path (drag&drop, marquee).\n\
-            duration_ms sets the real drag tempo (0 = instant); hold_ms settles at `from` with the\n\
-            button down before moving. Requires arm."
+            duration_ms sets the real drag tempo (default 300 ms; 0 = instant); hold_ms settles at `from` with the\n\
+            button down before moving (default 50 ms). Requires arm."
     )]
     async fn ctl_mouse_drag(
         &self,
@@ -90,9 +90,9 @@ impl FileSystemServer {
                 (from.x, from.y),
                 (to.x, to.y),
                 btn,
-                duration_ms.unwrap_or(0),
+                duration_ms.unwrap_or(driver::DEFAULT_DRAG_DURATION_MS),
                 ease,
-                hold_ms.unwrap_or(0),
+                hold_ms.unwrap_or(driver::DEFAULT_DRAG_HOLD_MS),
             )
         })
         .await
@@ -463,11 +463,11 @@ pub struct DragArgs {
     pub to: PtArgs,
     /// Default left.
     pub button: Option<Btn>,
-    /// Real drag duration (ms; 0 = instant single batch).
+    /// Real drag duration (default 300 ms; 0 = immediate).
     pub duration_ms: Option<u32>,
     /// Default linear.
     pub ease: Option<super::driver::Ease>,
-    /// Settle at `from` with button down before moving (ms).
+    /// Settle at `from` with button down before moving (default 50 ms).
     pub hold_ms: Option<u32>,
 }
 

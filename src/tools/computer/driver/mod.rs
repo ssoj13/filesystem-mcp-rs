@@ -42,6 +42,12 @@ mod null;
 #[cfg(feature = "ctl-input")]
 pub use portable::{layout_load, layout_save, resolve_target, to_monitor};
 
+/// Default pace for GUI drag targets to observe press, movement, and release.
+#[cfg(feature = "ctl-input")]
+pub const DEFAULT_DRAG_DURATION_MS: u32 = 300;
+#[cfg(feature = "ctl-input")]
+pub const DEFAULT_DRAG_HOLD_MS: u32 = 50;
+
 /// Modifier keys, platform-neutral (wire + macro steps use these names).
 #[derive(
     Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize, schemars::JsonSchema,
