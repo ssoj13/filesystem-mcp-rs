@@ -6,6 +6,7 @@ use std::env;
 use std::fs::Metadata;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant, SystemTime};
 
 use async_recursion::async_recursion;
@@ -204,9 +205,14 @@ struct ServerArgs {
     #[arg(long = "memory-access-mode", value_name = "MODE")]
     memory_access_mode: Option<String>,
 
-    /// Disable session-lock footer on tool text responses (integration tests / debugging).
+    /// Disable session-lock reminders on tool responses.
     #[arg(long = "no-session-footer", default_value_t = false)]
     no_session_footer: bool,
+
+    /// Remind on the first tool response, then every N calls. 0 disables reminders.
+    /// Precedence: this flag > FS_MCP_SESSION_FOOTER_EVERY > 7.
+    #[arg(long = "session-footer-every", value_name = "N")]
+    session_footer_every: Option<u64>,
 }
 
 #[derive(Clone)]
@@ -230,7 +236,8 @@ struct FileSystemServer {
     thinking_state: Arc<ThinkingState>,
     memory_store: Option<Arc<SqliteMemoryStore>>,
     llm_server: Option<tools::llm::LlmMcpServer>,
-    session_footer: bool,
+    session_footer_every: u64,
+    session_tool_calls: Arc<AtomicU64>,
     content_plane: ContentPlane,
     /// Tool-call counters, or `None` when `FS_MCP_STATS=off`.
     ///
@@ -334,7 +341,8 @@ impl FileSystemServer {
             thinking_state: Arc::new(ThinkingState::new()),
             memory_store: None,
             llm_server: None,
-            session_footer: true,
+            session_footer_every: agent_policy::FOOTER_EVERY_DEFAULT,
+            session_tool_calls: Arc::new(AtomicU64::new(0)),
             content_plane: ContentPlane::new().map_err(|e| {
                 std::io::Error::new(
                     e.kind(),
@@ -396,7 +404,7 @@ impl FileSystemServer {
               Example — files touched in the last 17m 20s: \
               {path:\".\", pattern:\"**/*\", fileType:\"file\", modifiedAfter:\"17m 20s\"}. \
               Paths/metadata only; for text inside files use grep_files.\n\n\
-            Each tool response includes a session-lock reminder. Host context files (CLAUDE.md, AGENTS.md, …) \
+            Tool responses include a periodic session-lock reminder (default: first call, then every 7). Host context files (CLAUDE.md, AGENTS.md, …) \
             installed via mcp-setup also embed Karpathy rules + MCP policy at session start.\n\n\
             These tools are optimized for LLM workflows: UTF-8 safe, pagination for token limits, \
             detailed error messages, and consistent JSON responses.\n\n\
@@ -7441,10 +7449,15 @@ impl ServerHandler for FileSystemServer {
         }
 
         let response = result?;
-        Ok(if self.session_footer {
+        Ok(if self.session_footer_every != 0 {
             match response {
                 CallToolResponse::Complete(result) => {
-                    CallToolResponse::Complete(agent_policy::stamp_tool_result(result))
+                    let call_index = self.session_tool_calls.fetch_add(1, Ordering::Relaxed) + 1;
+                    if agent_policy::should_remind(call_index, self.session_footer_every) {
+                        CallToolResponse::Complete(agent_policy::stamp_tool_result(result))
+                    } else {
+                        CallToolResponse::Complete(result)
+                    }
                 }
                 other => other,
             }
@@ -7497,7 +7510,11 @@ async fn run_stream_mode(
 
     // Create service with session management
     let service = StreamableHttpService::new(
-        move || Ok(server.clone()),
+        move || {
+            let mut session = server.clone();
+            session.session_tool_calls = Arc::new(AtomicU64::new(0));
+            Ok(session)
+        },
         LocalSessionManager::default().into(),
         Default::default(),
     );
@@ -7691,7 +7708,11 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
     let allowed = AllowedDirs::new(args.allowed_dirs);
     let mut server = FileSystemServer::new(allowed)?;
     server.allow_symlink_escape = args.allow_symlink_escape;
-    server.session_footer = !args.no_session_footer;
+    server.session_footer_every = if args.no_session_footer {
+        0
+    } else {
+        agent_policy::footer_every(args.session_footer_every)
+    };
     #[cfg(feature = "http-tools")]
     {
         let mut allowlist = args.http_allowlist_domains;

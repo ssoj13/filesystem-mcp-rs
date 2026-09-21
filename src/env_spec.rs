@@ -29,6 +29,7 @@ pub fn vars() -> Vec<EnvVar> {
     let mut v = paths_vars();
     v.extend(log_vars());
     v.extend(stats_vars());
+    v.extend(policy_vars());
     v.extend(net_vars());
     v.extend(memory_vars());
     v.extend(ctl_vars());
@@ -79,6 +80,14 @@ fn stats_vars() -> Vec<EnvVar> {
         key: "FS_MCP_STATS",
         default: "on",
         help: "Count tool calls, outcomes and latency per tool: on | off.",
+    }]
+}
+
+fn policy_vars() -> Vec<EnvVar> {
+    vec![EnvVar {
+        key: "FS_MCP_SESSION_FOOTER_EVERY",
+        default: crate::core::agent_policy::FOOTER_EVERY_DEFAULT_STR,
+        help: "MCP lock reminder: first tool result, then every N tool calls. 0 = off.",
     }]
 }
 

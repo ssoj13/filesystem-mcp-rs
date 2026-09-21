@@ -1896,27 +1896,66 @@ async fn patch_binary_not_found() -> Result<()> {
 }
 
 #[tokio::test]
-async fn session_footer_appended_by_default() -> Result<()> {
+async fn session_footer_appears_on_first_and_every_seventh_call_by_default() -> Result<()> {
     let tmp = TempDir::new()?;
     let srv = start_server_with_args(tmp.path(), &[]).await?;
     let file_path = tmp.path().join("footer_probe.txt");
 
-    srv.call_tool(
-        "write_file",
-        json!({ "path": &file_path, "content": content_inline("probe") }),
-    )
-    .await?;
-
-    let res = srv
-        .call_tool("read_text_file", json!({ "path": &file_path }))
+    let first = srv
+        .call_tool(
+            "write_file",
+            json!({ "path": &file_path, "content": content_inline("probe") }),
+        )
         .await?;
-    let text = res["result"]["content"][0]["text"].as_str().unwrap_or("");
-    assert!(text.starts_with("probe"));
     assert!(
-        text.contains("[MCP session lock]"),
-        "expected session footer in tool text, got: {text}"
+        first["result"]["content"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|block| block["text"].as_str().unwrap_or("").contains("[MCP lock]"))
     );
-    assert_eq!(res["result"]["structuredContent"]["_mcpSessionLock"], true);
+
+    for call in 2..=9 {
+        let res = srv
+            .call_tool("read_text_file", json!({ "path": &file_path }))
+            .await?;
+        let text = res["result"]["content"][0]["text"].as_str().unwrap_or("");
+        assert_eq!(text, "probe");
+        assert_eq!(
+            res["result"]["content"].as_array().unwrap().len() == 2,
+            call == 8,
+            "call {call}: {res}"
+        );
+        assert!(
+            res["result"]["structuredContent"]
+                .get("_mcpSessionLock")
+                .is_none()
+        );
+    }
+
+    srv.kill().await;
+    Ok(())
+}
+
+#[tokio::test]
+async fn session_footer_interval_can_be_configured() -> Result<()> {
+    let tmp = TempDir::new()?;
+    let file_path = tmp.path().join("footer_interval.txt");
+    std::fs::write(&file_path, "probe")?;
+    let srv = start_server_with_args(tmp.path(), &["--session-footer-every", "3"]).await?;
+
+    for call in 1..=7 {
+        let res = srv
+            .call_tool("read_text_file", json!({ "path": &file_path }))
+            .await?;
+        let text = res["result"]["content"][0]["text"].as_str().unwrap_or("");
+        assert_eq!(text, "probe");
+        assert_eq!(
+            res["result"]["content"].as_array().unwrap().len() == 2,
+            call % 3 == 1,
+            "call {call}: {res}"
+        );
+    }
 
     srv.kill().await;
     Ok(())
