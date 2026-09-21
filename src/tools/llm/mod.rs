@@ -18,7 +18,7 @@ use rmcp::{
     handler::server::{router::tool::ToolRouter, wrapper::Parameters},
     model::{
         CallToolResult, ContentBlock, Implementation, ProgressNotificationParam, RequestMetaObject,
-        ServerCapabilities, ServerInfo,
+        ServerCapabilities, ServerConfig,
     },
     service::Peer,
     tool, tool_handler, tool_router,
@@ -73,13 +73,13 @@ impl LlmMcpServer {
         &self.state
     }
 
-    fn server_info(&self) -> ServerInfo {
+    fn server_info(&self) -> ServerConfig {
         let mut impl_info = Implementation::default();
         impl_info.name = "llm-mcp-rs".to_string();
         impl_info.version = env!("CARGO_PKG_VERSION").to_string();
         impl_info.title = Some("LLM MCP Bridge".to_string());
 
-        let mut info = ServerInfo::default();
+        let mut info = ServerConfig::default();
         info.capabilities = ServerCapabilities::builder().enable_tools().build();
         info.server_info = impl_info;
         info.instructions = Some(
@@ -423,7 +423,7 @@ impl LlmMcpServer {
 
 #[tool_handler(router = self.tool_router)]
 impl ServerHandler for LlmMcpServer {
-    fn get_info(&self) -> ServerInfo {
+    fn get_info(&self) -> ServerConfig {
         self.server_info()
     }
 }

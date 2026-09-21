@@ -22,7 +22,7 @@ use rmcp::{
     // `#[allow(deprecated)]` and the explanation — importing it here would warn crate-wide.
     model::{
         CallToolRequestParams, CallToolResponse, CallToolResult, ContentBlock, Implementation,
-        ProgressNotificationParam, RequestMetaObject, ServerCapabilities, ServerInfo,
+        ProgressNotificationParam, RequestMetaObject, ServerCapabilities, ServerConfig,
         ServerRequest,
     },
     serde::{Deserialize, Serialize},
@@ -359,13 +359,13 @@ impl FileSystemServer {
         })
     }
 
-    fn server_info(&self) -> ServerInfo {
+    fn server_info(&self) -> ServerConfig {
         let mut impl_info = Implementation::default();
         impl_info.name = "filesystem-mcp-rs".to_string();
         impl_info.version = env!("CARGO_PKG_VERSION").to_string();
         impl_info.title = Some("High-Performance Filesystem MCP".to_string());
 
-        let mut info = ServerInfo::default();
+        let mut info = ServerConfig::default();
         info.capabilities = ServerCapabilities::builder()
             .enable_tools()
             .enable_tool_list_changed()
@@ -7397,7 +7397,7 @@ impl FileSystemServer {
 
 #[tool_handler(router = self.tool_router)]
 impl ServerHandler for FileSystemServer {
-    fn get_info(&self) -> ServerInfo {
+    fn get_info(&self) -> ServerConfig {
         self.server_info()
     }
 
