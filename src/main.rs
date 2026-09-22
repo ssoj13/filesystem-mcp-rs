@@ -2678,6 +2678,17 @@ impl FileSystemServer {
         }
 
         let path = self.resolve(&path).await?;
+        macro_rules! read_or_not_found {
+            ($operation:expr, $label:literal) => {
+                match $operation.await {
+                    Ok(value) => value,
+                    Err(error) if is_io_not_found(&error) => {
+                        return Ok(path_not_found(&path, "file"));
+                    }
+                    Err(error) => return Err(internal_err($label)(error)),
+                }
+            };
+        }
 
         let mut line_records: Option<Vec<serde_json::Value>> = None;
         let mut line_start: Option<usize> = None;
@@ -2686,9 +2697,7 @@ impl FileSystemServer {
 
         // Read content based on mode
         let (mut content, total_lines) = if *line_numbers {
-            let full = read_text(&path)
-                .await
-                .map_err(internal_err("Failed to read file"))?;
+            let full = read_or_not_found!(read_text(&path), "Failed to read file");
             let lines: Vec<&str> = full.lines().collect();
             let total = lines.len();
 
@@ -2740,20 +2749,14 @@ impl FileSystemServer {
 
             (content, Some(total))
         } else if let Some(h) = head {
-            let text = head_lines(&path, h as usize)
-                .await
-                .map_err(internal_err("Failed to read head"))?;
+            let text = read_or_not_found!(head_lines(&path, h as usize), "Failed to read head");
             (text, None)
         } else if let Some(t) = tail {
-            let text = tail_lines(&path, t as usize)
-                .await
-                .map_err(internal_err("Failed to read tail"))?;
+            let text = read_or_not_found!(tail_lines(&path, t as usize), "Failed to read tail");
             (text, None)
         } else if offset.is_some() || limit.is_some() {
             // Pagination mode: read full file then slice by lines
-            let full = read_text(&path)
-                .await
-                .map_err(internal_err("Failed to read file"))?;
+            let full = read_or_not_found!(read_text(&path), "Failed to read file");
             let lines: Vec<&str> = full.lines().collect();
             let total = lines.len();
 
@@ -2767,9 +2770,7 @@ impl FileSystemServer {
                 (lines[start..end].join("\n"), Some(total))
             }
         } else {
-            let text = read_text(&path)
-                .await
-                .map_err(internal_err("Failed to read file"))?;
+            let text = read_or_not_found!(read_text(&path), "Failed to read file");
             let total = text.lines().count();
             (text, Some(total))
         };
@@ -2845,9 +2846,11 @@ impl FileSystemServer {
         Parameters(ReadMediaArgs { path }): Parameters<ReadMediaArgs>,
     ) -> Result<CallToolResult, McpError> {
         let path = self.resolve(&path).await?;
-        let (data, mime) = read_media_base64(&path)
-            .await
-            .map_err(internal_err("Failed to read media file"))?;
+        let (data, mime) = match read_media_base64(&path).await {
+            Ok(result) => result,
+            Err(error) if is_io_not_found(&error) => return Ok(path_not_found(&path, "file")),
+            Err(error) => return Err(internal_err("Failed to read media file")(error)),
+        };
 
         let content = if mime.starts_with("image/") {
             ContentBlock::image(data.clone(), mime.clone())
@@ -3073,9 +3076,11 @@ impl FileSystemServer {
         let path = self.resolve(&path).await?;
         // Read with round-trip metadata so the write preserves the file's
         // original encoding, BOM, and newline style instead of forcing UTF-8/LF.
-        let tf = read_text_meta(&path)
-            .await
-            .map_err(internal_err("Failed to read file"))?;
+        let tf = match read_text_meta(&path).await {
+            Ok(tf) => tf,
+            Err(error) if is_io_not_found(&error) => return Ok(path_not_found(&path, "file")),
+            Err(error) => return Err(internal_err("Failed to read file")(error)),
+        };
         tf.ensure_roundtrippable()
             .map_err(internal_err("Cannot edit file"))?;
 
@@ -3138,9 +3143,13 @@ impl FileSystemServer {
         Parameters(ListDirArgs { path }): Parameters<ListDirArgs>,
     ) -> Result<CallToolResult, McpError> {
         let path = self.resolve(&path).await?;
-        let mut dir = fs::read_dir(&path)
-            .await
-            .map_err(internal_err("Failed to read directory"))?;
+        let mut dir = match fs::read_dir(&path).await {
+            Ok(dir) => dir,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                return Ok(path_not_found(&path, "directory"));
+            }
+            Err(error) => return Err(internal_err("Failed to read directory")(error)),
+        };
         let mut entries = Vec::new();
         while let Some(entry) = dir
             .next_entry()
@@ -3175,9 +3184,13 @@ impl FileSystemServer {
         Parameters(ListDirWithSizesArgs { path, sort_by }): Parameters<ListDirWithSizesArgs>,
     ) -> Result<CallToolResult, McpError> {
         let path = self.resolve(&path).await?;
-        let mut dir = fs::read_dir(&path)
-            .await
-            .map_err(internal_err("Failed to read directory"))?;
+        let mut dir = match fs::read_dir(&path).await {
+            Ok(dir) => dir,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                return Ok(path_not_found(&path, "directory"));
+            }
+            Err(error) => return Err(internal_err("Failed to read directory")(error)),
+        };
 
         let mut entries = Vec::new();
         while let Some(entry) = dir
@@ -3272,6 +3285,13 @@ impl FileSystemServer {
             show_size: *show_size,
             show_hash: *show_hash,
         };
+        match fs::metadata(&root).await {
+            Ok(_) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                return Ok(path_not_found(&root, "directory"));
+            }
+            Err(error) => return Err(internal_err("Failed to stat directory")(error)),
+        }
         let entries = build_tree(&root, &root, &exclude, &opts, 0).await?;
         let json_tree = serde_json::to_string_pretty(&entries)
             .map_err(internal_err("Failed to serialize tree"))?;
@@ -3412,9 +3432,13 @@ impl FileSystemServer {
         Parameters(DeletePathArgs { path, recursive }): Parameters<DeletePathArgs>,
     ) -> Result<CallToolResult, McpError> {
         let path = self.resolve(&path).await?;
-        let metadata = fs::metadata(&path)
-            .await
-            .map_err(internal_err("Failed to stat path"))?;
+        let metadata = match fs::metadata(&path).await {
+            Ok(metadata) => metadata,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                return Ok(path_not_found(&path, "path"));
+            }
+            Err(error) => return Err(internal_err("Failed to stat path")(error)),
+        };
 
         if metadata.is_dir() {
             if !*recursive {
@@ -3526,9 +3550,13 @@ impl FileSystemServer {
         Parameters(FileInfoArgs { path }): Parameters<FileInfoArgs>,
     ) -> Result<CallToolResult, McpError> {
         let path = self.resolve(&path).await?;
-        let meta = fs::metadata(&path)
-            .await
-            .map_err(internal_err("Failed to stat path"))?;
+        let meta = match fs::metadata(&path).await {
+            Ok(meta) => meta,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                return Ok(path_not_found(&path, "path"));
+            }
+            Err(error) => return Err(internal_err("Failed to stat path")(error)),
+        };
 
         let info = json!({
             "path": path.to_string_lossy(),
@@ -4466,9 +4494,11 @@ USE CASES: Read binary headers, extract sections of images/executables, inspect 
     ) -> Result<CallToolResult, McpError> {
         let path = self.resolve(&args.path).await?;
 
-        let data = read_bytes(&path, *args.offset, *args.length)
-            .await
-            .map_err(|e| McpError::internal_error(format!("Failed to read binary: {}", e), None))?;
+        let data = match read_bytes(&path, *args.offset, *args.length).await {
+            Ok(data) => data,
+            Err(error) if is_io_not_found(&error) => return Ok(path_not_found(&path, "file")),
+            Err(error) => return Err(internal_err("Failed to read binary")(error)),
+        };
 
         let base64_data = to_base64(&data);
 
@@ -4937,9 +4967,12 @@ USE CASES: Patch executables, fix binary data, search-replace in non-text files.
     ) -> Result<CallToolResult, McpError> {
         let path = self.resolve(&args.path).await?;
 
-        let result = json_reader::read_json(&path, args.query.as_deref(), *args.pretty)
-            .await
-            .map_err(|e| McpError::internal_error(e.to_string(), None))?;
+        let result = match json_reader::read_json(&path, args.query.as_deref(), *args.pretty).await
+        {
+            Ok(result) => result,
+            Err(error) if is_io_not_found(&error) => return Ok(path_not_found(&path, "file")),
+            Err(error) => return Err(internal_err("Failed to read JSON")(error)),
+        };
 
         let text = if let Some(ref err) = result.parse_error {
             format!(
@@ -4976,7 +5009,7 @@ USE CASES: Patch executables, fix binary data, search-replace in non-text files.
     ) -> Result<CallToolResult, McpError> {
         let path = self.resolve(&args.path).await?;
 
-        let result = pdf_reader::read_pdf(
+        let result = match pdf_reader::read_pdf(
             &path,
             args.pages.as_deref(),
             args.max_chars,
@@ -4986,7 +5019,11 @@ USE CASES: Patch executables, fix binary data, search-replace in non-text files.
             },
         )
         .await
-        .map_err(|e| McpError::internal_error(e.to_string(), None))?;
+        {
+            Ok(result) => result,
+            Err(error) if is_io_not_found(&error) => return Ok(path_not_found(&path, "file")),
+            Err(error) => return Err(internal_err("Failed to read PDF")(error)),
+        };
 
         let mut structured = json!({
             "text": result.text,
@@ -7842,6 +7879,22 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
 }
 
 // init_tracing removed - see main() comment about why we can't use stderr logging
+
+fn is_io_not_found(error: &anyhow::Error) -> bool {
+    error.chain().any(|cause| {
+        cause
+            .downcast_ref::<std::io::Error>()
+            .is_some_and(|io| io.kind() == std::io::ErrorKind::NotFound)
+    })
+}
+
+fn path_not_found(path: &std::path::Path, expected: &'static str) -> CallToolResult {
+    let path = path.display().to_string();
+    CallToolResult::error(vec![ContentBlock::text(format!(
+        "{expected} not found: {path}"
+    ))])
+    .with_structured(json!({ "code": "not_found", "expected": expected, "path": path }))
+}
 
 fn internal_err<T: ToString>(message: &'static str) -> impl FnOnce(T) -> McpError + Clone {
     move |err| {

@@ -59,3 +59,11 @@
 - Reproduce: call `edit_file` on `src/tools/computer/server_input.rs` with four literal edits, two of which use text absent from the file (for example, the absent wording “Settle at from with button down (ms)”).
 - Observed impact: the tool correctly applies no edits and reports `2 of 4 edits produced zero matches`, but the expected validation error includes a full internal stack trace. No file corruption was observed.
 - Safe fallback: re-read the exact source text and retry with matching literals; keep the edit atomic on no-match. Return a concise validation error without a stack trace.
+
+## Missing file with `head:0` or `tail:0` returned success
+
+- Date: 2026-09-21.
+- Reproduce: call `read_text_file` with a missing path inside an allowed root and `head:0` or `tail:0`.
+- Observed impact: the server returned an empty successful result because the zero-line branch skipped opening the file; callers could mistake a missing file for an empty read.
+- Safe fallback for an older installed server: use `get_file_info` or a nonzero line count to check existence first.
+- Source fix: zero-line reads open the file without loading its contents, then the tool returns an in-band `isError=true` result with `structuredContent.code="not_found"` when the path is missing. The same response now covers the direct file and directory read tools.

@@ -331,6 +331,103 @@ async fn grep_files_description_separates_pattern_from_file_pattern() -> Result<
 }
 
 #[tokio::test]
+async fn missing_paths_are_in_band_not_found_results() -> Result<()> {
+    let tmp = TempDir::new()?;
+    let srv = start_server(tmp.path()).await?;
+    let missing_file = tmp.path().join("missing.txt");
+    let missing_dir = tmp.path().join("missing_dir");
+
+    let file_cases = [
+        ("read_text_file", json!({ "path": &missing_file })),
+        (
+            "read_text_file",
+            json!({ "path": &missing_file, "head": 1 }),
+        ),
+        (
+            "read_text_file",
+            json!({ "path": &missing_file, "head": 0 }),
+        ),
+        (
+            "read_text_file",
+            json!({ "path": &missing_file, "tail": 0 }),
+        ),
+        (
+            "read_text_file",
+            json!({ "path": &missing_file, "offset": 1, "limit": 1 }),
+        ),
+        (
+            "read_text_file",
+            json!({ "path": &missing_file, "line_numbers": true }),
+        ),
+        (
+            "edit_file",
+            json!({ "path": &missing_file, "edits": [{ "oldText": "a", "newText": "b" }] }),
+        ),
+        ("read_media_file", json!({ "path": &missing_file })),
+        (
+            "read_binary",
+            json!({ "path": &missing_file, "offset": 0, "length": 1 }),
+        ),
+        ("read_json", json!({ "path": &missing_file })),
+        ("read_pdf", json!({ "path": &missing_file })),
+    ];
+    for (tool, args) in file_cases {
+        let response = srv.call_tool(tool, args).await?;
+        assert!(response.get("error").is_none(), "{tool}: {response}");
+        assert_eq!(response["result"]["isError"], true, "{tool}: {response}");
+        assert_eq!(
+            response["result"]["structuredContent"]["code"], "not_found",
+            "{tool}: {response}"
+        );
+        assert_eq!(response["result"]["structuredContent"]["expected"], "file");
+        assert_eq!(
+            response["result"]["structuredContent"]["path"],
+            missing_file.to_string_lossy().as_ref()
+        );
+        assert!(!response.to_string().contains("Stack backtrace"));
+    }
+
+    for tool in [
+        "list_directory",
+        "list_directory_with_sizes",
+        "directory_tree",
+    ] {
+        let response = srv.call_tool(tool, json!({ "path": &missing_dir })).await?;
+        assert!(response.get("error").is_none(), "{tool}: {response}");
+        assert_eq!(response["result"]["isError"], true, "{tool}: {response}");
+        assert_eq!(response["result"]["structuredContent"]["code"], "not_found");
+        assert_eq!(
+            response["result"]["structuredContent"]["expected"],
+            "directory"
+        );
+    }
+
+    for tool in ["get_file_info", "delete_path"] {
+        let response = srv
+            .call_tool(tool, json!({ "path": &missing_file }))
+            .await?;
+        assert!(response.get("error").is_none(), "{tool}: {response}");
+        assert_eq!(response["result"]["isError"], true, "{tool}: {response}");
+        assert_eq!(response["result"]["structuredContent"]["code"], "not_found");
+        assert_eq!(response["result"]["structuredContent"]["expected"], "path");
+    }
+
+    let existing = tmp.path().join("existing.txt");
+    tokio::fs::write(&existing, "hello").await?;
+    for mode in [
+        json!({ "path": &existing, "head": 0 }),
+        json!({ "path": &existing, "tail": 0 }),
+    ] {
+        let response = srv.call_tool("read_text_file", mode).await?;
+        assert_ne!(response["result"]["isError"], true);
+        assert_eq!(response["result"]["content"][0]["text"], "");
+    }
+
+    srv.kill().await;
+    Ok(())
+}
+
+#[tokio::test]
 async fn write_and_read_text_full_head_tail() -> Result<()> {
     let tmp = TempDir::new()?;
     let srv = start_server(tmp.path()).await?;

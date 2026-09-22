@@ -189,9 +189,9 @@ impl TextFile {
 /// Return first N lines (encoding-safe).
 pub async fn head(path: &Path, lines: usize) -> Result<String> {
     if lines == 0 {
+        fs::File::open(path).await?;
         return Ok(String::new());
     }
-    // Read full file as bytes, decode, then take first N lines
     let bytes = fs::read(path).await?;
     let content = decode_bytes(&bytes);
     let result: Vec<&str> = content.lines().take(lines).collect();
@@ -201,9 +201,9 @@ pub async fn head(path: &Path, lines: usize) -> Result<String> {
 /// Return last N lines (encoding-safe).
 pub async fn tail(path: &Path, lines: usize) -> Result<String> {
     if lines == 0 {
+        fs::File::open(path).await?;
         return Ok(String::new());
     }
-    // Read full file as bytes, decode, then take last N lines
     let bytes = fs::read(path).await?;
     let content = decode_bytes(&bytes);
     let all_lines: Vec<&str> = content.lines().collect();
