@@ -68,6 +68,9 @@ pub fn wait(
     timeout_ms: u32,
     poll_ms: u32,
 ) -> anyhow::Result<WaitResult> {
+    if timeout_ms > 30_000 {
+        return Err(anyhow::anyhow!("wait timeout is limited to 30000 ms"));
+    }
     let deadline = Duration::from_millis(timeout_ms as u64);
     let poll = Duration::from_millis(poll_ms.max(50) as u64);
     let started = Instant::now();
@@ -89,7 +92,6 @@ pub fn wait(
                         rgb: None,
                     });
                 }
-                std::thread::sleep(poll);
                 let now = capture::capture(cap.clone())?.hash;
                 if hash_dist(baseline, now) > CHANGE_EPS {
                     return Ok(WaitResult {
@@ -99,6 +101,7 @@ pub fn wait(
                         rgb: None,
                     });
                 }
+                std::thread::sleep(poll.min(deadline.saturating_sub(started.elapsed())));
             }
         }
         Kind::Window => {
@@ -112,7 +115,6 @@ pub fn wait(
                         rgb: None,
                     });
                 }
-                std::thread::sleep(poll);
                 let wins = driver::list_windows(Some(q.clone()))?;
                 if !wins.is_empty() {
                     return Ok(WaitResult {
@@ -122,6 +124,7 @@ pub fn wait(
                         rgb: None,
                     });
                 }
+                std::thread::sleep(poll.min(deadline.saturating_sub(started.elapsed())));
             }
         }
         Kind::Clipboard => {
@@ -135,7 +138,6 @@ pub fn wait(
                         rgb: None,
                     });
                 }
-                std::thread::sleep(poll);
                 if super::driver::clipboard_seq()? != base {
                     return Ok(WaitResult {
                         ok: true,
@@ -144,6 +146,7 @@ pub fn wait(
                         rgb: None,
                     });
                 }
+                std::thread::sleep(poll.min(deadline.saturating_sub(started.elapsed())));
             }
         }
         Kind::Color => {
@@ -171,7 +174,7 @@ pub fn wait(
                         rgb: Some(c),
                     });
                 }
-                std::thread::sleep(poll);
+                std::thread::sleep(poll.min(deadline.saturating_sub(started.elapsed())));
             }
         }
     }

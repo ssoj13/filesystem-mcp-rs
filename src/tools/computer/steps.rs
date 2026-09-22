@@ -31,6 +31,8 @@ pub enum Step {
     Move {
         x: i32,
         y: i32,
+        duration_ms: Option<u32>,
+        ease: Option<driver::Ease>,
     },
     Click {
         x: Option<i32>,
@@ -39,6 +41,7 @@ pub enum Step {
         clicks: Option<u32>,
         /// Modifier keys held across the click: ctrl/alt/shift/win.
         mods: Option<Vec<String>>,
+        target: Option<WinTarget>,
     },
     Drag {
         from: Option<Pt>,
@@ -50,18 +53,22 @@ pub enum Step {
         ease: Option<super::driver::Ease>,
         /// Settle at `from` with button down before moving (ms).
         hold_ms: Option<u32>,
+        target: Option<WinTarget>,
     },
     Scroll {
         dy: i32,
         dx: Option<i32>,
+        target: Option<WinTarget>,
     },
     Key {
         key: String,
         hold_ms: Option<u32>,
+        target: Option<WinTarget>,
     },
     Type {
         text: String,
         paste: Option<bool>,
+        target: Option<WinTarget>,
     },
     Wait {
         ms: u32,
@@ -118,9 +125,10 @@ pub fn run(
         ));
     }
     let started = Instant::now();
+    let deadline = started + MAX_WALL;
     let mut results: Vec<StepResult> = Vec::with_capacity(raw_steps.len());
     for (idx, raw) in raw_steps.iter().enumerate() {
-        if started.elapsed() > MAX_WALL {
+        if Instant::now() >= deadline {
             results.push(StepResult {
                 ok: false,
                 err: Some(format!("30 s wall cap hit at step {idx}")),
@@ -132,13 +140,22 @@ pub fn run(
             });
         }
         if gap_ms > 0 && idx > 0 {
-            std::thread::sleep(Duration::from_millis(gap_ms as u64));
+            let gap = Duration::from_millis(gap_ms as u64);
+            if gap >= deadline.saturating_duration_since(Instant::now()) {
+                results.push(StepResult {
+                    ok: false,
+                    value: None,
+                    err: Some(format!("30 s wall cap hit before step {idx}")),
+                });
+                break;
+            }
+            std::thread::sleep(gap);
         }
         let mut raw_step = raw.clone();
         resolve_refs(&mut raw_step, &results)?;
         let step: Step = serde_json::from_value(raw_step)
             .map_err(|e| anyhow::anyhow!("step {idx}: invalid step definition: {e}"))?;
-        let res = run_step(gate, &step);
+        let res = check_budget(&step, deadline).and_then(|()| run_step(gate, &step));
         let ok = res.is_ok();
         let value = res.as_ref().ok().cloned();
         let err = res.as_ref().err().map(|e| e.to_string());
@@ -156,11 +173,48 @@ pub fn run(
     })
 }
 
+fn check_budget(step: &Step, deadline: Instant) -> anyhow::Result<()> {
+    let required_ms = match step {
+        Step::Move { duration_ms, .. } => duration_ms.unwrap_or(0),
+        Step::Drag {
+            duration_ms,
+            hold_ms,
+            ..
+        } => duration_ms
+            .unwrap_or(driver::DEFAULT_DRAG_DURATION_MS)
+            .saturating_add(hold_ms.unwrap_or(driver::DEFAULT_DRAG_HOLD_MS))
+            .saturating_add(32),
+        Step::Key { hold_ms, .. } => hold_ms.unwrap_or(0),
+        Step::Wait { ms } => *ms,
+        Step::WaitScreen { timeout_ms, .. } => timeout_ms.unwrap_or(3000),
+        _ => 0,
+    };
+    if Duration::from_millis(required_ms as u64)
+        >= deadline.saturating_duration_since(Instant::now())
+    {
+        return Err(anyhow::anyhow!(
+            "step requires {required_ms} ms beyond the 30 s macro deadline"
+        ));
+    }
+    Ok(())
+}
+
 fn run_step(gate: &SafetyGate, step: &Step) -> anyhow::Result<serde_json::Value> {
     match step {
-        Step::Move { x, y } => {
-            gate.check()?;
-            let f = driver::move_cursor(*x, *y)?;
+        Step::Move {
+            x,
+            y,
+            duration_ms,
+            ease,
+        } => {
+            gate.reserve()?;
+            let duration = duration_ms.unwrap_or(0);
+            let f =
+                driver::move_cursor_timed(*x, *y, duration, ease.unwrap_or(driver::Ease::Linear))?;
+            gate.record(
+                "mouse_move",
+                serde_json::json!({ "to": [x, y], "duration_ms": duration }),
+            );
             Ok(serde_json::json!({ "focus": f }))
         }
         Step::Click {
@@ -169,7 +223,9 @@ fn run_step(gate: &SafetyGate, step: &Step) -> anyhow::Result<serde_json::Value>
             button,
             clicks,
             mods,
+            target,
         } => {
+            driver::require_focus(target.clone())?;
             let btn = *button.as_ref().unwrap_or(&Btn::Left);
             let mod_keys = driver::parse_keymods(mods.as_deref())?;
             let f = driver::click(gate, *x, *y, btn, clicks.unwrap_or(1), &mod_keys)?;
@@ -182,7 +238,9 @@ fn run_step(gate: &SafetyGate, step: &Step) -> anyhow::Result<serde_json::Value>
             duration_ms,
             ease,
             hold_ms,
+            target,
         } => {
+            let expected = driver::require_focus(target.clone())?;
             let btn = *button.as_ref().unwrap_or(&Btn::Left);
             // No explicit start = drag from where the cursor is. A failed
             // query must NOT fall back to (0,0): that would silently drag from
@@ -199,25 +257,34 @@ fn run_step(gate: &SafetyGate, step: &Step) -> anyhow::Result<serde_json::Value>
                 duration_ms.unwrap_or(driver::DEFAULT_DRAG_DURATION_MS),
                 ease.unwrap_or(super::driver::Ease::Linear),
                 hold_ms.unwrap_or(driver::DEFAULT_DRAG_HOLD_MS),
+                expected,
             )?;
             Ok(serde_json::json!({ "focus": f }))
         }
-        Step::Scroll { dy, dx } => {
+        Step::Scroll { dy, dx, target } => {
+            driver::require_focus(target.clone())?;
             let f = driver::scroll(gate, *dy, dx.unwrap_or(0))?;
             Ok(serde_json::json!({ "focus": f }))
         }
-        Step::Key { key, hold_ms } => {
+        Step::Key {
+            key,
+            hold_ms,
+            target,
+        } => {
+            driver::require_focus(target.clone())?;
             let f = driver::key_tap(gate, key, hold_ms.unwrap_or(0))?;
             Ok(serde_json::json!({ "focus": f }))
         }
-        Step::Type { text, paste } => {
+        Step::Type {
+            text,
+            paste,
+            target,
+        } => {
             let paste = paste.unwrap_or(true);
-            // Paste safety: the expected window is whatever is focused NOW —
-            // a focus change between steps refuses the paste.
-            let expect = if paste {
-                Some(driver::focus()?.hwnd)
-            } else {
-                None
+            let expect = match driver::require_focus(target.clone())? {
+                Some(id) => Some(id),
+                None if paste => Some(driver::focus()?.hwnd),
+                None => None,
             };
             let r = driver::type_text(gate, text, paste, 0, expect)?;
             Ok(
@@ -243,17 +310,17 @@ fn run_step(gate: &SafetyGate, step: &Step) -> anyhow::Result<serde_json::Value>
                 // No `since`: baseline = now; wait until screen differs from now.
             };
             let deadline = Duration::from_millis(timeout_ms.unwrap_or(3000) as u64);
-            let poll = Duration::from_millis(poll_ms.unwrap_or(200) as u64);
+            let poll = Duration::from_millis(poll_ms.unwrap_or(200).max(50) as u64);
             let started = Instant::now();
             loop {
-                if started.elapsed() > deadline {
-                    return Err(anyhow::anyhow!("wait_screen timeout"));
-                }
-                std::thread::sleep(poll);
                 let now = capture::capture(cap.clone())?.hash;
                 if hash_dist(baseline, now) > CHANGE_EPS {
                     return Ok(serde_json::json!({ "changed": true, "hash": now }));
                 }
+                if started.elapsed() >= deadline {
+                    return Err(anyhow::anyhow!("wait_screen timeout"));
+                }
+                std::thread::sleep(poll.min(deadline.saturating_sub(started.elapsed())));
             }
         }
         Step::Capture { target } => {
@@ -262,9 +329,10 @@ fn run_step(gate: &SafetyGate, step: &Step) -> anyhow::Result<serde_json::Value>
             Ok(serde_json::json!({ "path": r.path, "hash": r.hash, "rect": r.rect }))
         }
         Step::Focus { target } => {
-            gate.check()?;
             let id = driver::resolve_target(target)?;
+            gate.reserve()?;
             driver::focus_window(id)?;
+            gate.record("win_focus", serde_json::json!({ "target": target }));
             Ok(serde_json::json!({ "focus": driver::focus()? }))
         }
     }
@@ -376,6 +444,13 @@ mod tests {
             value: Some(v),
             err: None,
         }
+    }
+
+    #[test]
+    fn budget_refuses_wait_that_exceeds_remaining_time() {
+        let step = Step::Wait { ms: 100 };
+        assert!(check_budget(&step, Instant::now() + Duration::from_millis(20)).is_err());
+        assert!(check_budget(&step, Instant::now() + Duration::from_secs(1)).is_ok());
     }
 
     #[test]

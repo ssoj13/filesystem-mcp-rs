@@ -95,8 +95,12 @@ impl FileSystemServer {
             value,
         }): Parameters<UiSetArgs>,
     ) -> Result<CallToolResult, McpError> {
+        let gate = super::safety::gate();
         tokio::task::spawn_blocking(move || {
-            uia::set_value(Some(target), &name, idx.unwrap_or(0), &value)
+            gate.reserve()?;
+            uia::set_value(Some(target), &name, idx.unwrap_or(0), &value)?;
+            gate.record("ui_set", json!({ "name": name, "idx": idx }));
+            Ok::<(), anyhow::Error>(())
         })
         .await
         .map_err(|e| McpError::internal_error(e.to_string(), None))?

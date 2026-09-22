@@ -50,13 +50,47 @@ impl FileSystemServer {
             button,
             clicks,
             mods,
+            target,
         }): Parameters<ClickArgs>,
     ) -> Result<CallToolResult, McpError> {
         let btn = button.unwrap_or(Btn::Left);
         let mod_keys = driver::parse_keymods(mods.as_deref()).map_err(super::ctl_err)?;
         let gate = super::safety::gate();
         let focus = tokio::task::spawn_blocking(move || {
+            driver::require_focus(target)?;
             driver::click(&gate, x, y, btn, clicks.unwrap_or(1), &mod_keys)
+        })
+        .await
+        .map_err(|e| McpError::internal_error(e.to_string(), None))?
+        .map_err(ctl_err)?;
+        ok_json(json!({ "focus": focus }))
+    }
+
+    #[tool(
+        name = "mouse_move",
+        description = "Move the cursor to virtual-screen x,y. duration_ms=0 jumps; a positive value\n\
+            follows a timed linear or ease-out path. Requires arm; returns {focus}."
+    )]
+    async fn ctl_mouse_move(
+        &self,
+        Parameters(MoveArgs {
+            x,
+            y,
+            duration_ms,
+            ease,
+        }): Parameters<MoveArgs>,
+    ) -> Result<CallToolResult, McpError> {
+        let gate = super::safety::gate();
+        let duration = duration_ms.unwrap_or(0);
+        let ease = ease.unwrap_or(driver::Ease::Linear);
+        let focus = tokio::task::spawn_blocking(move || {
+            gate.reserve()?;
+            let focus = driver::move_cursor_timed(x, y, duration, ease)?;
+            gate.record(
+                "mouse_move",
+                json!({ "to": [x, y], "duration_ms": duration }),
+            );
+            Ok::<_, anyhow::Error>(focus)
         })
         .await
         .map_err(|e| McpError::internal_error(e.to_string(), None))?
@@ -79,12 +113,14 @@ impl FileSystemServer {
             duration_ms,
             ease,
             hold_ms,
+            target,
         }): Parameters<DragArgs>,
     ) -> Result<CallToolResult, McpError> {
         let btn = button.unwrap_or(Btn::Left);
         let ease = ease.unwrap_or(super::driver::Ease::Linear);
         let gate = super::safety::gate();
         let focus = tokio::task::spawn_blocking(move || {
+            let expected = driver::require_focus(target)?;
             driver::drag(
                 &gate,
                 (from.x, from.y),
@@ -93,6 +129,7 @@ impl FileSystemServer {
                 duration_ms.unwrap_or(driver::DEFAULT_DRAG_DURATION_MS),
                 ease,
                 hold_ms.unwrap_or(driver::DEFAULT_DRAG_HOLD_MS),
+                expected,
             )
         })
         .await
@@ -108,13 +145,16 @@ impl FileSystemServer {
     )]
     async fn ctl_mouse_scroll(
         &self,
-        Parameters(ScrollArgs { dy, dx }): Parameters<ScrollArgs>,
+        Parameters(ScrollArgs { dy, dx, target }): Parameters<ScrollArgs>,
     ) -> Result<CallToolResult, McpError> {
         let gate = super::safety::gate();
-        let focus = tokio::task::spawn_blocking(move || driver::scroll(&gate, dy, dx.unwrap_or(0)))
-            .await
-            .map_err(|e| McpError::internal_error(e.to_string(), None))?
-            .map_err(ctl_err)?;
+        let focus = tokio::task::spawn_blocking(move || {
+            driver::require_focus(target)?;
+            driver::scroll(&gate, dy, dx.unwrap_or(0))
+        })
+        .await
+        .map_err(|e| McpError::internal_error(e.to_string(), None))?
+        .map_err(ctl_err)?;
         ok_json(json!({ "focus": focus }))
     }
 
@@ -126,14 +166,20 @@ impl FileSystemServer {
     )]
     async fn ctl_key_tap(
         &self,
-        Parameters(TapArgs { key, hold_ms }): Parameters<TapArgs>,
+        Parameters(TapArgs {
+            key,
+            hold_ms,
+            target,
+        }): Parameters<TapArgs>,
     ) -> Result<CallToolResult, McpError> {
         let gate = super::safety::gate();
-        let focus =
-            tokio::task::spawn_blocking(move || driver::key_tap(&gate, &key, hold_ms.unwrap_or(0)))
-                .await
-                .map_err(|e| McpError::internal_error(e.to_string(), None))?
-                .map_err(ctl_err)?;
+        let focus = tokio::task::spawn_blocking(move || {
+            driver::require_focus(target)?;
+            driver::key_tap(&gate, &key, hold_ms.unwrap_or(0))
+        })
+        .await
+        .map_err(|e| McpError::internal_error(e.to_string(), None))?
+        .map_err(ctl_err)?;
         ok_json(json!({ "focus": focus }))
     }
 
@@ -141,7 +187,8 @@ impl FileSystemServer {
         name = "key_type",
         description = "Type text into the focused window. paste=true (default): clipboard roundtrip\n\
             (save -> set -> ctrl+v -> restore) — fast and Unicode-safe; REFUSED if focus moved from\n\
-            `target` when given. paste=false: per-char KEYEVENTF_UNICODE. Requires arm."
+            `target` when given. paste=false: per-char KEYEVENTF_UNICODE with focus checked\n\
+            before each unit. Requires arm."
     )]
     async fn ctl_key_type(
         &self,
@@ -194,8 +241,9 @@ impl FileSystemServer {
         let gate = super::safety::gate();
         let res = tokio::task::spawn_blocking(move || -> anyhow::Result<driver::WinInfo> {
             let id = driver::resolve_target(&target)?;
-            gate.check()?;
+            gate.reserve()?;
             driver::focus_window(id)?;
+            gate.record("win_focus", json!({ "target": target }));
             driver::list_windows(Some(WinQuery::default()))?
                 .into_iter()
                 .find(|w| w.id == id)
@@ -225,9 +273,11 @@ impl FileSystemServer {
     ) -> Result<CallToolResult, McpError> {
         let gate = super::safety::gate();
         let res = tokio::task::spawn_blocking(move || {
-            gate.check()?;
             let id = driver::resolve_target(&target)?;
-            driver::geom(id, x, y, w, h, state.map(WinState::as_str))
+            gate.reserve()?;
+            let win = driver::geom(id, x, y, w, h, state.map(WinState::as_str))?;
+            gate.record("win_geom", json!({ "target": target }));
+            Ok(win)
         })
         .await
         .map_err(|e| McpError::internal_error(e.to_string(), None))?
@@ -246,10 +296,10 @@ impl FileSystemServer {
     ) -> Result<CallToolResult, McpError> {
         let gate = super::safety::gate();
         tokio::task::spawn_blocking(move || -> anyhow::Result<()> {
-            gate.check()?;
             let id = driver::resolve_target(&target)?;
+            gate.reserve()?;
             driver::close_window(id)?;
-            gate.record("win_close", json!({ "target": target }))?;
+            gate.record("win_close", json!({ "target": target }));
             Ok(())
         })
         .await
@@ -269,9 +319,14 @@ impl FileSystemServer {
     ) -> Result<CallToolResult, McpError> {
         let gate = super::safety::gate();
         let res = tokio::task::spawn_blocking(move || {
-            gate.check()?;
             let id = driver::resolve_target(&target)?;
-            driver::to_monitor(id, monitor)
+            gate.reserve()?;
+            let win = driver::to_monitor(id, monitor)?;
+            gate.record(
+                "win_to_monitor",
+                json!({ "target": target, "monitor": monitor }),
+            );
+            Ok(win)
         })
         .await
         .map_err(|e| McpError::internal_error(e.to_string(), None))?
@@ -297,15 +352,19 @@ impl FileSystemServer {
                     gate.record(
                         "win_layout_save",
                         json!({ "name": name, "windows": entries.len() }),
-                    )?;
+                    );
                     Ok(json!({ "saved": entries }))
                 }
                 LayoutOp::Load => {
-                    let applied = driver::layout_load(&name, dry_run.unwrap_or(false))?;
+                    let dry_run = dry_run.unwrap_or(false);
+                    if !dry_run {
+                        gate.reserve()?;
+                    }
+                    let applied = driver::layout_load(&name, dry_run)?;
                     gate.record(
                         "win_layout_load",
                         json!({ "name": name, "dry_run": dry_run }),
-                    )?;
+                    );
                     Ok(json!({ "applied": applied }))
                 }
             }
@@ -455,6 +514,18 @@ pub struct ClickArgs {
     pub clicks: Option<u32>,
     /// Modifier keys held across the click: ctrl/alt/shift/win.
     pub mods: Option<Vec<String>>,
+    /// Optional foreground window required before input is sent.
+    pub target: Option<WinTarget>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct MoveArgs {
+    pub x: i32,
+    pub y: i32,
+    /// Real movement duration, 0 = jump (default).
+    pub duration_ms: Option<u32>,
+    /// Linear by default; out decelerates toward the target.
+    pub ease: Option<driver::Ease>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -469,6 +540,8 @@ pub struct DragArgs {
     pub ease: Option<super::driver::Ease>,
     /// Settle at `from` with button down before moving (default 50 ms).
     pub hold_ms: Option<u32>,
+    /// Optional foreground window; checked throughout a long drag.
+    pub target: Option<WinTarget>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -483,6 +556,8 @@ pub struct ScrollArgs {
     pub dy: i32,
     /// Columns right (positive) / left (negative).
     pub dx: Option<i32>,
+    /// Optional foreground window required before input is sent.
+    pub target: Option<WinTarget>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -491,6 +566,8 @@ pub struct TapArgs {
     pub key: String,
     /// Hold the main key this long (ms).
     pub hold_ms: Option<u32>,
+    /// Optional foreground window required before input is sent.
+    pub target: Option<WinTarget>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]

@@ -197,6 +197,7 @@ pub fn click(
         .get(idx)
         .ok_or_else(|| anyhow::anyhow!("{}/{} matches for {name:?}", matches.len(), idx))?;
     use uiautomation::patterns::*;
+    gate.reserve()?;
     // Scroll offscreen elements into view first (pattern-free, always safe).
     if let Ok(scroll) = el.get_pattern::<UIScrollItemPattern>() {
         let _ = scroll.scroll_into_view();
@@ -208,7 +209,7 @@ pub fn click(
         gate.record(
             "ui_click",
             serde_json::json!({ "via": "invoke", "name": name, "idx": idx }),
-        )?;
+        );
         return Ok(serde_json::json!({ "via": "invoke", "focus": input::focus() }));
     }
     if let Ok(toggle) = el.get_pattern::<UITogglePattern>() {
@@ -218,7 +219,7 @@ pub fn click(
         gate.record(
             "ui_click",
             serde_json::json!({ "via": "toggle", "name": name, "idx": idx }),
-        )?;
+        );
         return Ok(serde_json::json!({ "via": "toggle", "focus": input::focus() }));
     }
     if let Ok(expand) = el.get_pattern::<UIExpandCollapsePattern>() {
@@ -228,7 +229,7 @@ pub fn click(
         gate.record(
             "ui_click",
             serde_json::json!({ "via": "expand", "name": name, "idx": idx }),
-        )?;
+        );
         return Ok(serde_json::json!({ "via": "expand", "focus": input::focus() }));
     }
     if let Ok(sel) = el.get_pattern::<UISelectionItemPattern>() {
@@ -236,7 +237,7 @@ pub fn click(
         gate.record(
             "ui_click",
             serde_json::json!({ "via": "select", "name": name, "idx": idx }),
-        )?;
+        );
         return Ok(serde_json::json!({ "via": "select", "focus": input::focus() }));
     }
     // Last resort: synthesized click at the element center (armed input).
@@ -247,11 +248,11 @@ pub fn click(
         ));
     }
     let (cx, cy) = (x + w / 2, y + h / 2);
-    let focus = input::click(gate, Some(cx), Some(cy), input::Btn::Left, 1, &[])?;
+    let focus = input::click_reserved(Some(cx), Some(cy), input::Btn::Left, 1, &[])?;
     gate.record(
         "ui_click",
         serde_json::json!({ "via": "click", "name": name, "idx": idx, "pos": [cx, cy] }),
-    )?;
+    );
     Ok(serde_json::json!({ "via": "click", "pos": [cx, cy], "focus": focus }))
 }
 

@@ -104,6 +104,71 @@ pub enum Ease {
     Out,
 }
 
+/// Follow a cursor path on an elapsed-time schedule. Both plain movement and
+/// button-held drags use this so their tempo and endpoint cannot diverge.
+#[cfg(feature = "ctl-input")]
+pub fn follow_path(
+    from: (i32, i32),
+    to: (i32, i32),
+    duration_ms: u32,
+    ease: Ease,
+    mut emit: impl FnMut(i32, i32) -> anyhow::Result<()>,
+) -> anyhow::Result<()> {
+    if duration_ms > 30_000 {
+        return Err(anyhow::anyhow!("cursor movement is limited to 30000 ms"));
+    }
+    let n = if duration_ms == 0 {
+        1
+    } else {
+        duration_ms.div_ceil(16).clamp(2, 2000)
+    };
+    let started = std::time::Instant::now();
+    for i in 1..=n {
+        let due = std::time::Duration::from_millis(duration_ms as u64 * i as u64 / n as u64);
+        std::thread::sleep(due.saturating_sub(started.elapsed()));
+        let t = i as f64 / n as f64;
+        let t = match ease {
+            Ease::Linear => t,
+            Ease::Out => 1.0 - (1.0 - t) * (1.0 - t),
+        };
+        let x = from.0 as f64 + (to.0 as f64 - from.0 as f64) * t;
+        let y = from.1 as f64 + (to.1 as f64 - from.1 as f64) * t;
+        emit(x as i32, y as i32)?;
+    }
+    Ok(())
+}
+
+#[cfg(all(test, feature = "ctl-input"))]
+mod path_tests {
+    use super::*;
+
+    #[test]
+    fn timed_path_emits_intermediate_points_and_exact_endpoint() {
+        let mut points = Vec::new();
+        follow_path((-100, 30), (100, -70), 32, Ease::Linear, |x, y| {
+            points.push((x, y));
+            Ok(())
+        })
+        .unwrap();
+        assert_eq!(points.len(), 2);
+        assert_eq!(points[0], (0, -20));
+        assert_eq!(points[1], (100, -70));
+    }
+
+    #[test]
+    fn path_rejects_unbounded_duration_before_emitting() {
+        let mut called = false;
+        assert!(
+            follow_path((0, 0), (1, 1), 30_001, Ease::Out, |_, _| {
+                called = true;
+                Ok(())
+            })
+            .is_err()
+        );
+        assert!(!called);
+    }
+}
+
 /// Focus snapshot returned with input actions (hwnd = platform window id:
 /// HWND on Windows, opaque elsewhere).
 #[derive(Debug, Clone, serde::Serialize)]
@@ -264,6 +329,7 @@ pub trait InputDrv: Send + Sync {
         duration_ms: u32,
         ease: Ease,
         hold_ms: u32,
+        expect: Option<u32>,
     ) -> anyhow::Result<FocusInfo>;
     fn scroll(&self, gate: &SafetyGate, dy: i32, dx: i32) -> anyhow::Result<FocusInfo>;
     fn key_tap(&self, gate: &SafetyGate, combo: &str, hold_ms: u32) -> anyhow::Result<FocusInfo>;
@@ -499,6 +565,23 @@ pub fn move_cursor(x: i32, y: i32) -> anyhow::Result<FocusInfo> {
 }
 
 #[cfg(feature = "ctl-input")]
+pub fn move_cursor_timed(
+    x: i32,
+    y: i32,
+    duration_ms: u32,
+    ease: Ease,
+) -> anyhow::Result<FocusInfo> {
+    if duration_ms == 0 {
+        return move_cursor(x, y);
+    }
+    let from = cursor_pos()?;
+    follow_path(from, (x, y), duration_ms, ease, |px, py| {
+        move_cursor(px, py).map(|_| ())
+    })?;
+    focus()
+}
+
+#[cfg(feature = "ctl-input")]
 pub fn click(
     gate: &SafetyGate,
     x: Option<i32>,
@@ -519,8 +602,9 @@ pub fn drag(
     duration_ms: u32,
     ease: Ease,
     hold_ms: u32,
+    expect: Option<u32>,
 ) -> anyhow::Result<FocusInfo> {
-    input()?.drag(gate, from, to, btn, duration_ms, ease, hold_ms)
+    input()?.drag(gate, from, to, btn, duration_ms, ease, hold_ms, expect)
 }
 
 #[cfg(feature = "ctl-input")]
@@ -552,6 +636,22 @@ pub fn cursor_pos() -> anyhow::Result<(i32, i32)> {
 #[cfg(feature = "ctl-input")]
 pub fn focus() -> anyhow::Result<FocusInfo> {
     input()?.focus()
+}
+
+/// Resolve an optional target and refuse input if it is no longer foreground.
+#[cfg(feature = "ctl-input")]
+pub fn require_focus(target: Option<WinTarget>) -> anyhow::Result<Option<u32>> {
+    let expected = target.map(|t| resolve_target(&t)).transpose()?;
+    if let Some(id) = expected {
+        let actual = focus()?.hwnd;
+        if actual != id {
+            return Err(anyhow::Error::new(
+                crate::tools::computer::safety::CtlError::FocusFailed { hwnd: actual },
+            )
+            .context(format!("target window {id} is not foreground")));
+        }
+    }
+    Ok(expected)
 }
 
 #[cfg(feature = "ctl-desktop")]

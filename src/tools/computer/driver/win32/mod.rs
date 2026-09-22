@@ -137,8 +137,9 @@ impl InputDrv for Win32 {
         duration_ms: u32,
         ease: Ease,
         hold_ms: u32,
+        expect: Option<u32>,
     ) -> anyhow::Result<FocusInfo> {
-        input::drag(gate, from, to, btn, duration_ms, ease, hold_ms)
+        input::drag(gate, from, to, btn, duration_ms, ease, hold_ms, expect)
     }
 
     fn scroll(&self, gate: &SafetyGate, dy: i32, dx: i32) -> anyhow::Result<FocusInfo> {

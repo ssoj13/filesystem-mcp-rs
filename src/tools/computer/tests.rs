@@ -126,6 +126,7 @@ fn canary_run() -> anyhow::Result<()> {
         1000,
         driver::Ease::Out,
         10,
+        Some(id),
     )?;
     let drag_ms = drag_t0.elapsed().as_millis();
     println!(

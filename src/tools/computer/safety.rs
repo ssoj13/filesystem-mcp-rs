@@ -1,8 +1,8 @@
 //! Safety gate: TTL arming, ops-per-minute runaway cap, JSONL audit - and the error type a
 //! refused action is reported with.
 //!
-//! Every input-injecting and bulk-mutating tool must call [`SafetyGate::check`] before acting and
-//! [`SafetyGate::record`] after each executed action. The gate lives in the lib (not the MCP
+//! Every input-injecting and bulk-mutating tool must call [`SafetyGate::reserve`] before acting and
+//! [`SafetyGate::record`] after each successful action. The gate lives in the lib (not the MCP
 //! layer) so non-MCP consumers inherit it.
 //!
 //! One file, not two. An earlier split put [`CtlError`] beside the gate on the theory that a
@@ -189,6 +189,7 @@ impl SafetyGate {
 
     /// Throw [`CtlError::NotArmed`] unless currently armed (per-step re-check:
     /// an arm must never silently expire mid-sequence).
+    #[cfg(test)]
     pub fn check(&self) -> Result<(), CtlError> {
         let st = self.state.lock().expect("gate poisoned");
         match st.armed_until {
@@ -198,30 +199,36 @@ impl SafetyGate {
         }
     }
 
-    /// Count one executed op against the sliding cap and append an audit line.
-    /// Called AFTER the action executed, so the audit log reflects reality.
-    pub fn record(&self, action: &str, detail: serde_json::Value) -> Result<(), CtlError> {
-        {
-            let mut st = self.state.lock().expect("gate poisoned");
-            let now = Instant::now();
-            st.ops
-                .retain(|t| now.duration_since(*t) < Duration::from_secs(60));
-            if st.ops.len() as u32 >= self.max_ops_per_min {
-                let retry_after = st
-                    .ops
-                    .front()
-                    .map(|t| Duration::from_secs(60).saturating_sub(now.duration_since(*t)))
-                    .unwrap_or_default();
-                return Err(CtlError::OpCapExceeded {
-                    retry_after_ms: retry_after.as_millis() as u64,
-                });
-            }
-            st.ops.push_back(now);
+    /// Reserve one attempt before input is sent. The arm and sliding cap are checked
+    /// under the same lock, so concurrent calls cannot both claim the last slot.
+    /// A failed attempt still uses its slot; `record` audits only completed actions.
+    pub fn reserve(&self) -> Result<(), CtlError> {
+        let mut st = self.state.lock().expect("gate poisoned");
+        let now = Instant::now();
+        if !st.armed_until.is_some_and(|until| now < until) {
+            return Err(CtlError::NotArmed { remaining_ms: 0 });
         }
+        st.ops
+            .retain(|t| now.duration_since(*t) < Duration::from_secs(60));
+        if st.ops.len() as u32 >= self.max_ops_per_min {
+            let retry_after = st
+                .ops
+                .front()
+                .map(|t| Duration::from_secs(60).saturating_sub(now.duration_since(*t)))
+                .unwrap_or_default();
+            return Err(CtlError::OpCapExceeded {
+                retry_after_ms: retry_after.as_millis() as u64,
+            });
+        }
+        st.ops.push_back(now);
+        Ok(())
+    }
+
+    /// Audit an action that completed after its slot was reserved.
+    pub fn record(&self, action: &str, detail: serde_json::Value) {
         if let Some(path) = &self.audit_path {
             audit_append(path, action, detail);
         }
-        Ok(())
     }
 }
 
@@ -342,16 +349,37 @@ mod tests {
         let tmp = tempfile::TempDir::new().expect("temp dir");
         let audit = tmp.path().join("safety/audit.jsonl");
         let gate = SafetyGate::with_audit(2, Some(audit.clone()));
+        gate.arm(Duration::from_secs(1));
 
-        gate.record("t", serde_json::json!({})).expect("first op");
-        gate.record("t", serde_json::json!({})).expect("second op");
+        gate.reserve().expect("first attempt");
+        gate.record("t", serde_json::json!({}));
+        gate.reserve().expect("second attempt");
+        gate.record("t", serde_json::json!({}));
         assert!(matches!(
-            gate.record("t", serde_json::json!({})),
+            gate.reserve(),
             Err(CtlError::OpCapExceeded { .. })
         ));
 
         let lines = std::fs::read_to_string(&audit).expect("audit log written");
         assert_eq!(lines.lines().count(), 2, "only executed ops are audited");
+    }
+
+    #[test]
+    fn concurrent_reservations_cannot_exceed_cap() {
+        let gate = Arc::new(SafetyGate::with_audit(1, None));
+        gate.arm(Duration::from_secs(1));
+        let threads: Vec<_> = (0..8)
+            .map(|_| {
+                let gate = Arc::clone(&gate);
+                std::thread::spawn(move || gate.reserve().is_ok())
+            })
+            .collect();
+        let allowed = threads
+            .into_iter()
+            .map(|t| t.join().unwrap())
+            .filter(|allowed| *allowed)
+            .count();
+        assert_eq!(allowed, 1);
     }
 
     /// With no audit path the gate writes nothing at all - not the log, not even the directory
@@ -367,19 +395,20 @@ mod tests {
         let dir = audit.parent().expect("audit parent").to_path_buf();
 
         let quiet = SafetyGate::with_audit(1, None);
-        quiet.record("t", serde_json::json!({})).expect("first op");
+        quiet.arm(Duration::from_secs(1));
+        quiet.reserve().expect("first attempt");
+        quiet.record("t", serde_json::json!({}));
         assert!(
-            matches!(
-                quiet.record("t", serde_json::json!({})),
-                Err(CtlError::OpCapExceeded { .. })
-            ),
+            matches!(quiet.reserve(), Err(CtlError::OpCapExceeded { .. })),
             "the cap must still trip without an audit path"
         );
         assert!(!dir.exists(), "no audit path means no directory is created");
 
         // Same cap, same ops, only `audit_path` differs - and now the file is there.
         let loud = SafetyGate::with_audit(1, Some(audit.clone()));
-        loud.record("t", serde_json::json!({})).expect("first op");
+        loud.arm(Duration::from_secs(1));
+        loud.reserve().expect("first attempt");
+        loud.record("t", serde_json::json!({}));
         let lines = std::fs::read_to_string(&audit).expect("audit log written");
         assert_eq!(lines.lines().count(), 1);
     }

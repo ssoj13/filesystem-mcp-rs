@@ -180,14 +180,22 @@ fn key(vk_code: u16, flags: KEYBD_EVENT_FLAGS) -> INPUT {
 }
 
 /// Virtual-screen -> normalized absolute coords for ABSOLUTE|VIRTUALDESK.
-fn to_abs(x: i32, y: i32) -> (u32, u32) {
+fn to_abs(x: i32, y: i32) -> anyhow::Result<(u32, u32)> {
     let (vx, vy, vw, vh) = win::virtual_screen();
-    if vw < 2 || vh < 2 {
-        return (0, 0);
+    let in_bounds = vw >= 2
+        && vh >= 2
+        && i64::from(x) >= i64::from(vx)
+        && i64::from(y) >= i64::from(vy)
+        && i64::from(x) < i64::from(vx) + i64::from(vw)
+        && i64::from(y) < i64::from(vy) + i64::from(vh);
+    if !in_bounds {
+        return Err(anyhow::anyhow!(
+            "point ({x},{y}) is outside virtual screen ({vx},{vy},{vw},{vh})"
+        ));
     }
-    let nx = (((x - vx).max(0) as f64) * 65535.0 / (vw - 1) as f64) as u32;
-    let ny = (((y - vy).max(0) as f64) * 65535.0 / (vh - 1) as f64) as u32;
-    (nx.min(65535), ny.min(65535))
+    let nx = ((i64::from(x) - i64::from(vx)) as f64 * 65535.0 / (vw - 1) as f64) as u32;
+    let ny = ((i64::from(y) - i64::from(vy)) as f64 * 65535.0 / (vh - 1) as f64) as u32;
+    Ok((nx, ny))
 }
 
 /// Current focus (hwnd + title).
@@ -203,9 +211,20 @@ pub fn focus() -> FocusInfo {
     }
 }
 
+fn require_focus(expect: Option<u32>) -> anyhow::Result<()> {
+    if let Some(id) = expect {
+        let actual = focus().hwnd;
+        if actual != id {
+            return Err(anyhow::Error::new(CtlError::FocusFailed { hwnd: actual })
+                .context(format!("target window {id} lost foreground")));
+        }
+    }
+    Ok(())
+}
+
 /// Move-only hover (absolute virtual-screen coords).
 pub fn move_cursor(x: i32, y: i32) -> anyhow::Result<FocusInfo> {
-    let (nx, ny) = to_abs(x, y);
+    let (nx, ny) = to_abs(x, y)?;
     let batch = [mouse(
         MOUSEEVENTF_MOVE | MOUSEEVENTF_ABSOLUTE | MOUSEEVENTF_VIRTUALDESK,
         nx as i32,
@@ -213,12 +232,19 @@ pub fn move_cursor(x: i32, y: i32) -> anyhow::Result<FocusInfo> {
         0,
     )];
     send_batch(&batch)?;
-    if let Some((cx, cy)) = super::win::cursor_pos()
-        && (cx, cy) != (x, y)
-    {
-        tracing::warn!("cursor drift: wanted {x},{y} got {cx},{cy}");
-    }
+    verify_cursor(x, y)?;
     Ok(focus())
+}
+
+fn verify_cursor(x: i32, y: i32) -> anyhow::Result<()> {
+    let (cx, cy) =
+        win::cursor_pos().ok_or_else(|| anyhow::anyhow!("cannot read cursor position"))?;
+    if (i64::from(cx) - i64::from(x)).abs() > 2 || (i64::from(cy) - i64::from(y)).abs() > 2 {
+        return Err(anyhow::anyhow!(
+            "cursor did not reach ({x},{y}); actual ({cx},{cy})"
+        ));
+    }
+    Ok(())
 }
 
 /// Click: optional pre-move, N clicks (0 = hover only), optional modifier keys
@@ -232,16 +258,37 @@ pub fn click(
     clicks: u32,
     mods: &[VIRTUAL_KEY],
 ) -> anyhow::Result<FocusInfo> {
-    gate.check()?;
-    let pos = match (x, y) {
-        (Some(x), Some(y)) => move_cursor(x, y)?,
-        _ => focus(),
-    };
+    if clicks > 10 {
+        return Err(anyhow::anyhow!("clicks is limited to 10"));
+    }
+    gate.reserve()?;
+    let result = click_reserved(x, y, btn, clicks, mods)?;
+    gate.record(
+        if clicks == 0 {
+            "mouse_hover"
+        } else {
+            "mouse_click"
+        },
+        serde_json::json!({ "btn": btn, "clicks": clicks, "mods": mods.len(), "focus": result }),
+    );
+    Ok(result)
+}
+
+/// Called only after a slot has been reserved (UIA fallback shares its slot).
+pub(crate) fn click_reserved(
+    x: Option<i32>,
+    y: Option<i32>,
+    btn: Btn,
+    clicks: u32,
+    mods: &[VIRTUAL_KEY],
+) -> anyhow::Result<FocusInfo> {
+    if clicks > 10 {
+        return Err(anyhow::anyhow!("clicks is limited to 10"));
+    }
+    if let (Some(x), Some(y)) = (x, y) {
+        move_cursor(x, y)?;
+    }
     if clicks == 0 {
-        gate.record(
-            "mouse_hover",
-            serde_json::json!({ "pos": [pos.hwnd, pos.title] }),
-        )?;
         return Ok(focus());
     }
     let (down, up) = btn.flags();
@@ -258,11 +305,13 @@ pub fn click(
     for m in mods.iter().rev() {
         batch.push(key(m.0, KEYEVENTF_KEYUP));
     }
-    send_batch(&batch)?;
-    gate.record(
-        "mouse_click",
-        serde_json::json!({ "btn": btn, "clicks": clicks, "mods": mods.len(), "pos": [pos.hwnd, pos.title] }),
-    )?;
+    if let Err(err) = send_batch(&batch) {
+        // A partial batch may have delivered DOWN but missed UP.
+        let mut cleanup = vec![mouse(up, 0, 0, 0)];
+        cleanup.extend(mods.iter().rev().map(|m| key(m.0, KEYEVENTF_KEYUP)));
+        let _ = send_batch(&cleanup);
+        return Err(err);
+    }
     Ok(focus())
 }
 
@@ -278,60 +327,75 @@ pub fn drag(
     duration_ms: u32,
     ease: Ease,
     hold_ms: u32,
+    expect: Option<u32>,
 ) -> anyhow::Result<FocusInfo> {
-    gate.check()?;
+    if duration_ms > 30_000 || hold_ms > 30_000 || duration_ms.saturating_add(hold_ms) > 30_000 {
+        return Err(anyhow::anyhow!(
+            "drag duration plus hold must be at most 30000 ms"
+        ));
+    }
+    to_abs(from.0, from.1)?;
+    to_abs(to.0, to.1)?;
+    gate.reserve()?;
+    require_focus(expect)?;
     let (down, up) = btn.flags();
-    // Button-only events ignore dx/dy. Move to the requested start before pressing;
-    // otherwise the drag starts under the old cursor and only the later path moves.
+    // Hover for one frame so targets that resolve hover on redraw see the start.
     move_cursor(from.0, from.1)?;
+    if duration_ms > 0 {
+        std::thread::sleep(std::time::Duration::from_millis(16));
+    }
+    verify_cursor(from.0, from.1)?;
+    require_focus(expect)?;
     send_batch(&[mouse(down, 0, 0, 0)])?;
-    if hold_ms > 0 {
-        std::thread::sleep(std::time::Duration::from_millis(hold_ms as u64));
-    }
-    // Chunk count: ~16 ms per chunk when timed; a fixed density when instant.
-    let n = if duration_ms > 0 {
-        (duration_ms / 16).clamp(2, 200)
-    } else {
-        24
-    };
-    let chunk_sleep = if duration_ms > 0 {
-        std::time::Duration::from_millis((duration_ms / n).max(1) as u64)
-    } else {
-        std::time::Duration::ZERO
-    };
-    for i in 1..=n {
-        let t = i as f64 / n as f64;
-        let t = match ease {
-            Ease::Linear => t,
-            // Ease-out: fast start, decelerating arrival (quadratic).
-            Ease::Out => 1.0 - (1.0 - t) * (1.0 - t),
-        };
-        let x = from.0 as f64 + (to.0 - from.0) as f64 * t;
-        let y = from.1 as f64 + (to.1 - from.1) as f64 * t;
-        let (nx, ny) = to_abs(x as i32, y as i32);
-        let chunk = [mouse(
-            MOUSEEVENTF_MOVE | MOUSEEVENTF_ABSOLUTE | MOUSEEVENTF_VIRTUALDESK,
-            nx as i32,
-            ny as i32,
-            0,
-        )];
-        send_batch(&chunk)?;
-        if !chunk_sleep.is_zero() && i < n {
-            std::thread::sleep(chunk_sleep);
+    // Once DOWN succeeds, always attempt UP, including after a failed move.
+    let movement = (|| -> anyhow::Result<()> {
+        if hold_ms > 0 {
+            std::thread::sleep(std::time::Duration::from_millis(hold_ms as u64));
         }
+        crate::tools::computer::driver::follow_path(from, to, duration_ms, ease, |x, y| {
+            require_focus(expect)?;
+            let (nx, ny) = to_abs(x, y)?;
+            send_batch(&[mouse(
+                MOUSEEVENTF_MOVE | MOUSEEVENTF_ABSOLUTE | MOUSEEVENTF_VIRTUALDESK,
+                nx as i32,
+                ny as i32,
+                0,
+            )])
+        })?;
+        // Give the target one frame to observe the final point before release.
+        if duration_ms > 0 {
+            std::thread::sleep(std::time::Duration::from_millis(16));
+        }
+        verify_cursor(to.0, to.1)?;
+        Ok(())
+    })();
+    let release = send_batch(&[mouse(up, 0, 0, 0)]).or_else(|first| {
+        send_batch(&[mouse(up, 0, 0, 0)])
+            .map_err(|second| first.context(format!("button release retry failed: {second:#}")))
+    });
+    match (movement, release) {
+        (Err(move_err), Err(up_err)) => {
+            return Err(move_err.context(format!("button release also failed: {up_err:#}")));
+        }
+        (Err(move_err), Ok(())) => return Err(move_err),
+        (Ok(()), Err(up_err)) => return Err(up_err),
+        (Ok(()), Ok(())) => {}
     }
-    let end = [mouse(up, 0, 0, 0)];
-    send_batch(&end)?;
     gate.record(
         "mouse_drag",
         serde_json::json!({ "from": from, "to": to, "duration_ms": duration_ms, "ease": ease, "hold_ms": hold_ms }),
-    )?;
+    );
     Ok(focus())
 }
 
 /// Wheel scroll: `dy > 0` scrolls down, `dx > 0` scrolls right.
 pub fn scroll(gate: &SafetyGate, dy: i32, dx: i32) -> anyhow::Result<FocusInfo> {
-    gate.check()?;
+    if dy.unsigned_abs() > 100 || dx.unsigned_abs() > 100 {
+        return Err(anyhow::anyhow!(
+            "scroll magnitude is limited to 100 notches per axis"
+        ));
+    }
+    gate.reserve()?;
     let mut batch = Vec::new();
     if dy != 0 {
         // Windows wheel: positive delta = up, so invert for "dy>0 = down".
@@ -351,14 +415,14 @@ pub fn scroll(gate: &SafetyGate, dy: i32, dx: i32) -> anyhow::Result<FocusInfo> 
         ));
     }
     send_batch(&batch)?;
-    gate.record("mouse_scroll", serde_json::json!({ "dy": dy, "dx": dx }))?;
+    gate.record("mouse_scroll", serde_json::json!({ "dy": dy, "dx": dx }));
     Ok(focus())
 }
 
 /// Press a combo like "ctrl+shift+t". `hold_ms > 0` holds the main key down
 /// between two batches (down / hold / up).
 pub fn key_tap(gate: &SafetyGate, combo: &str, hold_ms: u32) -> anyhow::Result<FocusInfo> {
-    gate.check()?;
+    gate.reserve()?;
     let codes = parse_combo(combo)?;
     let downs: Vec<INPUT> = codes
         .iter()
@@ -369,19 +433,31 @@ pub fn key_tap(gate: &SafetyGate, combo: &str, hold_ms: u32) -> anyhow::Result<F
         .rev()
         .map(|c| key(c.0, KEYEVENTF_KEYUP))
         .collect();
+    if hold_ms > 30_000 {
+        return Err(anyhow::anyhow!("key hold is limited to 30000 ms"));
+    }
     if hold_ms == 0 {
         let mut batch = downs;
-        batch.extend(ups);
-        send_batch(&batch)?;
+        batch.extend_from_slice(&ups);
+        if let Err(err) = send_batch(&batch) {
+            let _ = send_batch(&ups);
+            return Err(err);
+        }
     } else {
-        send_batch(&downs)?;
+        if let Err(err) = send_batch(&downs) {
+            let _ = send_batch(&ups);
+            return Err(err);
+        }
         std::thread::sleep(std::time::Duration::from_millis(hold_ms as u64));
-        send_batch(&ups)?;
+        if let Err(err) = send_batch(&ups) {
+            let _ = send_batch(&ups);
+            return Err(err);
+        }
     }
     gate.record(
         "key_tap",
         serde_json::json!({ "combo": combo, "hold_ms": hold_ms }),
-    )?;
+    );
     Ok(focus())
 }
 
@@ -411,7 +487,19 @@ pub fn type_text(
     interval_ms: u32,
     expect_hwnd: Option<u32>,
 ) -> anyhow::Result<TypeResult> {
-    gate.check()?;
+    if text.len() > 1_048_576 {
+        return Err(anyhow::anyhow!("text is limited to 1 MiB"));
+    }
+    let units = text.encode_utf16().count();
+    if !paste && units > 4096 {
+        return Err(anyhow::anyhow!(
+            "Unicode typing is limited to 4096 UTF-16 units; use paste for longer text"
+        ));
+    }
+    if !paste && (units as u64).saturating_mul(interval_ms as u64) > 30_000 {
+        return Err(anyhow::anyhow!("Unicode typing interval exceeds 30000 ms"));
+    }
+    gate.reserve()?;
     let chars = text.chars().count();
     if paste {
         let cur = focus();
@@ -445,8 +533,19 @@ pub fn type_text(
             key(b'V' as u16, KEYEVENTF_KEYUP),
             key(VK_CONTROL.0, KEYEVENTF_KEYUP),
         ];
-        send_batch(&batch)?;
-        std::thread::sleep(std::time::Duration::from_millis(PASTE_SETTLE_MS));
+        let sent = require_focus(expect_hwnd).and_then(|()| {
+            let sent = send_batch(&batch);
+            if sent.is_err() {
+                let _ = send_batch(&[
+                    key(b'V' as u16, KEYEVENTF_KEYUP),
+                    key(VK_CONTROL.0, KEYEVENTF_KEYUP),
+                ]);
+            }
+            sent
+        });
+        if sent.is_ok() {
+            std::thread::sleep(std::time::Duration::from_millis(PASTE_SETTLE_MS));
+        }
         // Interloper guard: if the clipboard no longer holds OUR text, a
         // concurrent writer landed between set and restore (human sharing the
         // desktop). Restoring the snapshot would clobber THEIR newer data —
@@ -468,10 +567,11 @@ pub fn type_text(
             }
             ok
         };
+        sent?;
         gate.record(
             "key_type",
             serde_json::json!({ "mode": "paste", "chars": chars }),
-        )?;
+        );
         return Ok(TypeResult {
             mode: "paste",
             chars,
@@ -482,11 +582,15 @@ pub fn type_text(
     // Unicode path: KEYEVENTF_UNICODE events (layout-independent; UTF-16 units
     // for astral chars). One batch per char when pacing is requested.
     for unit in text.encode_utf16() {
+        require_focus(expect_hwnd)?;
         let batch = [
             key_scan(unit, KEYEVENTF_UNICODE),
             key_scan(unit, KEYEVENTF_UNICODE | KEYEVENTF_KEYUP),
         ];
-        send_batch(&batch)?;
+        if let Err(err) = send_batch(&batch) {
+            let _ = send_batch(&[key_scan(unit, KEYEVENTF_UNICODE | KEYEVENTF_KEYUP)]);
+            return Err(err);
+        }
         if interval_ms > 0 {
             std::thread::sleep(std::time::Duration::from_millis(interval_ms as u64));
         }
@@ -494,7 +598,7 @@ pub fn type_text(
     gate.record(
         "key_type",
         serde_json::json!({ "mode": "unicode", "chars": chars }),
-    )?;
+    );
     Ok(TypeResult {
         mode: "unicode",
         chars,
