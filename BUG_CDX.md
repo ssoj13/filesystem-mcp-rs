@@ -63,3 +63,19 @@ Reproduction: call `mcp__filesystem_mcp_rs__run_command({command: "python", args
 Observed impact: after 300 seconds, the tool returned `timed out awaiting tools/call after 300s` with a full internal `Stack backtrace`, despite the requested 900,000 ms timeout. The spawned `python bootstrap.py` process (PID 45632) and child `cargo x build` process (PID 48236) continued running after that response. The caller lost the command's exit status and log handle, and a retry could overlap the active build.
 
 Safe fallback: start the build detached with explicit stdout and stderr file paths, then poll its process and log files until it exits. Check for an existing build before starting another. The tool should honor the requested timeout or return a durable process handle without exposing an internal stack trace.
+
+## 2026-09-22 — edit_file no-match error exposes an internal stack trace
+
+Reproduction: call `mcp__filesystem_mcp_rs__edit_file` on `crates/cryptobot-nodes/src/pipeline.rs` with a literal `oldText` that differs from the file after rustfmt (for example, an expected multiline `scene.get("tmp.archive.remaining")` layout). A zero-match edit is an expected caller error.
+
+Observed impact: the tool returns `Failed to apply edits: 1 of 1 edits produced zero matches` and then a full internal `Stack backtrace` beginning with `aws_lc_0_39_0_jent_entropy_switch_notime_impl`.
+
+Safe fallback: re-read the current lines and retry with an exact literal match. The server should return a concise no-match result without its internal stack trace.
+
+## 2026-09-22 — memory cross-scope target error exposes an internal stack trace
+
+Reproduction: create a memory item under `workspaceId: "C:\\projects\\projects.rust.cg\\cgprojs\\cryptobot-rs"` with `mem_put`. Then call `mcp__filesystem_mcp_rs__mem_link({workspaceId:"C:\\projects\\projects.rust.cg\\cgprojs\\cryptobot-rs",actorId:"codex:/root",relation:{fromItemId:"818635ce-582f-4db3-9143-e135fd4a4bd2",relationType:"continues",toItemId:"be9f5b43-39e2-450e-8749-5f4cda9f3e12"}})`. The source item exists in the absolute-path workspace; the target item exists under the distinct `cryptobot-rs` workspace. A scope not-found result is expected. A repeat with another target UUID from the other workspace produced the same class of error.
+
+Observed impact: instead of a concise scope error, the tool returns MCP `-32603` with `toItemId ... not found in scope` and a full internal `Stack backtrace` (24 frames). The caller learns internal stack details for a routine invalid relation.
+
+Safe fallback: use one canonical `workspaceId` for related items, verify each item's scope with `mem_get`, and avoid links across workspaces. The server should report the expected scoped not-found error without a backtrace.
