@@ -24,6 +24,8 @@ Observed impact: the validation error reports the `$root` token and then appends
 
 Safe fallback: pass the PowerShell script as a `stdin` ContentRef with `args: ["-NoProfile", "-Command", "-"]`. Return validation errors without internal stack traces.
 
+Additional reproduction (2026-09-22 PDT): call `run_command` with `command: "powershell"`, `args: ["-NoProfile", "-Command", <inline script containing $exe, $repo, and $p>]`. Two attempts returned the expected MCP `-32602` safety rejection, but also a full internal `Stack backtrace` containing `aws_lc_0_39_0_jent_entropy_switch_notime_impl` and OS frames. No process was spawned. Pass the script through `stdin: {kind: "inline", text: script}` with `args: ["-NoProfile", "-Command", "-"]`, or use a script file.
+
 ## 2026-09-22 — memory relation scope error exposes an internal stack trace
 
 Reproduction: call `mcp__filesystem_mcp_rs__mem_link` with `workspaceId: "C:\\projects\\projects.rust.cg\\cgprojs\\cryptobot-rs"`, `actorId: "codex-root"`, and `relation: {fromItemId: "a121eafa-ecd8-4137-8f5d-3ec13f464666", toItemId: "db972c3b-a49b-4029-87e9-88f1a0e53d32", relationType: "continued_by"}`. The first item is absent from that actor scope, so a not-found error is expected.
@@ -71,6 +73,8 @@ Reproduction: call `mcp__filesystem_mcp_rs__edit_file` on `crates/cryptobot-node
 Observed impact: the tool returns `Failed to apply edits: 1 of 1 edits produced zero matches` and then a full internal `Stack backtrace` beginning with `aws_lc_0_39_0_jent_entropy_switch_notime_impl`.
 
 Safe fallback: re-read the current lines and retry with an exact literal match. The server should return a concise no-match result without its internal stack trace.
+
+Additional reproduction (2026-09-22 PDT): send a three-edit literal `edit_file` request against `cryptobot-rs/crates/cryptobot-core/src/jobs/redb_store.rs`. In the third edit, use `oldText` containing `b"_- ."` where the source at the time contained `b"_-."`. The expected response is a clean no-match error without applying any of the three edits. The observed response reports the no-match and includes a full internal stack trace with `aws_lc` entropy and OS frames. This exposes implementation details for an ordinary caller typo. Re-read the exact current lines and retry with corrected literal text; verify the file before retrying so no partial write is accepted.
 
 ## 2026-09-22 — memory cross-scope target error exposes an internal stack trace
 
