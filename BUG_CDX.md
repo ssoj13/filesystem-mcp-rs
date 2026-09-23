@@ -39,3 +39,27 @@ Reproduction: call `mcp__filesystem_mcp_rs__mem_update` with `workspaceId: "cryp
 Observed impact: the tool returns the expected not-found message followed by a full internal `Stack backtrace` beginning with `aws_lc_0_39_0_jent_entropy_switch_notime_impl`.
 
 Safe fallback: create a new memory item in the intended scope with `mem_put`, or resolve the original scope before `mem_update`. Return a concise scope error without an internal stack trace.
+
+## 2026-09-22 — search_processes validation exposes an internal stack trace
+
+Reproduction: call `mcp__filesystem_mcp_rs__search_processes({pattern: "cargo|nvcc|cl.exe"})`. The tool requires `name_pattern` or `cmdline_pattern`; using `pattern` is an expected caller error.
+
+Observed impact: the tool returns MCP error `-32602` explaining that both supported filters are absent, then exposes a full internal `Stack backtrace` containing `aws_lc_0_39_0_jent_entropy_switch_notime_impl`.
+
+Safe fallback: call `search_processes({name_pattern: "cargo|nvcc|cl\\.exe"})` or set `cmdline_pattern`. Return the validation error without a stack trace.
+
+## 2026-09-22 — grep_context validation exposes an internal stack trace
+
+Reproduction: call `mcp__filesystem_mcp_rs__grep_context({path: "C:\\projects\\projects.rust.cg\\cgprojs\\cryptobot-rs\\Cargo.lock", pattern: 'name = "cudaforge"', before: 1, after: 10})`. The tool requires nonempty `nearbyPatterns`; `before` and `after` are not its context argument names. This is an expected caller error.
+
+Observed impact: the tool returns MCP error `-32602` explaining the missing nearby terms, then exposes a full internal `Stack backtrace` containing `aws_lc_0_39_0_jent_entropy_switch_notime_impl`.
+
+Safe fallback: call `grep_files` for a plain search, or supply `nearbyPatterns` and use `contextBefore`/`contextAfter`. Return the validation error without a stack trace.
+
+## 2026-09-22 — managed run_command times out before its requested deadline
+
+Reproduction: call `mcp__filesystem_mcp_rs__run_command({command: "python", args: ["bootstrap.py", "build", "--debug"], cwd: "C:\\projects\\projects.rust.cg\\cgprojs\\cryptobot-rs", mode: "managed", timeoutMs: 900000, streamOutput: false})` while building the project.
+
+Observed impact: after 300 seconds, the tool returned `timed out awaiting tools/call after 300s` with a full internal `Stack backtrace`, despite the requested 900,000 ms timeout. The spawned `python bootstrap.py` process (PID 45632) and child `cargo x build` process (PID 48236) continued running after that response. The caller lost the command's exit status and log handle, and a retry could overlap the active build.
+
+Safe fallback: start the build detached with explicit stdout and stderr file paths, then poll its process and log files until it exits. Check for an existing build before starting another. The tool should honor the requested timeout or return a durable process handle without exposing an internal stack trace.
