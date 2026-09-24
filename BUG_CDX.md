@@ -102,6 +102,8 @@ Observed impact: the tool rejects the call with MCP `-32602`, claiming `command/
 
 Safe fallback: use filesystem MCP `read_text_file` to read `Cargo.lock` and parse it in the tool orchestration JavaScript, or place the PowerShell script in a file and invoke that file through `run_command`. The server should accept valid scripts or provide an equivalent safe script input without exposing internal frames.
 
+Additional reproduction (2026-09-23 PDT): call `mcp__filesystem__run_command({command:"powershell",args:["-NoProfile","-Command","$f=Get-Content src/ntfs.rs; $f[385..445]; $f=Get-Content src/lib.rs; $f[0..75]"],cwd:"C:\\projects\\projects.rust.cg\\cglibs\\fscan-rs",shell:"none"})`. The valid read-only script was rejected with MCP `-32602` and a 24-line internal `Stack backtrace`; the command did not execute. Safe fallback: use `read_text_file` for the two source ranges. This is the same `$NAME` validation defect and stack disclosure.
+
 ## 2026-09-23 — managed run_command ends at 300 seconds despite 30-minute timeout
 
 Reproduction: call `mcp__filesystem__run_command({command:"python bootstrap.py b",cwd:"C:\\projects\\projects.rust.cg\\cglibs\\squarebob-rs",mode:"managed",timeoutMs:1800000,outputFilter:{include:["error","warning","failed","Compiling","BUILD","Updating","Finished"],maxLines:80},stderrTail:40,stdoutTail:20})` while the command runs longer than five minutes.
