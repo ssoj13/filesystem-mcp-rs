@@ -23,6 +23,7 @@ Crate version is still **0.2.1**; everything after that lives on `main` as Unrel
 - **`rmcp` 3.4.0.** `ServerHandler::get_info` returns `ServerConfig` (`ServerInfo` was a deprecated alias). `cargo install --path . --locked` keeps the binary on the lockfile.
 - **`computer-tools` is a default feature**; `--list-env` and `install` both come from `src/env_spec.rs`. Blank env values mean unset. `install` snapshots `PATH`.
 - **Locate name index:** `locate_search`, `locate_refresh`, and `locate_status` use the shared `filesystem-locate` crate and the private GitHub `fscan-rs` scanner. Multiple server processes share the SQLite index; one worker scans while other clients can search or queue requests.
+- **`filesystem-locate` is eight files, not one:** the 2154-line `lib.rs` split into `types`/`db`/`roots`/`time_util`/`worker`/`indexer`/`tests`, same behavior — `cargo test -p filesystem-locate` and `clippy -D warnings` both pass unchanged.
 
 ### [0.2.1](CHANGELOG.md#021---2026-08-29) — 2026-08-29
 
