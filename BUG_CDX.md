@@ -112,6 +112,8 @@ Observed impact: after about 300 seconds the tool returned MCP `timed out awaiti
 
 Safe fallback: if available, run long work in detached mode with explicit output log paths, then poll process status and logs until exit. Before retrying, inspect whether the original command or child processes are still running; do not kill unrelated processes. The server should honor the requested timeout or return a durable process handle without exposing an internal stack trace.
 
+Additional reproduction (2026-09-23 PDT, `cryptobot-rs`): call `mcp__filesystem_mcp_rs__run_command` in `mode:"sync"` for `target\\release\\cryptobot.exe backtest --csv data/candles --from 2019-01-01 --until 2019-01-08 --sweep-mode rsi,trend,combo --sweep-workers 2 --trailing --stop-loss --cooldown --daily-loss`, with `timeoutMs:900000`, `stdoutFile:"target\\plan16-train-week.out"`, and `stderrFile:"target\\plan16-train-week.err"`. After 300 seconds the MCP call returned `timed out awaiting tools/call after 300s` and an internal stack trace. A subsequent `search_processes` found the exact `cryptobot.exe` command still running as PID 37604; its output logs remained readable. Impact: the caller lost the exit status and could accidentally start a duplicate expensive backtest if it retried blindly. Safe fallback: check the exact process command line and logs, let that process finish, then use detached mode and short process/log polls for future long runs. This confirms the existing 300-second timeout defect also affects `mode:"sync"` while the child can survive the MCP timeout.
+
 ## 2026-09-23 — search_processes parameter validation exposes an internal stack trace
 
 Reproduction: call `mcp__filesystem_mcp_rs__search_processes({pattern:"cargo|rustc"})`. The documented arguments are `name_pattern` and `cmdline_pattern`; `pattern` is an invalid caller argument.
@@ -145,3 +147,11 @@ Reproduction: call `mcp__filesystem__grep_context({path:"C:/projects/projects.ru
 Observed impact: the tool returned MCP `-32602` for the missing nearby terms and appended a full internal `Stack backtrace`. The requested source inspection did not run.
 
 Safe fallback: use `grep_files` for a plain context search, or call `grep_context` with nonempty `nearbyPatterns` and its documented `contextBefore`/`contextAfter` arguments. The server should return a concise validation error without internal frames.
+
+## 2026-09-23 — grep_files invalid regex exposes internal stack trace
+
+Reproduction: call `tools.mcp__filesystem__grep_files({path:"C:/projects/projects.rust.cg/cglibs/osl-rs/src",pattern:"optimize(",maxMatches:80})`. The unclosed group in `optimize(` is an invalid caller pattern; a regex parse error is expected.
+
+Observed impact: the tool returned MCP `-32603` with `Grep failed: Invalid regex pattern: ... unclosed group` and a full internal `Stack backtrace` (frames 0–18). Source inspection did not run. The server defect is the internal stack disclosure for an ordinary invalid query.
+
+Safe fallback: escape the parenthesis as `optimize\\(` or use a literal-safe search, then verify the matches. The server should return a concise regex error without internal frames.
