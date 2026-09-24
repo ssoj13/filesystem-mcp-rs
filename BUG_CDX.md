@@ -155,3 +155,11 @@ Reproduction: call `tools.mcp__filesystem__grep_files({path:"C:/projects/project
 Observed impact: the tool returned MCP `-32603` with `Grep failed: Invalid regex pattern: ... unclosed group` and a full internal `Stack backtrace` (frames 0–18). Source inspection did not run. The server defect is the internal stack disclosure for an ordinary invalid query.
 
 Safe fallback: escape the parenthesis as `optimize\\(` or use a literal-safe search, then verify the matches. The server should return a concise regex error without internal frames.
+
+## 2026-09-23 — edit_file joins the following CRLF line after a multiline replacement
+
+Reproduction: on `cryptobot-rs/AGENTS.md` (CRLF working copy), call `mcp__filesystem_mcp_rs__edit_file` with `oldText: "      -> commit_pending_orders -> paper broker -> wallet sample -> inference_tick_at"` and `newText: "      -> commit_pending_orders -> JobFilter.terminal=false before clone/sort\n      -> paper broker -> wallet sample -> inference_tick_at"`. Read lines 319–321 afterward with `read_text_file`.
+
+Observed impact: the replacement unexpectedly joined the next existing line, yielding `-> inference_tick_at     -> scoped or legacy equity sample...` on one line. A second `edit_file` attempt to repair the two lines again joined the following `-> Report` line. The tool returned a successful diff both times; without a readback, a dataflow diagram would have remained malformed. This was a valid literal replacement, so the join is a tool defect rather than an invalid caller argument.
+
+Safe fallback: use `edit_lines` with explicit `line` and `endLine` for multiline changes on CRLF files, then immediately read the affected lines and check `git diff --check`. That operation repaired the diagram without joining the next line.
