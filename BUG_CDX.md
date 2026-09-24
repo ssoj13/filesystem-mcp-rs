@@ -127,3 +127,21 @@ Reproduction: in two independent `osl-rs` subagent scopes, inspect advertised ca
 Observed impact: two delegates could not use the mandatory filesystem, memory, or sequential-thinking MCP tools. This is a per-agent capability routing/availability defect, not evidence of a filesystem-mcp-rs server-wide outage. No internal server stack trace was observed for this case.
 
 Safe fallback: route mandatory MCP operations through a team agent whose MCP calls work, or use read-only PowerShell inspection temporarily and have the working agent perform verified writes. Preserve the affected agents' capability listings and call results; compare initialization and routing across agent scopes.
+
+Additional reproduction (2026-09-23): the `/root/hash_dedup` subagent called `tools.mcp__filesystem__run_command({command:'cargo',args:['fmt','--all'],cwd:'C:\\projects\\projects.rust.cg\\cglibs\\osl-rs',mode:'sync',timeoutMs:120000})` and received `MCP tool filesystem/run_command is not available to the model`. Calling the alias `mcp__filesystem_mcp_rs__run_command` returned `MCP tool filesystem-mcp-rs/run_command is not available to the model`. Its `ALL_TOOLS` listing had no `mcp__filesystem` entries, and `read_text_file` invocation raised `TypeError: ... is not a function`. The root agent still had MCP access and ran `cargo fmt --all` through it. Impact: the delegate could not perform mandatory MCP formatting verification. Safe fallback: have the root or another agent with working MCP perform the file and shell calls; do not treat this as a server-wide outage or bypass an active MCP session lock.
+
+## 2026-09-23 — edit_file unsupported regex backreference exposes internal stack trace
+
+Reproduction: call `mcp__filesystem__edit_file` with `path: "C:/projects/projects.rust.cg/cglibs/osl-rs/src/optimizer.rs"` and one edit with `isRegex: true`, `replaceAll: true`, `oldText: "(make_inert_nop\\(&mut ir\\.opcodes\\[([^\\]]+)\\]\\);)\\n\\s*ir\\.opcodes\\[\\2\\]\\.nargs = 0;"`, and `newText: "$1"`. The Rust regex engine does not support the `\\2` backreference, so rejection of the pattern is an expected caller error.
+
+Observed impact: the tool returned MCP `-32603` for the unsupported backreference and appended a full internal `Stack backtrace`. A routine invalid pattern exposed implementation details and obscured whether any edit occurred.
+
+Safe fallback: read the exact current lines and use literal `oldText`/`newText` edits or a supported regex without backreferences; verify the file after the call. The server should report the regex error without internal frames.
+
+## 2026-09-23 — grep_context missing nearbyPatterns exposes internal stack trace
+
+Reproduction: call `mcp__filesystem__grep_context({path:"C:/projects/projects.rust.cg/cglibs/osl-rs/src/symbol.rs",pattern:"fn reset",contextLines:12})`. This omits the required `nearbyPatterns`; the invalid argument is an expected caller error.
+
+Observed impact: the tool returned MCP `-32602` for the missing nearby terms and appended a full internal `Stack backtrace`. The requested source inspection did not run.
+
+Safe fallback: use `grep_files` for a plain context search, or call `grep_context` with nonempty `nearbyPatterns` and its documented `contextBefore`/`contextAfter` arguments. The server should return a concise validation error without internal frames.
