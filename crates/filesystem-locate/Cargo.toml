@@ -1,0 +1,20 @@
+[package]
+name = "filesystem-locate"
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+description = "Shared, coalescing filesystem name index for local processes"
+
+[dependencies]
+anyhow = "1"
+fscan-rs = { git = "ssh://git@github.com/ssoj13/fscan-rs.git", rev = "aa0185f8a45dcf3ad949d97b88b5950009444cb2" }
+globset = "0.4"
+regex = "1"
+rusqlite = { version = "0.40", features = ["bundled"] }
+tracing = "0.1"
+
+[target.'cfg(windows)'.dependencies]
+windows = { version = "0.62", features = ["Win32_Foundation", "Win32_System_Threading"] }
+
+[dev-dependencies]
+tempfile = "3"

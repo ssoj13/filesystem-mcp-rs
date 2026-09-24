@@ -117,3 +117,11 @@ Reproduction: call `mcp__filesystem_mcp_rs__search_processes({pattern:"cargo|rus
 Observed impact: the server returns `-32602: search_processes was called with neither name_pattern nor cmdline_pattern` followed by a full internal `Stack backtrace` (20 frames, including `aws_lc_0_39_0_jent_entropy_switch_notime_impl` and OS thread frames). The invalid argument is an expected user error; exposing the stack is the server defect and adds noise and implementation details to the result.
 
 Safe fallback: call `search_processes({name_pattern:"cargo|rustc"})`, which succeeds. The server should return a concise validation error without a backtrace.
+
+## 2026-09-23 — filesystem MCP capabilities unavailable to two team agents
+
+Reproduction: in two independent `osl-rs` subagent scopes, inspect advertised capabilities and invoke `tools.mcp__filesystem__read_text_file`, `tools.mcp__filesystem__mem_get_summary`, or `tools.mcp__filesystem__seq_think` through `functions.exec`. The capabilities appeared in metadata, but invocation returned `TypeError: tools.mcp__filesystem__read_text_file is not a function` or `MCP tool not available to model`; the same class of failure affected the memory and sequential-thinking calls. The root agent and a third documentation subagent successfully invoked the filesystem MCP during the same team task.
+
+Observed impact: two delegates could not use the mandatory filesystem, memory, or sequential-thinking MCP tools. This is a per-agent capability routing/availability defect, not evidence of a filesystem-mcp-rs server-wide outage. No internal server stack trace was observed for this case.
+
+Safe fallback: route mandatory MCP operations through a team agent whose MCP calls work, or use read-only PowerShell inspection temporarily and have the working agent perform verified writes. Preserve the affected agents' capability listings and call results; compare initialization and routing across agent scopes.

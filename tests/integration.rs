@@ -42,10 +42,21 @@ fn sha256_hex(bytes: &[u8]) -> String {
 /// (`core::paths::resolve_root` rejects a relative one at startup), which `TempDir` always is.
 /// The directory is owned by the returned handle so it outlives the process that is using it.
 async fn spawn_server(args: &[&str]) -> Result<ServerHandle> {
+    spawn_server_with_background(args, false).await
+}
+
+async fn spawn_server_with_background(args: &[&str], background: bool) -> Result<ServerHandle> {
     let state = TempDir::new()?;
     let mut cmd = Command::new(assert_cmd());
     cmd.args(args)
         .env("FS_MCP_STATE_DIR", state.path())
+        .env(
+            "FS_MCP_LOCATE_BACKGROUND",
+            if background { "on" } else { "off" },
+        )
+        .env("FS_MCP_LOCATE_BACKGROUND_START_DELAY_MS", "0")
+        .env("FS_MCP_LOCATE_BACKGROUND_INTERVAL_SECS", "1")
+        .env("FS_MCP_LOCATE_BACKGROUND_PAUSE_MS", "0")
         .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::inherit());
@@ -56,6 +67,7 @@ async fn spawn_server(args: &[&str]) -> Result<ServerHandle> {
 
     let (tx_out, mut rx_out) = mpsc::channel::<serde_json::Value>(32);
     let pending: PendingMap = Arc::new(Mutex::new(HashMap::new()));
+    let notifications = Arc::new(Mutex::new(Vec::new()));
 
     // Writer task
     tokio::spawn(async move {
@@ -71,16 +83,19 @@ async fn spawn_server(args: &[&str]) -> Result<ServerHandle> {
     // Reader task
     {
         let pending = pending.clone();
+        let notifications = notifications.clone();
         tokio::spawn(async move {
             let mut reader = BufReader::new(stdout).lines();
             while let Ok(Some(line)) = reader.next_line().await {
-                if let Ok(v) = serde_json::from_str::<serde_json::Value>(&line)
-                    && let Some(id) = v.get("id").and_then(|x| x.as_str())
-                    && let Some(waiter) = pending.lock().await.remove(id)
-                {
-                    let _ = waiter.send(v);
+                if let Ok(v) = serde_json::from_str::<serde_json::Value>(&line) {
+                    if let Some(id) = v.get("id").and_then(|x| x.as_str()) {
+                        if let Some(waiter) = pending.lock().await.remove(id) {
+                            let _ = waiter.send(v);
+                        }
+                    } else {
+                        notifications.lock().await.push(v);
+                    }
                 }
-                // Notifications without id are ignored
             }
         });
     }
@@ -89,6 +104,7 @@ async fn spawn_server(args: &[&str]) -> Result<ServerHandle> {
         child,
         tx_out,
         pending,
+        notifications,
         _state: state,
     })
 }
@@ -99,6 +115,7 @@ struct ServerHandle {
     child: Child,
     tx_out: mpsc::Sender<serde_json::Value>,
     pending: PendingMap,
+    notifications: Arc<Mutex<Vec<serde_json::Value>>>,
     /// The child's private state root. Held to keep it on disk for the server's lifetime;
     /// dropping it early would delete the directory out from under a running process. Also read
     /// after the child exits, by the test that inspects the counters file it leaves behind.
@@ -198,6 +215,265 @@ fn assert_err(res: &serde_json::Value) {
         return;
     }
     assert!(res["result"]["is_error"].as_bool().unwrap_or(false));
+}
+
+#[cfg(feature = "locate-tools")]
+#[tokio::test]
+async fn locate_tools_refresh_and_search_through_stdio() -> Result<()> {
+    let tmp = TempDir::new()?;
+    std::fs::write(tmp.path().join("indexed-alpha.txt"), b"index me")?;
+    let srv = start_server(tmp.path()).await?;
+
+    let refresh = srv
+        .call_tool(
+            "locate_refresh",
+            json!({ "path": tmp.path(), "requestId": "integration-refresh", "waitMs": 30_000 }),
+        )
+        .await?;
+    assert_ok(&refresh);
+    assert_eq!(refresh["result"]["structuredContent"]["status"], "complete");
+
+    let search = srv
+        .call_tool(
+            "locate_search",
+            json!({ "path": tmp.path(), "query": "indexed-alpha", "mode": "prefix" }),
+        )
+        .await?;
+    assert_ok(&search);
+    let matches = search["result"]["structuredContent"]["matches"]
+        .as_array()
+        .unwrap();
+    assert_eq!(matches.len(), 1);
+    assert_eq!(
+        matches[0]["path"],
+        json!(std::fs::canonicalize(tmp.path())?.join("indexed-alpha.txt"))
+    );
+    srv.kill().await;
+    Ok(())
+}
+
+#[cfg(feature = "locate-tools")]
+#[tokio::test]
+async fn locate_background_scan_starts_from_mcp_env_and_reports_status() -> Result<()> {
+    let tmp = TempDir::new()?;
+    std::fs::write(tmp.path().join("background-needle.txt"), b"found")?;
+    let srv =
+        spawn_server_with_background(&["--no-session-footer", tmp.path().to_str().unwrap()], true)
+            .await?;
+    let init = srv
+        .request(
+            "initialize",
+            json!({
+                "protocolVersion": "2025-06-18",
+                "capabilities": {},
+                "clientInfo": { "name": "test", "version": "1" }
+            }),
+        )
+        .await?;
+    assert!(init.get("error").is_none());
+    srv.notify("notifications/initialized", json!({})).await?;
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(15);
+    let status = loop {
+        let result = srv
+            .call_tool("locate_status", json!({"path": tmp.path()}))
+            .await?;
+        assert_ok(&result);
+        let status = result["result"]["structuredContent"].clone();
+        if status["state"] == "ready" || tokio::time::Instant::now() >= deadline {
+            break status;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+    };
+    assert_eq!(status["state"], "ready");
+    assert_eq!(status["background"], true);
+    assert_eq!(status["progress"]["attemptState"], "complete");
+    assert!(status["progress"]["entriesSeen"].as_u64().unwrap() >= 1);
+    let followed = srv
+        .request(
+            "tools/call",
+            json!({
+                "name": "locate_status",
+                "arguments": {"path": tmp.path(), "waitMs": 1000},
+                "_meta": {"progressToken": "background-probe"}
+            }),
+        )
+        .await?;
+    assert_ok(&followed);
+    assert!(srv.notifications.lock().await.iter().any(|notification| {
+        notification["method"] == "notifications/progress"
+            && notification["params"]["progressToken"] == "background-probe"
+    }));
+    let result = srv
+        .call_tool(
+            "locate_search",
+            json!({"path": tmp.path(), "query": "background-needle.txt", "mode": "exact", "kind": "files"}),
+        )
+        .await?;
+    assert_ok(&result);
+    assert_eq!(
+        result["result"]["structuredContent"]["matches"]
+            .as_array()
+            .unwrap()
+            .len(),
+        1
+    );
+    srv.kill().await;
+    Ok(())
+}
+
+#[cfg(feature = "locate-tools")]
+#[tokio::test]
+async fn locate_search_combines_roots_and_fragment_rules() -> Result<()> {
+    let tmp = TempDir::new()?;
+    let left = tmp.path().join("left");
+    let right = tmp.path().join("right");
+    std::fs::create_dir(&left)?;
+    std::fs::create_dir(&right)?;
+    std::fs::write(left.join("report-2026-final.pdf"), b"yes")?;
+    std::fs::write(left.join("report-2026-final-draft.pdf"), b"no")?;
+    std::fs::write(right.join("report-2026-final.pdf"), b"yes")?;
+    let srv = start_server(tmp.path()).await?;
+    let search = srv
+        .call_tool(
+            "locate_search",
+            json!({
+                "paths": [&left, &right, &left],
+                "filters": {
+                    "name": {"include": ["2026", "report", "final"], "exclude": ["draft"]},
+                    "extension": {"include": ["pdf"], "exclude": ["txt"]},
+                    "path": {"include": ["report"], "exclude": ["archive"]}
+                },
+                "waitMs": 30_000
+            }),
+        )
+        .await?;
+    assert_ok(&search);
+    let data = &search["result"]["structuredContent"];
+    assert_eq!(data["matches"].as_array().unwrap().len(), 2);
+    assert_eq!(data["indexes"].as_array().unwrap().len(), 2);
+    assert_eq!(data["indexState"], "ready");
+    let by_path = srv
+        .call_tool(
+            "locate_search",
+            json!({"path": tmp.path(), "kind": "files", "filters": {"path": {"include": ["right"], "exclude": ["archive"]}}, "waitMs": 30_000}),
+        )
+        .await?;
+    assert_ok(&by_path);
+    assert_eq!(
+        by_path["result"]["structuredContent"]["matches"]
+            .as_array()
+            .unwrap()
+            .len(),
+        1
+    );
+    let dirs = srv
+        .call_tool(
+            "locate_search",
+            json!({"path": tmp.path(), "kind": "directories", "query": "right", "mode": "exact"}),
+        )
+        .await?;
+    assert_ok(&dirs);
+    assert_eq!(
+        dirs["result"]["structuredContent"]["matches"]
+            .as_array()
+            .unwrap()
+            .len(),
+        1
+    );
+    let regex = srv
+        .call_tool(
+            "locate_search",
+            json!({"path": tmp.path(), "query": "^report-[0-9]+-final\\.pdf$", "mode": "regex", "waitMs": 30_000}),
+        )
+        .await?;
+    assert_ok(&regex);
+    assert_eq!(
+        regex["result"]["structuredContent"]["matches"]
+            .as_array()
+            .unwrap()
+            .len(),
+        2
+    );
+    let overlap = srv
+        .call_tool(
+            "locate_search",
+            json!({"paths": [tmp.path(), &left, &right], "query": "report-2026-final.pdf", "mode": "exact"}),
+        )
+        .await?;
+    assert_ok(&overlap);
+    assert_eq!(
+        overlap["result"]["structuredContent"]["indexes"]
+            .as_array()
+            .unwrap()
+            .len(),
+        1
+    );
+    assert_eq!(
+        overlap["result"]["structuredContent"]["matches"]
+            .as_array()
+            .unwrap()
+            .len(),
+        2
+    );
+    srv.kill().await;
+    Ok(())
+}
+
+#[cfg(feature = "locate-tools")]
+#[tokio::test]
+async fn locate_parent_refresh_covers_pending_child_through_stdio() -> Result<()> {
+    let tmp = TempDir::new()?;
+    let child = tmp.path().join("child");
+    std::fs::create_dir(&child)?;
+    std::fs::write(child.join("nested-needle.txt"), b"found")?;
+    let srv = start_server(tmp.path()).await?;
+
+    let queued = srv
+        .call_tool(
+            "locate_refresh",
+            json!({ "path": &child, "requestId": "nested-child" }),
+        )
+        .await?;
+    assert_ok(&queued);
+    assert!(queued["result"]["structuredContent"]["nextScanAtMs"].is_number());
+    let parent = srv
+        .call_tool(
+            "locate_refresh",
+            json!({ "path": tmp.path(), "requestId": "nested-parent", "waitMs": 30_000 }),
+        )
+        .await?;
+    assert_ok(&parent);
+    assert_eq!(parent["result"]["structuredContent"]["status"], "complete");
+    let child_status = srv
+        .call_tool(
+            "locate_refresh",
+            json!({ "path": &child, "requestId": "nested-child" }),
+        )
+        .await?;
+    assert_eq!(
+        child_status["result"]["structuredContent"]["status"],
+        "complete"
+    );
+    assert_eq!(
+        child_status["result"]["structuredContent"]["workRoot"],
+        json!(std::fs::canonicalize(tmp.path())?)
+    );
+    let search = srv
+        .call_tool(
+            "locate_search",
+            json!({ "path": &child, "query": "nested-needle", "mode": "prefix" }),
+        )
+        .await?;
+    assert_ok(&search);
+    assert_eq!(
+        search["result"]["structuredContent"]["matches"]
+            .as_array()
+            .unwrap()
+            .len(),
+        1
+    );
+    srv.kill().await;
+    Ok(())
 }
 
 #[tokio::test]

@@ -176,7 +176,7 @@ mod tests {
         ),
         // The working notes describe this very guard, so they have to name what it catches.
         (
-            "CLAUDE.md",
+            "AGENTS.md",
             &["<local data>", "computer-mcp-rs", "%LOCALAPPDATA%"],
         ),
     ];

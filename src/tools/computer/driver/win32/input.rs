@@ -319,6 +319,7 @@ pub(crate) fn click_reserved(
 /// then move in ~16 ms chunks over `duration_ms` (0 = immediate),
 /// then release. Chunked timing is what makes apps track the movement —
 /// an immediate path can land before drag targets notice the press.
+#[allow(clippy::too_many_arguments)] // Mirrors the portable driver seam.
 pub fn drag(
     gate: &SafetyGate,
     from: (i32, i32),

@@ -11,6 +11,8 @@ use std::time::{Duration, Instant, SystemTime};
 
 use async_recursion::async_recursion;
 use clap::Parser;
+#[cfg(feature = "locate-tools")]
+use filesystem_locate::{EntryKind, FragmentFilter, Indexer, MatchMode, SearchFilters};
 use futures::future::join_all;
 use rmcp::{
     ErrorData as McpError,
@@ -235,6 +237,8 @@ struct FileSystemServer {
     s3_client: Arc<OnceCell<aws_sdk_s3::Client>>,
     thinking_state: Arc<ThinkingState>,
     memory_store: Option<Arc<SqliteMemoryStore>>,
+    #[cfg(feature = "locate-tools")]
+    indexer: Option<Arc<Indexer>>,
     llm_server: Option<tools::llm::LlmMcpServer>,
     session_footer_every: u64,
     session_tool_calls: Arc<AtomicU64>,
@@ -283,6 +287,8 @@ impl FileSystemServer {
         tool_router.merge(Self::s3_router());
         #[cfg(feature = "screenshot-tools")]
         tool_router.merge(Self::screenshot_router());
+        #[cfg(feature = "locate-tools")]
+        tool_router.merge(Self::locate_router());
         normalize_tool_schemas(&mut tool_router);
         tool_router
     }
@@ -340,6 +346,8 @@ impl FileSystemServer {
             s3_client: Arc::new(OnceCell::new()),
             thinking_state: Arc::new(ThinkingState::new()),
             memory_store: None,
+            #[cfg(feature = "locate-tools")]
+            indexer: None,
             llm_server: None,
             session_footer_every: agent_policy::FOOTER_EVERY_DEFAULT,
             session_tool_calls: Arc::new(AtomicU64::new(0)),
@@ -1050,6 +1058,216 @@ struct SearchArgs {
     /// Files with mtime <= cutoff. Same formats as modifiedAfter.
     #[serde(skip_serializing_if = "Option::is_none")]
     modified_before: Option<String>,
+}
+
+#[cfg(feature = "locate-tools")]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+struct LocateSearchArgs {
+    #[serde(default)]
+    path: Option<String>,
+    #[serde(default)]
+    paths: Vec<String>,
+    #[serde(default)]
+    query: Option<String>,
+    #[serde(default)]
+    mode: Option<String>,
+    #[serde(default)]
+    filters: LocateFilters,
+    #[serde(default)]
+    kind: Option<String>,
+    #[serde(default)]
+    limit: Option<usize>,
+    #[serde(default)]
+    wait_ms: Option<u64>,
+}
+
+#[cfg(feature = "locate-tools")]
+#[derive(Debug, Default, Clone, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+struct LocateFilters {
+    #[serde(default)]
+    name: LocateFragmentFilter,
+    #[serde(default)]
+    extension: LocateFragmentFilter,
+    #[serde(default)]
+    path: LocateFragmentFilter,
+}
+
+#[cfg(feature = "locate-tools")]
+#[derive(Debug, Default, Clone, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+struct LocateFragmentFilter {
+    #[serde(default)]
+    include: Vec<String>,
+    #[serde(default)]
+    exclude: Vec<String>,
+}
+
+#[cfg(feature = "locate-tools")]
+impl From<LocateFilters> for SearchFilters {
+    fn from(value: LocateFilters) -> Self {
+        fn convert(filter: LocateFragmentFilter) -> FragmentFilter {
+            FragmentFilter {
+                include: filter.include,
+                exclude: filter.exclude,
+            }
+        }
+        Self {
+            name: convert(value.name),
+            extension: convert(value.extension),
+            path: convert(value.path),
+            kind: EntryKind::All,
+        }
+    }
+}
+
+#[cfg(feature = "locate-tools")]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+struct LocateRefreshArgs {
+    path: String,
+    /// Reuse to retry a request without creating a second scan request.
+    #[serde(default)]
+    request_id: Option<String>,
+    /// Time to wait for completion, in milliseconds (maximum: 30000)
+    #[serde(default)]
+    wait_ms: Option<u64>,
+}
+
+#[cfg(feature = "locate-tools")]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+struct LocateStatusArgs {
+    path: String,
+    /// Wait for progress or completion (maximum 30000 ms).
+    #[serde(default, rename = "waitMs")]
+    wait_ms: Option<u64>,
+}
+
+#[cfg(feature = "locate-tools")]
+struct LocateBackgroundConfig {
+    roots: Option<Vec<PathBuf>>,
+    interval_secs: u64,
+    pause_ms: u64,
+    start_delay_ms: u64,
+}
+
+#[cfg(feature = "locate-tools")]
+fn locate_setting(key: &str) -> String {
+    env_spec::get(key).unwrap_or_else(|| locate_default(key).to_owned())
+}
+
+#[cfg(feature = "locate-tools")]
+fn locate_default(key: &str) -> &'static str {
+    env_spec::vars()
+        .into_iter()
+        .find(|var| var.key == key)
+        .map(|var| var.default)
+        .unwrap_or_default()
+}
+
+#[cfg(feature = "locate-tools")]
+fn locate_background_config() -> Option<LocateBackgroundConfig> {
+    let enabled = locate_setting("FS_MCP_LOCATE_BACKGROUND");
+    if !matches!(enabled.as_str(), "on" | "true" | "1") {
+        if !matches!(enabled.as_str(), "off" | "false" | "0") {
+            warn!("Invalid FS_MCP_LOCATE_BACKGROUND={enabled:?}; background indexing is off");
+        }
+        return None;
+    }
+    let roots = env_spec::get("FS_MCP_LOCATE_BACKGROUND_ROOTS")
+        .map(|value| serde_json::from_str::<Vec<PathBuf>>(&value));
+    let roots = match roots.transpose() {
+        Ok(roots) => roots,
+        Err(error) => {
+            warn!("Invalid FS_MCP_LOCATE_BACKGROUND_ROOTS JSON array: {error}");
+            return None;
+        }
+    };
+    let interval_secs = locate_setting("FS_MCP_LOCATE_BACKGROUND_INTERVAL_SECS")
+        .parse::<u64>()
+        .unwrap_or_else(|_| {
+            warn!("Invalid FS_MCP_LOCATE_BACKGROUND_INTERVAL_SECS; using the registered default");
+            locate_default("FS_MCP_LOCATE_BACKGROUND_INTERVAL_SECS")
+                .parse()
+                .expect("registered interval default")
+        })
+        .clamp(1, 86_400);
+    let pause_ms = locate_setting("FS_MCP_LOCATE_BACKGROUND_PAUSE_MS")
+        .parse::<u64>()
+        .unwrap_or_else(|_| {
+            warn!("Invalid FS_MCP_LOCATE_BACKGROUND_PAUSE_MS; using the registered default");
+            locate_default("FS_MCP_LOCATE_BACKGROUND_PAUSE_MS")
+                .parse()
+                .expect("registered pause default")
+        })
+        .min(1_000);
+    let start_delay_ms = locate_setting("FS_MCP_LOCATE_BACKGROUND_START_DELAY_MS")
+        .parse::<u64>()
+        .unwrap_or_else(|_| {
+            warn!("Invalid FS_MCP_LOCATE_BACKGROUND_START_DELAY_MS; using the registered default");
+            locate_default("FS_MCP_LOCATE_BACKGROUND_START_DELAY_MS")
+                .parse()
+                .expect("registered delay default")
+        })
+        .min(600_000);
+    Some(LocateBackgroundConfig {
+        roots,
+        interval_secs,
+        pause_ms,
+        start_delay_ms,
+    })
+}
+
+#[cfg(feature = "locate-tools")]
+async fn locate_background_loop(
+    indexer: Arc<Indexer>,
+    allowed: AllowedDirs,
+    config: LocateBackgroundConfig,
+) {
+    let mut tick = tokio::time::interval(Duration::from_secs(config.interval_secs.min(30)));
+    loop {
+        tick.tick().await;
+        let allowed_roots = allowed.snapshot().await;
+        let candidates = config
+            .roots
+            .as_ref()
+            .unwrap_or(&allowed_roots)
+            .iter()
+            .filter_map(|path| std::fs::canonicalize(path).ok())
+            .filter(|path| {
+                path.is_dir()
+                    && allowed_roots
+                        .iter()
+                        .any(|allowed| path.starts_with(allowed))
+            });
+        let mut roots: Vec<PathBuf> = candidates.collect();
+        roots.sort_by_key(|path| path.components().count());
+        let mut minimal = Vec::new();
+        for root in roots {
+            if !minimal
+                .iter()
+                .any(|parent: &PathBuf| root.starts_with(parent))
+            {
+                minimal.push(root);
+            }
+        }
+        for root in minimal {
+            let index = indexer.clone();
+            let interval_secs = config.interval_secs;
+            let pause_ms = config.pause_ms;
+            let start_delay_ms = config.start_delay_ms;
+            match tokio::task::spawn_blocking(move || {
+                index.schedule_background(&root, interval_secs, pause_ms, start_delay_ms)
+            })
+            .await
+            {
+                Ok(Err(error)) => warn!("Background locate scheduling failed: {error:#}"),
+                Err(error) => warn!("Background locate task failed: {error}"),
+                Ok(Ok(_)) => {}
+            }
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
@@ -3464,7 +3682,7 @@ impl FileSystemServer {
 
     #[tool(
         name = "search_files",
-        description = "PREFERRED over built-in Glob/find: matches PATHS by glob, never file contents (that is grep_files). Returns path, size and `modified` as unix seconds.\n\
+        description = "PREFERRED over built-in Glob/find: matches PATHS by glob, never file contents (that is grep_files). Use locate_search for repeated indexed name searches or several roots. Returns path, size and `modified` as unix seconds.\n\
             `modifiedAfter`/`modifiedBefore` take RFC3339 (2024-01-01T12:00:00Z) or a relative duration (`17m 20s`, `2h`, `7d`). A duration is a cutoff at now minus that span, so `modifiedBefore: \"7d\"` means older than 7 days — the opposite of how it reads."
     )]
     async fn search_files(
@@ -3605,7 +3823,7 @@ impl FileSystemServer {
 
     #[tool(
         name = "grep_files",
-        description = "Search file CONTENTS by regex (ripgrep's library). Use instead of shell grep.\n\
+        description = "Search file CONTENTS by regex (ripgrep's library). Use locate_search for file names. Use instead of shell grep.\n\
             `pattern` is matched against file contents; `filePattern` is a glob matched against file names — the two are easy to swap by accident.\n\
             Pass `pattern` as a plain JSON string with no extra quote characters, and search for the identifier itself rather than the source delimiters around it — not the quotes it sits in, nor a trailing `;`.\n\
             Honours .gitignore and skips binary files, so a file that exists can still be absent from the results."
@@ -6348,6 +6566,348 @@ USE CASES: Patch executables, fix binary data, search-replace in non-text files.
         }
     }
 }
+/// Path-name index tools, kept in a separate router because the family is optional.
+#[cfg(feature = "locate-tools")]
+#[tool_router(router = locate_router, vis = "pub(crate)")]
+impl FileSystemServer {
+    #[tool(
+        name = "locate_search",
+        description = "Indexed names in path or paths. kind: all (default), files, directories. query modes: exact/prefix/contains/glob/regex. filters.name/extension/path use include/exclude substring arrays (AND, case-sensitive; extension without dot). Queues missing scans; waitMs waits. Update with locate_refresh; contents: grep_files."
+    )]
+    async fn locate_search(
+        &self,
+        Parameters(args): Parameters<LocateSearchArgs>,
+    ) -> Result<CallToolResult, McpError> {
+        let mut requested = args.paths;
+        if let Some(path) = args.path {
+            requested.push(path);
+        }
+        if requested.is_empty() || requested.iter().any(|path| path.trim().is_empty()) {
+            return Err(McpError::invalid_params("path or paths is required", None));
+        }
+        let mut roots = Vec::new();
+        for path in requested {
+            roots.push(self.resolve(&path).await?);
+        }
+        roots.sort_by_key(|path| path.components().count());
+        roots.dedup();
+        let mut minimal_roots = Vec::new();
+        for path in roots {
+            if !minimal_roots
+                .iter()
+                .any(|root: &PathBuf| path.starts_with(root))
+            {
+                minimal_roots.push(path);
+            }
+        }
+        let roots = minimal_roots;
+        let indexer = self
+            .indexer
+            .clone()
+            .ok_or_else(|| McpError::internal_error("File index is unavailable", None))?;
+        let mode = match args.mode.as_deref().unwrap_or("contains") {
+            "exact" => MatchMode::Exact,
+            "prefix" => MatchMode::Prefix,
+            "contains" => MatchMode::Contains,
+            "glob" => MatchMode::Glob,
+            "regex" => MatchMode::Regex,
+            _ => {
+                return Err(McpError::invalid_params(
+                    "mode must be exact, prefix, contains, glob, or regex",
+                    None,
+                ));
+            }
+        };
+        let query = args.query.filter(|text| !text.is_empty());
+        if query.is_none() && args.mode.is_some() {
+            return Err(McpError::invalid_params("mode requires query", None));
+        }
+        if let Some(text) = query.as_deref() {
+            if matches!(mode, MatchMode::Regex) {
+                regex::Regex::new(text)
+                    .map_err(|e| McpError::invalid_params(e.to_string(), None))?;
+            }
+            if matches!(mode, MatchMode::Glob) {
+                globset::Glob::new(text)
+                    .map_err(|e| McpError::invalid_params(e.to_string(), None))?;
+            }
+        }
+        let mut filters: SearchFilters = args.filters.into();
+        filters.kind = match args.kind.as_deref().unwrap_or("all") {
+            "all" => EntryKind::All,
+            "files" => EntryKind::Files,
+            "directories" => EntryKind::Directories,
+            _ => {
+                return Err(McpError::invalid_params(
+                    "kind must be all, files, or directories",
+                    None,
+                ));
+            }
+        };
+        let limit = args.limit.unwrap_or(100).clamp(1, 1_000);
+        let wait_ms = args.wait_ms.unwrap_or(0).min(30_000);
+        let roots_for_work = roots.clone();
+        let index_for_work = indexer.clone();
+        let mut statuses = tokio::task::spawn_blocking(move || -> anyhow::Result<Vec<_>> {
+            let mut statuses = Vec::new();
+            for root in &roots_for_work {
+                index_for_work.ensure_index(root)?;
+                statuses.push(index_for_work.status(root)?);
+            }
+            Ok(statuses)
+        })
+        .await
+        .map_err(internal_err("Index task failed"))?
+        .map_err(internal_err("Index queue failed"))?;
+        if statuses.iter().any(|s| s.active_generation == 0) && wait_ms > 0 {
+            let deadline = Instant::now() + Duration::from_millis(wait_ms);
+            while Instant::now() < deadline {
+                tokio::time::sleep(Duration::from_millis(200)).await;
+                let index = indexer.clone();
+                let paths = roots.clone();
+                statuses = tokio::task::spawn_blocking(move || -> anyhow::Result<Vec<_>> {
+                    paths.iter().map(|path| index.status(path)).collect()
+                })
+                .await
+                .map_err(internal_err("Index task failed"))?
+                .map_err(internal_err("Index status failed"))?;
+                if statuses
+                    .iter()
+                    .all(|s| s.active_generation != 0 || s.state == "partial")
+                {
+                    break;
+                }
+            }
+        }
+        let index = indexer.clone();
+        let paths = roots.clone();
+        let results = tokio::task::spawn_blocking(move || -> anyhow::Result<Vec<_>> {
+            paths
+                .iter()
+                .map(|path| {
+                    index.search_filtered(
+                        path,
+                        query.as_deref().map(|q| (q, mode)),
+                        &filters,
+                        limit,
+                    )
+                })
+                .collect()
+        })
+        .await
+        .map_err(internal_err("Index task failed"))?
+        .map_err(internal_err("Index search failed"))?;
+        let mut safe = Vec::new();
+        let mut indexed = Vec::new();
+        let mut final_statuses = Vec::new();
+        let mut truncated = false;
+        for (root, result) in roots.iter().zip(results) {
+            truncated |= result.truncated;
+            final_statuses.push(result.status.clone());
+            indexed.push(json!({
+                "path": root,
+                "state": result.status.state,
+                "lastVerified": result.status.last_verified,
+                "error": result.status.last_error,
+                "nextScanAtMs": result.status.next_scan_at_ms,
+            }));
+            for hit in result.matches {
+                let raw = hit.path.to_string_lossy();
+                if self.resolve(&raw).await.is_ok() {
+                    safe.push((
+                        hit.path.clone(),
+                        json!({
+                            "path": hit.path,
+                            "kind": hit.kind,
+                            "size": hit.size,
+                            "modified": hit.modified,
+                        }),
+                    ));
+                }
+            }
+        }
+        safe.sort_by(|a, b| a.0.cmp(&b.0));
+        safe.dedup_by(|a, b| a.0 == b.0);
+        truncated |= safe.len() > limit;
+        safe.truncate(limit);
+        let matches: Vec<_> = safe.into_iter().map(|(_, value)| value).collect();
+        let summary = format!(
+            "{} indexed matches across {} roots",
+            matches.len(),
+            roots.len()
+        );
+        let state = if final_statuses.len() == 1 {
+            final_statuses[0].state.as_str()
+        } else if final_statuses.iter().all(|s| s.state == "ready") {
+            "ready"
+        } else if final_statuses.iter().any(|s| s.state == "partial") {
+            "partial"
+        } else {
+            "pending"
+        };
+        let next_scan_at_ms = final_statuses
+            .iter()
+            .filter_map(|s| s.next_scan_at_ms)
+            .min();
+        let last_verified = final_statuses.iter().filter_map(|s| s.last_verified).min();
+        let index_error = final_statuses
+            .iter()
+            .filter_map(|s| s.last_error.as_ref())
+            .next();
+        Ok(
+            CallToolResult::success(vec![ContentBlock::text(summary)]).with_structured(json!({
+                "matches": matches,
+                "truncated": truncated,
+                "indexes": indexed,
+                "indexState": state,
+                "lastVerified": last_verified,
+                "indexError": index_error,
+                "nextScanAtMs": next_scan_at_ms,
+            })),
+        )
+    }
+
+    #[tool(
+        name = "locate_refresh",
+        description = "Start initial indexing or refresh an allowed directory recursively. Use list_allowed_directories for roots and locate_status for asynchronous progress. Choose the smallest useful directory; overlapping requests coalesce. Use waitMs to wait, or reuse requestId to check the same request."
+    )]
+    async fn locate_refresh(
+        &self,
+        Parameters(args): Parameters<LocateRefreshArgs>,
+    ) -> Result<CallToolResult, McpError> {
+        let root = self.resolve(&args.path).await?;
+        let indexer = self
+            .indexer
+            .clone()
+            .ok_or_else(|| McpError::internal_error("File index is unavailable", None))?;
+        let request_id = args.request_id;
+        let wait_ms = args.wait_ms.unwrap_or(0).min(30_000);
+        let index = indexer.clone();
+        let mut receipt = tokio::task::spawn_blocking(move || {
+            index.request_refresh(&root, request_id.as_deref())
+        })
+        .await
+        .map_err(internal_err("Index task failed"))?
+        .map_err(internal_err("Index refresh failed"))?;
+        if wait_ms > 0 {
+            let deadline = Instant::now() + Duration::from_millis(wait_ms);
+            while receipt.status == "pending" && Instant::now() < deadline {
+                tokio::time::sleep(Duration::from_millis(200)).await;
+                let index = indexer.clone();
+                let id = receipt.request_id.clone();
+                let next = tokio::task::spawn_blocking(move || index.request_status(&id))
+                    .await
+                    .map_err(internal_err("Index task failed"))?
+                    .map_err(internal_err("Index status failed"))?;
+                if let Some(next) = next {
+                    receipt = next;
+                }
+            }
+        }
+        Ok(CallToolResult::success(vec![ContentBlock::text(format!(
+            "Index request {}: {} (scan root: {})",
+            receipt.request_id,
+            receipt.status,
+            receipt.work_root.display()
+        ))])
+        .with_structured(json!({
+            "requestId": receipt.request_id,
+            "targetSeq": receipt.target_seq,
+            "status": receipt.status,
+            "workRoot": receipt.work_root,
+            "nextScanAtMs": receipt.next_scan_at_ms,
+        })))
+    }
+
+    #[tool(
+        name = "locate_status",
+        description = "Index state and background scan progress for an allowed directory. waitMs long-polls asynchronously and sends MCP progress notifications when the client supplies a progress token. Use locate_refresh for an explicit update."
+    )]
+    async fn locate_status(
+        &self,
+        Parameters(args): Parameters<LocateStatusArgs>,
+        meta: RequestMetaObject,
+        client: Peer<RoleServer>,
+    ) -> Result<CallToolResult, McpError> {
+        let root = self.resolve(&args.path).await?;
+        let indexer = self
+            .indexer
+            .clone()
+            .ok_or_else(|| McpError::internal_error("File index is unavailable", None))?;
+        let deadline =
+            Instant::now() + Duration::from_millis(args.wait_ms.unwrap_or(0).min(30_000));
+        let token = meta.get_progress_token();
+        let mut previous = None;
+        let mut sequence = 0;
+        let status = loop {
+            let index = indexer.clone();
+            let path = root.clone();
+            let current = tokio::task::spawn_blocking(move || index.status(&path))
+                .await
+                .map_err(internal_err("Index task failed"))?
+                .map_err(internal_err("Index status failed"))?;
+            let signature = (current.state.clone(), current.progress.clone());
+            if previous.as_ref() != Some(&signature) {
+                if let Some(token) = &token {
+                    sequence += 1;
+                    let message = if let Some(progress) = &current.progress {
+                        format!(
+                            "{}: {} directories, {} entries; {}",
+                            current.state,
+                            progress.dirs_seen,
+                            progress.entries_seen,
+                            progress
+                                .current_path
+                                .as_ref()
+                                .map_or_else(|| "".into(), |p| p.display().to_string())
+                        )
+                    } else {
+                        current.state.clone()
+                    };
+                    let _ = client
+                        .notify_progress(
+                            ProgressNotificationParam::new(token.clone(), sequence as f64)
+                                .with_message(message),
+                        )
+                        .await;
+                }
+                previous = Some(signature);
+            }
+            if Instant::now() >= deadline
+                || !matches!(current.state.as_str(), "pending" | "building")
+            {
+                break current;
+            }
+            tokio::time::sleep(Duration::from_millis(250)).await;
+        };
+        let progress = status.progress.as_ref().map(|progress| {
+            json!({
+                "attemptId": progress.attempt_id,
+                "attemptState": progress.attempt_state,
+                "entriesSeen": progress.entries_seen,
+                "dirsSeen": progress.dirs_seen,
+                "currentPath": progress.current_path,
+                "started": progress.started,
+            })
+        });
+        Ok(CallToolResult::success(vec![ContentBlock::text(format!(
+            "Index {} (verified {:?})",
+            status.state, status.last_verified
+        ))])
+        .with_structured(json!({
+            "state": status.state,
+            "activeGeneration": status.active_generation,
+            "desiredSeq": status.desired_seq,
+            "completedSeq": status.completed_seq,
+            "lastVerified": status.last_verified,
+            "error": status.last_error,
+            "nextScanAtMs": status.next_scan_at_ms,
+            "background": status.background,
+            "progress": progress,
+        })))
+    }
+}
+
 /// HTTP/HTTPS request tools, in their own router.
 ///
 /// A separate impl block because `#[tool_router]` collects every `#[tool]` function in the
@@ -7745,6 +8305,22 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
     let allowed = AllowedDirs::new(args.allowed_dirs);
     let mut server = FileSystemServer::new(allowed)?;
     server.allow_symlink_escape = args.allow_symlink_escape;
+    #[cfg(feature = "locate-tools")]
+    match core::paths::state_dir()
+        .map_err(anyhow::Error::from)
+        .and_then(|path| Indexer::open(&path))
+    {
+        Ok(indexer) => server.indexer = Some(Arc::new(indexer)),
+        Err(error) => warn!("File index disabled: {error:#}"),
+    }
+    #[cfg(feature = "locate-tools")]
+    if let (Some(indexer), Some(config)) = (server.indexer.clone(), locate_background_config()) {
+        tokio::spawn(locate_background_loop(
+            indexer,
+            server.allowed.clone(),
+            config,
+        ));
+    }
     server.session_footer_every = if args.no_session_footer {
         0
     } else {
@@ -7991,6 +8567,11 @@ fn print_features() {
     println!("  + screenshot-tools");
     #[cfg(not(feature = "screenshot-tools"))]
     println!("  - screenshot-tools");
+
+    #[cfg(feature = "locate-tools")]
+    println!("  + locate-tools (shared filename index)");
+    #[cfg(not(feature = "locate-tools"))]
+    println!("  - locate-tools");
 
     // The five control domains, listed individually rather than as the `computer-tools` umbrella:
     // each one builds on its own, and which of them is present is exactly what decides whether

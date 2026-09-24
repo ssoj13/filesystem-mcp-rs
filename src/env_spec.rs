@@ -32,6 +32,7 @@ pub fn vars() -> Vec<EnvVar> {
     v.extend(policy_vars());
     v.extend(net_vars());
     v.extend(memory_vars());
+    v.extend(locate_vars());
     v.extend(ctl_vars());
     v
 }
@@ -125,6 +126,42 @@ fn memory_vars() -> Vec<EnvVar> {
             help: "SQLite file for the memory tools. Blank = ~/.filesystem-mcp-rs/memory2.db.",
         },
     ]
+}
+
+#[cfg(feature = "locate-tools")]
+fn locate_vars() -> Vec<EnvVar> {
+    vec![
+        EnvVar {
+            key: "FS_MCP_LOCATE_BACKGROUND",
+            default: "on",
+            help: "Low-priority periodic indexing of allowed roots: on | off.",
+        },
+        EnvVar {
+            key: "FS_MCP_LOCATE_BACKGROUND_ROOTS",
+            default: "",
+            help: "Optional JSON array of allowed directories to index in background; blank = all allowed roots.",
+        },
+        EnvVar {
+            key: "FS_MCP_LOCATE_BACKGROUND_INTERVAL_SECS",
+            default: "3600",
+            help: "Minimum seconds between background verification scans of a root.",
+        },
+        EnvVar {
+            key: "FS_MCP_LOCATE_BACKGROUND_PAUSE_MS",
+            default: "50",
+            help: "Background scan pause after every 64 entries (0..1000 ms); larger is gentler.",
+        },
+        EnvVar {
+            key: "FS_MCP_LOCATE_BACKGROUND_START_DELAY_MS",
+            default: "10000",
+            help: "Delay before a newly queued background scan can start, in milliseconds.",
+        },
+    ]
+}
+
+#[cfg(not(feature = "locate-tools"))]
+fn locate_vars() -> Vec<EnvVar> {
+    Vec::new()
 }
 
 #[allow(clippy::vec_init_then_push)]

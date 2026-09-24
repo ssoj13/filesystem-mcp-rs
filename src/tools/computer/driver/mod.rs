@@ -594,6 +594,7 @@ pub fn click(
 }
 
 #[cfg(feature = "ctl-input")]
+#[allow(clippy::too_many_arguments)] // Existing public driver seam takes these independent inputs.
 pub fn drag(
     gate: &SafetyGate,
     from: (i32, i32),
