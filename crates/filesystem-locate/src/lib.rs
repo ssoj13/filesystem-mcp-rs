@@ -1141,9 +1141,12 @@ fn scan(conn: &mut Connection, work: &Work, state_root: &Path, stop: &AtomicBool
         });
         match result {
             Ok(tree) => Some(tree),
+            Err(fscan_rs::ScanFailure::Cancelled) => {
+                bail!("scan cancelled during shutdown")
+            }
             Err(error) => {
                 tracing::warn!(
-                    "NTFS scan unavailable for {}: {error:#}; using standard traversal",
+                    "NTFS scan failed for {}: {error:#}; using standard traversal",
                     work.root.display()
                 );
                 None
@@ -1228,7 +1231,7 @@ fn scan(conn: &mut Connection, work: &Work, state_root: &Path, stop: &AtomicBool
             Ok(progress) => Some(progress),
             Err(fscan_rs::NtfsStreamError::Sink(error)) => return Err(error),
             Err(fscan_rs::NtfsStreamError::Cancelled) => bail!("scan cancelled during shutdown"),
-            Err(fscan_rs::NtfsStreamError::Backend(error)) => return Err(error),
+            Err(fscan_rs::NtfsStreamError::Backend(error)) => return Err(error.into()),
         }
     } else {
         None

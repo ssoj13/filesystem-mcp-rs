@@ -7,7 +7,7 @@ description = "Shared, coalescing filesystem name index for local processes"
 
 [dependencies]
 anyhow = "1"
-fscan-rs = { git = "ssh://git@github.com/ssoj13/fscan-rs.git", rev = "aa0185f8a45dcf3ad949d97b88b5950009444cb2" }
+fscan-rs = { git = "ssh://git@github.com/ssoj13/fscan-rs.git", rev = "c33d4474b5004ec047ecd065f96f6a53addbc97e" }
 globset = "0.4"
 regex = "1"
 rusqlite = { version = "0.40", features = ["bundled"] }

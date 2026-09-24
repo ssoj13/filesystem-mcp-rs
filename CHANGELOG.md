@@ -4,6 +4,13 @@
 
 Post-0.2.1 work on `main`. The crate version is still 0.2.1 until the next tag.
 
+### Shared Locate index
+
+- Added `locate_search`, `locate_refresh`, and `locate_status` for indexed filename searches, explicit refresh requests, and asynchronous progress. Search accepts multiple roots, five query modes, file/directory filtering, and any number of required or excluded fragments in names, extensions, or paths.
+- Added the `filesystem-locate` crate. Multiple MCP processes share one SQLite index and queue; overlapping requests coalesce with a bounded 3–10 second debounce. A single worker scans, preserves the published generation during refresh, and applies changed rows instead of rewriting unchanged index rows.
+- Added low-priority background indexing controlled by `FS_MCP_LOCATE_BACKGROUND*` settings. It yields to foreground work and reports progress through `locate_status`.
+- Both filesystem MCP and Squarebob consume the private GitHub `fscan-rs` crate at pinned revisions. Locate uses native NTFS scans for foreground subtrees and the portable walker for background scans and volume roots; cancellation remains distinct from a backend failure. Every refresh still traverses the filesystem.
+
 ### `rmcp` 3.1.3 → 3.4.0
 
 - **`ServerInfo` is deprecated** in rmcp 3.4.0: it was an alias for `InitializeResult` whose name collided with the protocol's `serverInfo` identity field (`server_info.server_info`). `ServerHandler::get_info` now returns `ServerConfig` (the same type). The wire field `server_info: Implementation` is unchanged.

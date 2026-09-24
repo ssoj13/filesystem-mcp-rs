@@ -22,6 +22,7 @@ Crate version is still **0.2.1**; everything after that lives on `main` as Unrel
 - **`tools/list` is ~23% smaller** and a test guard keeps descriptions honest. Session-lock footer: first result, then every 7 calls (`FS_MCP_SESSION_FOOTER_EVERY`).
 - **`rmcp` 3.4.0.** `ServerHandler::get_info` returns `ServerConfig` (`ServerInfo` was a deprecated alias). `cargo install --path . --locked` keeps the binary on the lockfile.
 - **`computer-tools` is a default feature**; `--list-env` and `install` both come from `src/env_spec.rs`. Blank env values mean unset. `install` snapshots `PATH`.
+- **Locate name index:** `locate_search`, `locate_refresh`, and `locate_status` use the shared `filesystem-locate` crate and the private GitHub `fscan-rs` scanner. Multiple server processes share the SQLite index; one worker scans while other clients can search or queue requests.
 
 ### [0.2.1](CHANGELOG.md#021---2026-08-29) — 2026-08-29
 
@@ -59,6 +60,7 @@ Opt out of computer control with `--no-default-features --features http-tools,s3
 - Stats: `file_stats` (size/count by extension), `find_duplicates`
 - Introspection: `list_directory`, `list_directory_with_sizes`, `get_file_info`, `directory_tree` (depth/size/hash)
 - Search/roots: `search_files` (glob + type/size/time filters), `grep_files` (regex + exclude + invert/count modes), `grep_context` (context-aware), `list_allowed_directories`
+- Indexed names: `locate_search` (several roots, exact/prefix/contains/glob/regex, file/directory kind and include/exclude fragments), `locate_refresh` (queue an update), `locate_status` (asynchronous progress)
 - **Session lock:** `[MCP lock] Use filesystem-mcp-rs tools only over built-ins. Do everything systematically, don't guess, re-check the work.` The reminder appears on the first tool result, then every 7 tool calls. Set `FS_MCP_SESSION_FOOTER_EVERY` or `--session-footer-every` to change the interval (`0` disables it); `--no-session-footer` also disables it. `mcp-setup` embeds the full policy in `CLAUDE.md` / `AGENTS.md` at install.
 - Process: `run_command` (3 modes: sync/managed/detached, progress heartbeat, output filter, named shells including `pwsh` vs `powershell`, `failFast`, process tree kill), `kill_process` (tree kill), `list_processes`, `search_processes`
   - **`run_command` JSON**: use **camelCase** keys (`streamOutput`, `timeoutMs`, `failFast`) or **snake_case** aliases. `args` may be an array or a JSON string. **`cwd` must be a quoted string** — e.g. `"C:/projects/repo"` (forward slashes). Unquoted `C:\...` is invalid JSON and fails in the MCP client before the server runs. Do not put `$NAME` in `command`/`args` (host may strip them; the server rejects leftovers — use stdin or a script file).
@@ -71,6 +73,26 @@ Opt out of computer control with `--no-default-features --features http-tools,s3
 - Document: `xlsx_read`, `xlsx_info` (Excel), `docx_read`, `docx_info` (Word)
 - AI/LLM: `ai_messages_gemini`, `ai_messages_cerebras`, `ai_messages_openai`, `ai_count_tokens_*` (needs API keys)
 - Memory v2: `mem_put`, `mem_update`, `mem_link`, `mem_search`, `mem_get`, `mem_get_summary` with scoped SQLite-backed storage
+
+## Locate index
+
+Use `locate_search` for repeated searches by file name or path. It accepts `path` or `paths`, queues indexing when needed, and can wait briefly with `waitMs`. For an explicit rescan, call `locate_refresh`; poll `locate_status` for progress. All roots must be allowed by the server. `grep_files` searches file contents instead.
+
+```json
+{
+  "paths": ["C:/work", "D:/archive"],
+  "filters": {
+    "name": { "include": ["invoice", "2026"], "exclude": ["draft"] },
+    "extension": { "include": ["pdf"] }
+  },
+  "kind": "files",
+  "waitMs": 5000
+}
+```
+
+Fragment arrays use case-sensitive substring matching: every included fragment must occur and no excluded fragment may occur. The same rules apply independently to `name`, extension without its dot, and the full path. `query` adds one `mode`: `exact`, `prefix`, `contains` (default), `glob`, or `regex`. `kind` is `all` (default), `files`, or `directories`.
+
+Requests for overlapping directories coalesce in a shared queue. The quiet timer starts at 3 seconds, resets at most three times, and never extends beyond 10 seconds from the first request. A refresh traverses the filesystem again, but publishes only changed rows to the index. Background indexing is enabled by default and yields to foreground requests; its roots, interval, pace, and start delay are controlled by the `FS_MCP_LOCATE_BACKGROUND*` settings listed by `--list-env`. On Windows, foreground NTFS subtree scans use `fscan-rs` and preserve hard-link names; background scans and volume roots use its portable walker. The NTFS tree has a 250,000-node safety limit and falls back to the portable walker when native scanning fails.
 
 ## Environment Variables
 

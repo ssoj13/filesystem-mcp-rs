@@ -2057,7 +2057,7 @@ checksum = "42703706b716c37f96a77aea830392ad231f44c9e9a67872fa5548707e11b11c"
 [[package]]
 name = "fscan-rs"
 version = "0.1.0"
-source = "git+ssh://git@github.com/ssoj13/fscan-rs.git?rev=aa0185f8a45dcf3ad949d97b88b5950009444cb2#aa0185f8a45dcf3ad949d97b88b5950009444cb2"
+source = "git+ssh://git@github.com/ssoj13/fscan-rs.git?rev=c33d4474b5004ec047ecd065f96f6a53addbc97e#c33d4474b5004ec047ecd065f96f6a53addbc97e"
 dependencies = [
  "anyhow",
  "crossbeam-channel",
