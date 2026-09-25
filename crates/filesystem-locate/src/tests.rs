@@ -30,6 +30,76 @@ fn force_due(conn: &Connection, root: &Path) {
 }
 
 #[test]
+fn recovery_cleans_large_abandoned_scan_without_dropping_published_entries() {
+    let temp = tempdir().unwrap();
+    let mut conn = connect(&temp.path().join("everything.db")).unwrap();
+    init_schema(&mut conn).unwrap();
+    let root_id = ensure_root(&conn, temp.path()).unwrap();
+    conn.execute(
+        "UPDATE roots SET active_generation=7,desired_seq=2,completed_seq=1,state='building' WHERE id=?1",
+        [root_id],
+    )
+    .unwrap();
+    conn.execute(
+        "INSERT INTO scan_attempts(root_id,claimed_seq,state,started) VALUES(?1,2,'running',0)",
+        [root_id],
+    )
+    .unwrap();
+    let attempt_id = conn.last_insert_rowid();
+    let tx = conn.transaction().unwrap();
+    for index in 0..1_101 {
+        let path = format!("stale-{index:04}.txt");
+        tx.execute(
+            "INSERT INTO entries(root_id,generation,path,name,kind,size) VALUES(?1,?2,?3,?3,'file',0)",
+            params![root_id, attempt_id, path],
+        )
+        .unwrap();
+        let path = format!("stage-{index:04}.txt");
+        tx.execute(
+            "INSERT INTO staged_entries(attempt_id,path,name,kind,size) VALUES(?1,?2,?2,'file',0)",
+            params![attempt_id, path],
+        )
+        .unwrap();
+    }
+    tx.execute(
+        "INSERT INTO entries(root_id,generation,path,name,kind,size) VALUES(?1,7,'kept.txt','kept.txt','file',0)",
+        [root_id],
+    )
+    .unwrap();
+    tx.commit().unwrap();
+
+    recover(&conn).unwrap();
+    let (state, desired, completed): (String, i64, i64) = conn
+        .query_row(
+            "SELECT state,desired_seq,completed_seq FROM roots WHERE id=?1",
+            [root_id],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .unwrap();
+    assert_eq!((state.as_str(), desired, completed), ("pending", 2, 1));
+    let entries: Vec<String> = conn
+        .prepare("SELECT path FROM entries ORDER BY path")
+        .unwrap()
+        .query_map([], |row| row.get(0))
+        .unwrap()
+        .collect::<rusqlite::Result<_>>()
+        .unwrap();
+    assert_eq!(entries, ["kept.txt"]);
+    let staged: i64 = conn
+        .query_row("SELECT count(*) FROM staged_entries", [], |row| row.get(0))
+        .unwrap();
+    assert_eq!(staged, 0);
+    let attempt_state: String = conn
+        .query_row(
+            "SELECT state FROM scan_attempts WHERE id=?1",
+            [attempt_id],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(attempt_state, "abandoned");
+}
+
+#[test]
 fn pending_index_status_does_not_wait_for_a_writer() {
     let temp = tempdir().unwrap();
     let root = temp.path().join("root");

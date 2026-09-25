@@ -28,7 +28,7 @@ pub(crate) use worker::worker_loop;
 #[cfg(test)]
 pub(crate) use worker::{
     BackgroundYield, claim_next, fail_attempt, finish_partial_refresh, is_covered, publish,
-    publish_partial_initial, scan, update_progress, yield_background_attempt,
+    publish_partial_initial, recover, scan, update_progress, yield_background_attempt,
 };
 
 static REQUEST_COUNTER: AtomicU64 = AtomicU64::new(0);

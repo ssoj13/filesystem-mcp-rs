@@ -273,3 +273,21 @@ Additional reproduction: after `locate_status({path:"D:\\projects",waitMs:1000})
 Follow-up (2026-09-25): the database lock is a server concurrency problem; the stack frames appear in the MCP host's failed-call formatting. A separate direct stdio integration test confirms that a normal `locate_search` validation error contains no stack frames, so frame attribution for this lock error should be checked at the host boundary before treating it as a second server defect.
 
 Source fix (2026-09-25): `ensure_index` and idempotent `request_refresh` now read the existing queue/receipt before asking SQLite for a writer lock. A completed traversal with inaccessible entries records `partial` without a minute-by-minute retry loop; the first scan keeps its usable entries, and a later partial refresh keeps the previous published generation. Regression tests and the full `cargo test` suite pass. The running installed MCP process has not been replaced or re-tested against `D:\projects`.
+
+Follow-up (2026-09-25, rebuilt server): two installed server processes (PIDs 31616 and 50464) shared `C:\Users\joss1\.filesystem-mcp-rs\everything.db`. `locate_status({path:"D:\\projects",waitMs:1000})` showed pending with no published generation; a read-only SQLite query showed the actual work root was all of `D:\`, with scan attempt 339 running. `locate_refresh({path:"D:\\projects",waitMs:0})` again failed after about 5 seconds with `Index refresh failed: database is locked`. Forty short `BEGIN IMMEDIATE` probes over 5.4 seconds all encountered the writer lock while attempt 339 advanced from about 17,500 to 34,000 entries. The DB was 14.85 GB (about 10.9 GB on its freelist) and its WAL grew from 1.66 to 2.25 GB during investigation. `C:\` root carried an earlier `database or disk is full` error, matching the user's report that C: filled overnight; current free space was about 461 GB. Impact: a scan of the broad allowed root starves foreground locate requests and rapidly grows state on C:. Safe fallback: stop the scan-owning server process, disable background indexing or restrict `FS_MCP_LOCATE_BACKGROUND_ROOTS` to small intended roots, and use `search_files` until the index is repaired. The prior read-before-write fix does not cover new `request_refresh` calls, which still require a writer transaction.
+
+## 2026-09-25 — run_command rejects `$env` argument with internal stack trace
+
+Reproduction: call `mcp__filesystem__run_command` with `command:"powershell"` and `args:["-NoProfile","-Command","$env:OPENUSD_SRC_ROOT = 'D:\\projects\\vfx.ref\\OpenUSD'; cargo test --locked -p usd-pcp"]`. The rejection of `$env` in command text is expected because the MCP host may strip dollar-name tokens.
+
+Observed impact: MCP `-32602: command/args contain `$env`` was followed by an internal `Stack backtrace` (frames 0–24). This is an expected caller error; exposing internal frames in the tool-host formatted failure is the defect. The command did not start.
+
+Safe fallback: pass `env:{"OPENUSD_SRC_ROOT":"D:\\projects\\vfx.ref\\OpenUSD"}` to `run_command` and invoke `cargo` directly. Return a concise validation error without internal frames for rejected command text.
+
+## 2026-09-25 — managed run_command host timeout leaves Cargo running
+
+Reproduction: call `mcp__filesystem__run_command({command:"cargo",args:["test","--locked","--workspace","--no-fail-fast"],cwd:"C:\\projects\\projects.rust.cg\\cglibs\\usd-rs",env:{OPENUSD_SRC_ROOT:"D:\\projects\\vfx.ref\\OpenUSD"},mode:"managed",timeoutMs:1200000})` while the full workspace requires more than five minutes to compile. The MCP host returned `timed out awaiting tools/call after 300s` and an internal stack trace, despite the explicit 1,200,000 ms command timeout.
+
+Observed impact: the caller lost the command result and exit code. Cargo PID 17728 and many rustc children remained active after the host timeout, while output continued in the managed stderr log. This is a host/tool lifecycle defect, not an invalid command.
+
+Safe fallback: use managed commands scoped to packages that finish within five minutes, or detached execution with explicit polling and log inspection; avoid starting a second Cargo against the same target directory. The host should honor the requested timeout or return a process handle on its own timeout, without exposing internal frames.

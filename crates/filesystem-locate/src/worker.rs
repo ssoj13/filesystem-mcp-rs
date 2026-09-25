@@ -45,18 +45,56 @@ pub(crate) fn worker_loop(db_path: &Path, lock_path: &Path, state_root: &Path, s
     }
 }
 
-fn recover(conn: &Connection) -> Result<()> {
+pub(crate) fn recover(conn: &Connection) -> Result<()> {
     conn.execute_batch(
         "UPDATE scan_attempts SET state='abandoned',finished=strftime('%s','now') WHERE state='running';
          UPDATE roots SET state='pending' WHERE state='building' AND covered_by IS NULL;
          UPDATE roots SET state='covered',desired_seq=completed_seq
-           WHERE state='building' AND covered_by IS NOT NULL;
-         DELETE FROM entries WHERE NOT EXISTS (
-           SELECT 1 FROM roots WHERE roots.id=entries.root_id
-             AND roots.active_generation=entries.generation
-         );
-         DELETE FROM staged_entries;",
+           WHERE state='building' AND covered_by IS NOT NULL;",
     )?;
+    // An interrupted large scan can leave millions of rows. Deleting them in
+    // one statement holds the writer lock for minutes and grows the WAL while
+    // every foreground locate request times out. Delete in bounded commits.
+    let roots: Vec<(i64, i64)> = {
+        let mut stmt = conn.prepare("SELECT id,active_generation FROM roots")?;
+        stmt.query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?
+            .collect::<rusqlite::Result<_>>()?
+    };
+    for (root_id, active_generation) in roots {
+        let stale_generations: Vec<i64> = {
+            let mut stmt = conn.prepare(
+                "SELECT DISTINCT generation FROM entries WHERE root_id=?1 AND generation!=?2",
+            )?;
+            stmt.query_map(params![root_id, active_generation], |row| row.get(0))?
+                .collect::<rusqlite::Result<_>>()?
+        };
+        for generation in stale_generations {
+            loop {
+                let deleted = conn.execute(
+                    "DELETE FROM entries WHERE rowid IN (
+                       SELECT rowid FROM entries WHERE root_id=?1 AND generation=?2 LIMIT ?3
+                     )",
+                    params![root_id, generation, BATCH_SIZE as i64],
+                )?;
+                if deleted == 0 {
+                    break;
+                }
+                thread::sleep(Duration::from_millis(20));
+            }
+        }
+    }
+    loop {
+        let deleted = conn.execute(
+            "DELETE FROM staged_entries WHERE (attempt_id,path) IN (
+               SELECT attempt_id,path FROM staged_entries LIMIT ?1
+             )",
+            [BATCH_SIZE as i64],
+        )?;
+        if deleted == 0 {
+            break;
+        }
+        thread::sleep(Duration::from_millis(20));
+    }
     Ok(())
 }
 
@@ -468,6 +506,10 @@ fn flush_batch(conn: &mut Connection, work: &Work, batch: &mut EntryBatch) -> Re
         }
     }
     tx.commit()?;
+    // A large scan otherwise reacquires SQLite's single writer slot almost
+    // immediately. Give foreground refresh and background scheduling calls a
+    // chance to acquire it between batches, even across MCP processes.
+    thread::sleep(Duration::from_millis(20));
     Ok(())
 }
 

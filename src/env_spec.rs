@@ -133,8 +133,8 @@ fn locate_vars() -> Vec<EnvVar> {
     vec![
         EnvVar {
             key: "FS_MCP_LOCATE_BACKGROUND",
-            default: "on",
-            help: "Low-priority periodic indexing of allowed roots: on | off.",
+            default: "off",
+            help: "Periodic indexing of configured roots: on | off. Set explicit background roots before enabling broad access.",
         },
         EnvVar {
             key: "FS_MCP_LOCATE_BACKGROUND_ROOTS",
