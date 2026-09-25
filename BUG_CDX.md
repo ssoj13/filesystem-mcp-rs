@@ -18,6 +18,10 @@ Additional reproduction (2026-09-23 PDT): call `mcp__filesystem_mcp_rs__edit_fil
 
 The same issue recurs when a batch of literal `edit_file` replacements contains a nonexistent `oldText`: reproduction was a four-edit call against `src/purse.rs` where edit #4 searched for `let caps = p.caps(Principal::User(1)).await.unwrap();`. The tool reported `1 of 4 edits produced zero matches` and appended a full stack trace. This is another expected caller error; the safe fallback is to re-read the file and retry only matching edits.
 
+Additional reproduction (2026-09-23 PDT, `osl-rs` documentation update): call `mcp__filesystem__edit_file` on `BUG_HUNT_REPORT.md` with six literal edits, four existing `oldText` strings and two absent strings (`src/codegen.rs:1625-1652` and `src/codegen.rs:2398-2508`). The tool returned MCP `-32603`, `2 of 6 edits produced zero matches`, followed by a full internal `Stack backtrace`. A second call on `plan3.md` with the same six edits returned `4 of 6 edits produced zero matches` and another backtrace. The no-match result is an expected caller error; the stack disclosure is the server defect. Impact: routine source-reference maintenance produced noisy internal diagnostics, and edit atomicity required re-reading. Safe fallback: send only replacements confirmed to exist in each file, then re-read each changed document. This is the same error-response defect as the earlier literal-edit reproduction.
+
+Additional reproduction (2026-09-23 PDT, `osl-rs` thin-layer port): call `mcp__filesystem__edit_file` with eight literal edits on `src/bsdf_ext/thinlayer.rs`; the final `oldText` differs from the current rustfmt indentation. The expected `1 of 8 edits produced zero matches` error also included a 24-frame internal stack trace. Impact: internal stack disclosure and uncertainty about batch atomicity during LUT integration. Safe fallback: read the exact current lines and retry smaller verified edit batches, then inspect the diff. No changes were applied by the failed call.
+
 ## 2026-09-22 — run_command validation exposes an internal stack trace
 
 Reproduction: call `mcp__filesystem_mcp_rs__run_command` with `command: "powershell"`, `args: ["-NoProfile", "-Command", "$root=[IO.Path]::GetFullPath('C:\\projects\\projects.rust.cg\\cgprojs\\opengram-rs'); Write-Output $root"]`, and a valid workspace `cwd`. A `$NAME` token in command arguments is deliberately rejected by the tool, so the input error is expected.
@@ -25,6 +29,8 @@ Reproduction: call `mcp__filesystem_mcp_rs__run_command` with `command: "powersh
 Observed impact: the validation error reports the `$root` token and then appends a full internal `Stack backtrace` beginning with `aws_lc_0_39_0_jent_entropy_switch_notime_impl`.
 
 Safe fallback: pass the PowerShell script as a `stdin` ContentRef with `args: ["-NoProfile", "-Command", "-"]`. Return validation errors without internal stack traces.
+
+Additional reproduction (2026-09-23 PDT, `osl-rs`): `mcp__filesystem__run_command({command:"powershell",args:["-NoProfile","-Command","$env:CARGO_HOME"],cwd:"C:\\projects\\projects.rust.cg\\cglibs\\osl-rs",mode:"sync",timeoutMs:10000})` triggered the expected `-32602` guard (`command/args contain $env — host may delete NAME tokens before spawn`) but also returned a full internal `Stack backtrace` with `aws_lc_0_39_0_jent_entropy_switch_notime_impl` frames. Impact: internal stack disclosure for a routine rejected caller input. Safe fallback: pass the PowerShell script through `stdin` ContentRef, or use filesystem read/list APIs. This is the same validation response defect.
 
 Additional reproduction (2026-09-22 PDT): call `run_command` with `command: "powershell"`, `args: ["-NoProfile", "-Command", <inline script containing $exe, $repo, and $p>]`. Two attempts returned the expected MCP `-32602` safety rejection, but also a full internal `Stack backtrace` containing `aws_lc_0_39_0_jent_entropy_switch_notime_impl` and OS frames. No process was spawned. Pass the script through `stdin: {kind: "inline", text: script}` with `args: ["-NoProfile", "-Command", "-"]`, or use a script file.
 
@@ -86,6 +92,8 @@ Additional reproduction (2026-09-22 PDT): call `mcp__filesystem_mcp_rs__edit_fil
 
 Additional reproduction (2026-09-23 PDT): submit 14 literal `edit_file` replacements against `cryptobot-rs/DIAGRAMS.md`; edits #8 and #14 have no current match. The expected caller-error response is a concise no-match list with no file mutation. The tool returned MCP `-32603` and a full internal `Stack backtrace`; it was unclear from the response whether earlier replacements had been applied. Re-read `DIAGRAMS.md`, confirm the current text, then retry only exact matches in smaller batches and verify the final diff. This is the same server defect, not a missing-file error.
 
+Additional reproduction (2026-09-23 PDT, `osl-rs`): a seven-edit `mcp__filesystem__edit_file` call against `src/oso.rs` included edit #3 with `oldText: "let mval = decode_oso_value(parts[2].trim());\n                    // Special-case: lockgeom sets interpolation lock"`. That text depended on edit #1 in the same batch and was absent from the pre-edit file. The server returned MCP `-32603`, `Failed to apply edits: 1 of 7 edits produced zero matches`, and a full internal `Stack backtrace` ending in `BaseThreadInitThunk`. Impact: ordinary batch dependency/no-match exposed internal frames and left edit atomicity unclear. Safe fallback: re-read source, split dependent edits into sequential calls, and verify each diff. This is the same error-response defect.
+
 ## 2026-09-22 — memory cross-scope target error exposes an internal stack trace
 
 Reproduction: create a memory item under `workspaceId: "C:\\projects\\projects.rust.cg\\cgprojs\\cryptobot-rs"` with `mem_put`. Then call `mcp__filesystem_mcp_rs__mem_link({workspaceId:"C:\\projects\\projects.rust.cg\\cgprojs\\cryptobot-rs",actorId:"codex:/root",relation:{fromItemId:"818635ce-582f-4db3-9143-e135fd4a4bd2",relationType:"continues",toItemId:"be9f5b43-39e2-450e-8749-5f4cda9f3e12"}})`. The source item exists in the absolute-path workspace; the target item exists under the distinct `cryptobot-rs` workspace. A scope not-found result is expected. A repeat with another target UUID from the other workspace produced the same class of error.
@@ -132,6 +140,8 @@ Safe fallback: route mandatory MCP operations through a team agent whose MCP cal
 
 Additional reproduction (2026-09-23): the `/root/hash_dedup` subagent called `tools.mcp__filesystem__run_command({command:'cargo',args:['fmt','--all'],cwd:'C:\\projects\\projects.rust.cg\\cglibs\\osl-rs',mode:'sync',timeoutMs:120000})` and received `MCP tool filesystem/run_command is not available to the model`. Calling the alias `mcp__filesystem_mcp_rs__run_command` returned `MCP tool filesystem-mcp-rs/run_command is not available to the model`. Its `ALL_TOOLS` listing had no `mcp__filesystem` entries, and `read_text_file` invocation raised `TypeError: ... is not a function`. The root agent still had MCP access and ran `cargo fmt --all` through it. Impact: the delegate could not perform mandatory MCP formatting verification. Safe fallback: have the root or another agent with working MCP perform the file and shell calls; do not treat this as a server-wide outage or bypass an active MCP session lock.
 
+Additional reproduction (2026-09-23, second `osl-rs` continuation): three newly spawned subagents (`thinlayer`, `dict_parity`, `oso_struct`) attempted `tools.mcp__filesystem__seq_think`, `tools.mcp__filesystem__read_text_file`, and `tools.mcp__filesystem__grep_files` through `functions.exec`. Calls returned `MCP tool filesystem-mcp-rs/seq_think is not available to the model`, `MCP tool filesystem/read_text_file is not available to the model`, or `TypeError: tools.mcp__filesystem__grep_files is not a function`; one agent observed the tools in `ALL_TOOLS` before they disappeared. The root agent successfully read and edited files through the same MCP server during this period. Impact: all three delegates could not perform assigned source audits or fixes under the mandatory MCP-only policy. Safe fallback: have the root agent with working routing perform file and shell operations, while delegates review excerpts supplied by root; compare per-agent capability registration and routing lifetimes. This is not an expected missing-file error.
+
 ## 2026-09-23 — edit_file unsupported regex backreference exposes internal stack trace
 
 Reproduction: call `mcp__filesystem__edit_file` with `path: "C:/projects/projects.rust.cg/cglibs/osl-rs/src/optimizer.rs"` and one edit with `isRegex: true`, `replaceAll: true`, `oldText: "(make_inert_nop\\(&mut ir\\.opcodes\\[([^\\]]+)\\]\\);)\\n\\s*ir\\.opcodes\\[\\2\\]\\.nargs = 0;"`, and `newText: "$1"`. The Rust regex engine does not support the `\\2` backreference, so rejection of the pattern is an expected caller error.
@@ -163,3 +173,103 @@ Reproduction: on `cryptobot-rs/AGENTS.md` (CRLF working copy), call `mcp__filesy
 Observed impact: the replacement unexpectedly joined the next existing line, yielding `-> inference_tick_at     -> scoped or legacy equity sample...` on one line. A second `edit_file` attempt to repair the two lines again joined the following `-> Report` line. The tool returned a successful diff both times; without a readback, a dataflow diagram would have remained malformed. This was a valid literal replacement, so the join is a tool defect rather than an invalid caller argument.
 
 Safe fallback: use `edit_lines` with explicit `line` and `endLine` for multiline changes on CRLF files, then immediately read the affected lines and check `git diff --check`. That operation repaired the diagram without joining the next line.
+
+## 2026-09-23 — write_file binary validation exposes internal stack trace
+
+Reproduction: call `mcp__filesystem__write_file` with `path: "C:\\projects\\projects.rust.cg\\cglibs\\osl-rs\\src\\thinlayer_energy.bin"` and `content: {kind: "base64", data: <valid base64 of a 32,768-byte f32 LUT containing NUL bytes>}`. The server rejects a NUL at byte offset 4 with MCP `-32602 nul_in_text`; rejecting binary through a text-only operation is an expected validation result.
+
+Observed impact: the validation error also included a full internal stack trace. The binary LUT was not written. The defect is the internal stack disclosure for routine invalid input, not the NUL rejection.
+
+Safe fallback: store the numeric LUT in a UTF-8 Rust source file, or use a documented binary-capable filesystem tool; verify the written table size and checksum. The server should return a concise validation error without internal frames.
+
+## 2026-09-23 — disk_usage cannot resolve an existing Windows workspace path
+
+Reproduction: call `mcp__filesystem__disk_usage({path:"C:\\projects\\projects.rust.cg\\cglibs\\osl-rs"})` on the existing workspace. The same path is readable through `read_text_file`, and PowerShell `Get-PSDrive -Name C` reports drive C with 7,002,324,992 bytes free.
+
+Observed impact: the tool returned MCP `-32603: No disk found for path: C:\\projects\\projects.rust.cg\\cglibs\\osl-rs` plus a full internal stack trace. Disk inspection could not be performed through the dedicated MCP tool. This is a valid existing path, not an expected missing-file error.
+
+Safe fallback: use `mcp__filesystem__run_command` with native PowerShell `Get-PSDrive -Name C` for a read-only capacity check. The server should normalize Windows paths and report errors without internal frames.
+
+## 2026-09-24 — edit_file zero-match error exposes internal stack trace during documentation refresh
+
+Reproduction: call `mcp__filesystem_mcp_rs__edit_file` on `C:/projects/projects.rust.cg/cgprojs/cryptobot-rs/AGENTS.md` with an `oldText` containing the stale GitNexus sentence `3,738 graph nodes, 10,095 relationships, 300 execution flows at the latest forced reindex`, while the current line says `4,281 graph nodes and 12,377 relationships`. The literal does not match, so a concise zero-match caller error is expected.
+
+Observed impact: the server returned MCP `-32603`, a zero-match edit error, and a full internal `Stack backtrace` (25 frames). No file change was applied. The defect is internal stack disclosure for an ordinary stale-text error, not the expected match failure; this is another reproduction of the existing `edit_file` error-response issue.
+
+Safe fallback: re-read the current line with `read_text_file`, then use `edit_lines` on its verified line number and inspect the diff. Return the no-match diagnostic without internal frames.
+
+Additional reproduction (2026-09-24, `osl-rs` documentation): call `mcp__filesystem__edit_file` on `C:/projects/projects.rust.cg/cglibs/osl-rs/BUG_HUNT_REPORT.md` with two literal edits, the second using `oldText: "row below).\n## Unfinished code and compatibility"` while the file contains a backtick-delimited phrase before `row below).`. The expected zero-match validation returned MCP `-32603` and a full internal `Stack backtrace` (frames 0–24). Impact: an ordinary stale literal created noisy implementation-detail output; the batch applied no edit. Safe fallback: re-read the exact current lines and retry one verified literal edit at a time, then inspect the diff. This is another reproduction of the same server error-response defect, not a separate missing-file or validation defect.
+
+Additional reproduction (2026-09-24, `osl-rs` documentation relocation): call `mcp__filesystem__edit_file` on `C:/projects/projects.rust.cg/cglibs/osl-rs/docs/.plans/DIAGRAMS.md` with two literal edits, first replacing `](AGENTS.md` and second replacing nonexistent `](README.md`. The second edit has no match; a concise caller error is expected. The server returned MCP `-32603` with `1 of 2 edits produced zero matches` and an internal `Stack backtrace` (frames 0–24); no edit was applied. Safe fallback: inspect each document's link inventory and issue only matching edits, then read the result. This is the same stack-disclosure defect, not a separate zero-match defect.
+
+## 2026-09-24 — run_command command-not-found exposes internal stack trace
+
+Reproduction: call `mcp__filesystem__run_command({command:"clang++",args:["--version"],cwd:"C:\\projects\\projects.rust.cg\\cglibs\\osl-rs",mode:"sync",timeoutMs:10000})` when `clang++` is absent from PATH. The same result occurs for `g++`. A concise command-not-found error is expected.
+
+Observed impact: the server returned MCP `-32603 Failed to spawn command: clang++` followed by an internal `Stack backtrace` (frames 0–10), preventing compiler discovery through the tool. The missing executable is an expected caller/environment condition; the internal stack disclosure is the defect.
+
+Safe fallback: use an installed compiler such as `cl`, or run a read-only PATH check through PowerShell. The server should return a concise spawn error without internal frames.
+
+## 2026-09-24 — edit_lines overlap validation exposes internal stack trace
+
+Reproduction: call `mcp__filesystem_mcp_rs__edit_lines` on `cryptobot-rs/.bughunt/plan16.md` with two edits targeting the same original line 135, one `replace` and one `insert_after`. The operations overlap, so rejecting the caller request without changing the file is expected.
+
+Observed impact: the server returned MCP `-32603` with an overlap error and a full internal `Stack backtrace`. No edit was applied. The defect is disclosure of internal frames for a routine edit-validation failure, not the overlap rejection.
+
+Safe fallback: submit the dependent edits in separate `edit_lines` calls, re-read the affected region between them, and verify the diff. The server should return a concise overlap diagnostic without internal frames.
+
+## 2026-09-24 — run_command PowerShell variable validation exposes internal stack trace
+
+Reproduction: call `mcp__filesystem__run_command({command:"powershell",args:["-NoProfile","-Command","Get-ChildItem -LiteralPath 'C:\\Users\\joss1\\.cargo\\git\\checkouts' -Directory -Name | Where-Object { $_ -match 'oiio|vfx' } | Select-Object -First 10"],cwd:"C:/projects/projects.rust.cg/cglibs/osl-rs",mode:"managed",timeoutMs:30000})`. The server rejects the `$_` token before spawning PowerShell. A concise validation error is expected for this host policy.
+
+Observed impact: MCP `-32602` said `command/args contain $_` and included a full internal `Stack backtrace` (frames 0–24). The read-only dependency inventory did not run. The defect is stack disclosure on an expected rejected argument, not the token policy itself.
+
+Safe fallback: use `search_files` on a narrow path, or pass the PowerShell script through the documented stdin ContentRef or a script file. The server should report the token restriction without internal frames.
+
+## 2026-09-24 — mem_link out-of-scope item exposes internal stack trace
+
+Reproduction: call `mcp__filesystem__mem_link` with `workspaceId:"C:/projects/projects.rust.cg/cglibs/osl-rs"`, `actorId:"texture_metadata"`, and `relation:{fromItemId:"eb65b8c8-ba91-4cde-817f-60fc94e241c7",relationType:"continues",toItemId:"785fafad-b434-460f-a0ce-48eb10a989f2"}`. The target item is outside the actor's visible scope; a concise not-found error is expected.
+
+Observed impact: MCP `-32603` reported `toItemId ... not found in scope` and included an internal `Stack backtrace` (frames 0–24). No relation was created. The defect is internal frame disclosure for expected scope validation, not the rejection.
+
+Safe fallback: link only IDs returned by `mem_put` or `mem_search` in the same visible scope. A relation between two new visible items then succeeded. The server should return the scope error without internal frames.
+
+## 2026-09-25 — filesystem MCP callable absent in delegated agents
+
+Reproduction: spawn an `explorer` sub-agent for the `usd-rs` parity audit; in that agent's `functions.exec`, call `tools.mcp__filesystem__read_text_file({path:"D:\\projects\\vfx.ref\\OpenUSD\\README.md",head:10,line_numbers:true})`. The tool appears in `ALL_TOOLS`, but the call raises `TypeError: tools.mcp__filesystem__read_text_file is not a function`. A second agent observed the same for `tools.mcp__filesystem__seq_think` and `search_files`; its Promise-based attempt reported `MCP tool filesystem/... is not available to the model`. The root agent's same namespace is callable in this session.
+
+Observed impact: delegated read-only analysis cannot follow the required filesystem-MCP workflow. This is a tool-exposure failure in delegated agents, not a missing file or an expected caller error. No data was modified by the failed calls.
+
+Safe fallback: the root agent uses working filesystem-MCP calls for reads and writes; affected delegated agents use read-only PowerShell commands for their inventories and report exact paths and lines. Restore callable bindings for advertised filesystem tools in delegated agents.
+
+## 2026-09-25 — edit_file unmatched edit exposes internal stack trace
+
+Reproduction: call `mcp__filesystem__edit_file` on `usd-rs/crates/usd/usd-sdf/src/path.rs` with two literal edits, where the second `oldText` incorrectly expects `"/Foo:Bar",` followed by a differently indented closing `];`. The expected response is a concise zero-match error, with no file change.
+
+Observed impact: MCP `-32603` reported `1 of 2 edits produced zero matches` and a full `Stack backtrace` (frames 0–24). The input mismatch is an expected caller error; disclosure of internal frames is the server defect. No edit was applied.
+
+Safe fallback: re-read the exact lines, submit literal edits separately, and verify the diff. The server should omit internal frames for ordinary edit validation failures.
+
+## 2026-09-25 — locate_search missing query exposes internal stack trace
+
+Reproduction: call `mcp__filesystem__locate_search({path:"D:\\projects",query:"",mode:"contains",limit:5,waitMs:30000})`. A nonempty query is required for `contains`, so rejecting this caller input is expected.
+
+Observed impact: the server returned MCP `-32602: mode requires query` followed by an internal `Stack backtrace` (frames 0–24). The empty query is an expected user error; disclosure of internal frames is the server defect. The lookup did not run.
+
+Safe fallback: provide a nonempty query, or omit `mode` and `query` when listing indexed names. The server should return a concise validation error without internal frames.
+
+Follow-up (2026-09-25, source-level check): `cargo test --no-default-features --features locate-tools --test integration locate_invalid_query_returns_concise_protocol_error` passed. The server's direct stdio JSON-RPC response contains only `-32602` and `mode requires query`; it does not contain `Stack backtrace`. The internal frames in the observed tool output are added by the MCP tool host when it formats a failed call. The empty query remains an expected caller error, not a `filesystem-mcp-rs` server defect. Keep this reproduction for host-side triage.
+
+## 2026-09-25 — locate_search fails with database locked during active scan
+
+Reproduction: start `mcp__filesystem__locate_refresh({path:"D:\\projects",waitMs:30000})` while the D: locate index is building, then call `mcp__filesystem__locate_search({path:"D:\\projects",query:"projects",mode:"contains",kind:"directories",limit:10,waitMs:1000})`. Repeat the search while `locate_status` reports `state:"building"`. Both attempts returned the same failure.
+
+Observed impact: a valid locate query fails with MCP `-32603: Index queue failed: database is locked({"error":"database is locked"})` and an internal `Stack backtrace` (frames 0–24), so indexed lookup is unavailable during the scan. This is a server concurrency/error-handling defect, not invalid user input.
+
+Safe fallback: wait for `locate_status` to report a completed index before querying, or use `list_directory` / `search_files` for a live lookup. The server should queue or read safely during indexing and return concise errors without internal frames.
+
+Additional reproduction: after `locate_status({path:"D:\\projects",waitMs:1000})` reported `state:"partial"` with `completedSeq:0`, call `locate_refresh({path:"D:\\projects",requestId:"37096-18d89be84d7622cc-0",waitMs:30000})`. It returned `-32603: Index refresh failed: database is locked` with the same internal stack trace, preventing a retry.
+
+Follow-up (2026-09-25): the database lock is a server concurrency problem; the stack frames appear in the MCP host's failed-call formatting. A separate direct stdio integration test confirms that a normal `locate_search` validation error contains no stack frames, so frame attribution for this lock error should be checked at the host boundary before treating it as a second server defect.
+
+Source fix (2026-09-25): `ensure_index` and idempotent `request_refresh` now read the existing queue/receipt before asking SQLite for a writer lock. A completed traversal with inaccessible entries records `partial` without a minute-by-minute retry loop; the first scan keeps its usable entries, and a later partial refresh keeps the previous published generation. Regression tests and the full `cargo test` suite pass. The running installed MCP process has not been replaced or re-tested against `D:\projects`.

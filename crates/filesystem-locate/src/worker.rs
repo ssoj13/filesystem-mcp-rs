@@ -134,9 +134,16 @@ fn process_next(conn: &mut Connection, state_root: &Path, stop: &AtomicBool) -> 
     if work.background && foreground_work_pending(conn)? {
         return yield_background_attempt(conn, &work);
     }
+    // A completed traversal with skipped entries is usable but incomplete.
+    // Only an aborted traversal needs the short automatic retry backoff.
     match outcome {
         Ok(0) => publish(conn, &work),
-        Ok(errors) => fail_attempt(
+        Ok(errors) if work.active_generation == 0 => publish_partial_initial(
+            conn,
+            &work,
+            &format!("{errors} entries could not be indexed"),
+        ),
+        Ok(errors) => finish_partial_refresh(
             conn,
             &work,
             &format!("{errors} entries could not be indexed"),
@@ -263,7 +270,12 @@ fn abandon_covered_attempt(conn: &mut Connection, work: &Work) -> Result<()> {
     Ok(())
 }
 
-pub(crate) fn scan(conn: &mut Connection, work: &Work, state_root: &Path, stop: &AtomicBool) -> Result<u64> {
+pub(crate) fn scan(
+    conn: &mut Connection,
+    work: &Work,
+    state_root: &Path,
+    stop: &AtomicBool,
+) -> Result<u64> {
     let mut batch = Vec::with_capacity(BATCH_SIZE);
     let mut extra_errors = 0u64;
     let mut last_progress = Instant::now();
@@ -547,6 +559,81 @@ fn apply_delta(tx: &rusqlite::Transaction<'_>, work: &Work) -> Result<()> {
         params![work.root_id, work.active_generation, work.attempt_id],
     )?;
     tx.execute(
+        "DELETE FROM staged_entries WHERE attempt_id=?1",
+        [work.attempt_id],
+    )?;
+    Ok(())
+}
+
+pub(crate) fn publish_partial_initial(
+    conn: &mut Connection,
+    work: &Work,
+    error: &str,
+) -> Result<()> {
+    let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    let changed = tx.execute(
+        "UPDATE roots SET active_generation=?2,published_attempt=?2,completed_seq=?3,
+         last_verified=?4,last_error=?5,retry_not_before=0,
+         state=CASE WHEN desired_seq>?3 THEN 'pending' ELSE 'partial' END
+         WHERE id=?1 AND active_generation=0 AND covered_by IS NULL",
+        params![
+            work.root_id,
+            work.attempt_id,
+            work.claimed_seq,
+            now_secs(),
+            error
+        ],
+    )?;
+    if changed == 0 {
+        drop(tx);
+        return fail_attempt(conn, work, error);
+    }
+    tx.execute(
+        "UPDATE scan_requests SET status='partial',result_generation=?3
+         WHERE root_id=?1 AND target_seq<=?2 AND status='pending'",
+        params![work.root_id, work.claimed_seq, work.attempt_id],
+    )?;
+    tx.execute(
+        "UPDATE scan_attempts SET state='partial',finished=?2,error=?3 WHERE id=?1",
+        params![work.attempt_id, now_secs(), error],
+    )?;
+    tx.commit()?;
+    Ok(())
+}
+
+pub(crate) fn finish_partial_refresh(
+    conn: &mut Connection,
+    work: &Work,
+    error: &str,
+) -> Result<()> {
+    let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    let changed = tx.execute(
+        "UPDATE roots SET completed_seq=?3,last_verified=?4,last_error=?5,retry_not_before=0,
+         state=CASE WHEN desired_seq>?3 THEN 'pending' ELSE 'partial' END
+         WHERE id=?1 AND active_generation=?2 AND covered_by IS NULL",
+        params![
+            work.root_id,
+            work.active_generation,
+            work.claimed_seq,
+            now_secs(),
+            error
+        ],
+    )?;
+    if changed == 0 {
+        drop(tx);
+        return abandon_covered_attempt(conn, work);
+    }
+    tx.execute(
+        "UPDATE scan_requests SET status='partial',result_generation=?3
+         WHERE root_id=?1 AND target_seq<=?2 AND status='pending'",
+        params![work.root_id, work.claimed_seq, work.active_generation],
+    )?;
+    tx.execute(
+        "UPDATE scan_attempts SET state='partial',finished=?2,error=?3 WHERE id=?1",
+        params![work.attempt_id, now_secs(), error],
+    )?;
+    tx.commit()?;
+    conn.execute(
         "DELETE FROM staged_entries WHERE attempt_id=?1",
         [work.attempt_id],
     )?;

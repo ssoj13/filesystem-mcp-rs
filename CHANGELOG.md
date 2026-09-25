@@ -11,6 +11,12 @@ Post-0.2.1 work on `main`. The crate version is still 0.2.1 until the next tag.
 - Added low-priority background indexing controlled by `FS_MCP_LOCATE_BACKGROUND*` settings. It yields to foreground work and reports progress through `locate_status`.
 - Both filesystem MCP and Squarebob consume the private GitHub `fscan-rs` crate at pinned revisions. Locate uses native NTFS scans for foreground subtrees and the portable walker for background scans and volume roots; cancellation remains distinct from a backend failure. Every refresh still traverses the filesystem.
 
+### Locate reliability fixes
+
+- Repeated `locate_search` calls for an already queued or published index, and `locate_refresh` calls with an existing request ID, read their state without acquiring a SQLite write lock. This avoids `database is locked` failures while a scan is writing batches.
+- A traversal that skips inaccessible entries now finishes with `partial` status instead of discarding the first index or retrying the entire tree every minute. The first scan keeps its searchable entries; a partial refresh preserves the previously published generation until a complete scan succeeds. Explicit refreshes and scheduled background scans can recheck the tree.
+- An explicit refresh of a child directory can start its own scan when a pending ancestor is `partial`, so a failed volume scan does not force every child request back onto that volume.
+
 ### `filesystem-locate` split into modules
 
 - `crates/filesystem-locate/src/lib.rs` was one 2154-line file. It is now eight: `types.rs` (the public `Status`/`Receipt`/`Match`/search-filter types), `db.rs` (connection setup and the `PRAGMA user_version` migrations), `roots.rs` (root bookkeeping, ancestor/coverage lookups, debounce scheduling, status queries), `time_util.rs`, `worker.rs` (the claim/scan/publish/fail pipeline and the background-priority machinery), `indexer.rs` (the public `Indexer` API — `open`, `request_refresh`, `ensure_index`, `schedule_background`, `search`), and `tests.rs`. `lib.rs` itself is now just module wiring, `pub use` re-exports, and the shared constants. No behavior changed: `cargo test -p filesystem-locate` (12 tests) and `cargo clippy -p filesystem-locate --tests -- -D warnings` both pass exactly as before.

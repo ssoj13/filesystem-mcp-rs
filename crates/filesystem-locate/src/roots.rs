@@ -37,6 +37,7 @@ pub(crate) struct RootRow {
     pub(crate) id: i64,
     pub(crate) path: PathBuf,
     pub(crate) active_generation: i64,
+    pub(crate) state: String,
     pub(crate) published_attempt: i64,
     pub(crate) desired_seq: i64,
     pub(crate) completed_seq: i64,
@@ -46,7 +47,7 @@ pub(crate) struct RootRow {
 
 pub(crate) fn root_rows(conn: &Connection) -> Result<Vec<RootRow>> {
     let mut stmt = conn.prepare(
-        "SELECT id,path,active_generation,desired_seq,completed_seq,covered_by,published_attempt,background FROM roots",
+        "SELECT id,path,active_generation,desired_seq,completed_seq,covered_by,published_attempt,background,state FROM roots",
     )?;
     let rows = stmt.query_map([], |row| {
         Ok(RootRow {
@@ -58,6 +59,7 @@ pub(crate) fn root_rows(conn: &Connection) -> Result<Vec<RootRow>> {
             covered_by: row.get(5)?,
             published_attempt: row.get(6)?,
             background: row.get(7)?,
+            state: row.get(8)?,
         })
     })?;
     rows.collect::<rusqlite::Result<Vec<_>>>()
@@ -68,6 +70,7 @@ pub(crate) fn pending_ancestor<'a>(rows: &'a [RootRow], path: &Path) -> Option<&
     rows.iter()
         .filter(|row| {
             path.starts_with(&row.path)
+                && (path == row.path || row.state != "partial")
                 && row.covered_by.is_none()
                 && !row.background
                 && row.desired_seq > row.completed_seq
@@ -75,7 +78,10 @@ pub(crate) fn pending_ancestor<'a>(rows: &'a [RootRow], path: &Path) -> Option<&
         .min_by_key(|row| row.path.components().count())
 }
 
-pub(crate) fn pending_background_ancestor<'a>(rows: &'a [RootRow], path: &Path) -> Option<&'a RootRow> {
+pub(crate) fn pending_background_ancestor<'a>(
+    rows: &'a [RootRow],
+    path: &Path,
+) -> Option<&'a RootRow> {
     rows.iter()
         .filter(|row| {
             path.starts_with(&row.path)

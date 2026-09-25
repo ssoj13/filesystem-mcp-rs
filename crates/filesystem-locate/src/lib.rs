@@ -19,16 +19,16 @@ pub use types::{
 
 pub(crate) use db::{connect, init_schema};
 pub(crate) use roots::{
-    absorb_descendants, active_provider, canonical_root, ensure_root, path_text,
-    pending_ancestor, root_rows, schedule_debounce, status_by_id, status_for_path,
+    absorb_descendants, active_provider, canonical_root, ensure_root, path_text, pending_ancestor,
+    root_rows, schedule_debounce, status_by_id, status_for_path,
 };
 pub(crate) use time_util::{new_request_id, nonzero_time, now_millis, now_secs};
 pub(crate) use worker::worker_loop;
 
 #[cfg(test)]
 pub(crate) use worker::{
-    BackgroundYield, claim_next, fail_attempt, is_covered, publish, scan, update_progress,
-    yield_background_attempt,
+    BackgroundYield, claim_next, fail_attempt, finish_partial_refresh, is_covered, publish,
+    publish_partial_initial, scan, update_progress, yield_background_attempt,
 };
 
 static REQUEST_COUNTER: AtomicU64 = AtomicU64::new(0);

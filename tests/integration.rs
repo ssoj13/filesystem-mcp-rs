@@ -254,6 +254,29 @@ async fn locate_tools_refresh_and_search_through_stdio() -> Result<()> {
 
 #[cfg(feature = "locate-tools")]
 #[tokio::test]
+async fn locate_invalid_query_returns_concise_protocol_error() -> Result<()> {
+    let tmp = TempDir::new()?;
+    let srv = start_server(tmp.path()).await?;
+    let response = srv
+        .call_tool(
+            "locate_search",
+            json!({"path": tmp.path(), "query": "", "mode": "contains"}),
+        )
+        .await?;
+    assert_eq!(response["error"]["code"], -32602);
+    assert!(
+        response["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("mode requires query")
+    );
+    assert!(!response.to_string().contains("Stack backtrace"));
+    srv.kill().await;
+    Ok(())
+}
+
+#[cfg(feature = "locate-tools")]
+#[tokio::test]
 async fn locate_background_scan_starts_from_mcp_env_and_reports_status() -> Result<()> {
     let tmp = TempDir::new()?;
     std::fs::write(tmp.path().join("background-needle.txt"), b"found")?;

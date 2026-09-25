@@ -8,7 +8,7 @@ use std::time::Duration;
 use anyhow::{Result, bail};
 use globset::Glob;
 use regex::Regex;
-use rusqlite::{OptionalExtension, TransactionBehavior, params};
+use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
 
 use super::*;
 
@@ -61,36 +61,20 @@ impl Indexer {
             bail!("request id must contain 1..=128 bytes");
         }
         let mut conn = connect(&self.db_path)?;
-        let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
         let requested_path = path_text(&root)?;
-        if let Some((existing_path, target_seq, status, work_root, next_scan_at_ms)) = tx
-            .query_row(
-                "SELECT s.requested_path,s.target_seq,s.status,r.path,r.debounce_until_ms
-                 FROM scan_requests s JOIN roots r ON r.id=s.root_id WHERE s.request_id=?1",
-                [&request_id],
-                |row| {
-                    Ok((
-                        row.get::<_, String>(0)?,
-                        row.get(1)?,
-                        row.get(2)?,
-                        row.get::<_, String>(3)?,
-                        row.get::<_, i64>(4)?,
-                    ))
-                },
-            )
-            .optional()?
-        {
+        if let Some((existing_path, receipt)) = request_receipt(&conn, &request_id)? {
+            if existing_path != requested_path {
+                bail!("request id already belongs to another root");
+            }
+            return Ok(receipt);
+        }
+        let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        if let Some((existing_path, receipt)) = request_receipt(&tx, &request_id)? {
             if existing_path != requested_path {
                 bail!("request id already belongs to another root");
             }
             tx.commit()?;
-            return Ok(Receipt {
-                request_id,
-                target_seq,
-                status,
-                work_root: PathBuf::from(work_root),
-                next_scan_at_ms: nonzero_time(next_scan_at_ms),
-            });
+            return Ok(receipt);
         }
         let rows = root_rows(&tx)?;
         let (root_id, work_path) = if let Some(ancestor) = pending_ancestor(&rows, &root) {
@@ -132,6 +116,10 @@ impl Indexer {
     pub fn ensure_index(&self, root: &Path) -> Result<Status> {
         let root = canonical_root(root)?;
         let mut conn = connect(&self.db_path)?;
+        let rows = root_rows(&conn)?;
+        if pending_ancestor(&rows, &root).is_some() || active_provider(&rows, &root).is_some() {
+            return status_for_path(&conn, &root);
+        }
         let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
         let rows = root_rows(&tx)?;
         if pending_ancestor(&rows, &root).is_some() || active_provider(&rows, &root).is_some() {
@@ -384,6 +372,28 @@ impl Indexer {
             status,
         })
     }
+}
+
+fn request_receipt(conn: &Connection, request_id: &str) -> Result<Option<(String, Receipt)>> {
+    conn.query_row(
+        "SELECT s.requested_path,s.target_seq,s.status,r.path,r.debounce_until_ms
+         FROM scan_requests s JOIN roots r ON r.id=s.root_id WHERE s.request_id=?1",
+        [request_id],
+        |row| {
+            Ok((
+                row.get(0)?,
+                Receipt {
+                    request_id: request_id.to_owned(),
+                    target_seq: row.get(1)?,
+                    status: row.get(2)?,
+                    work_root: PathBuf::from(row.get::<_, String>(3)?),
+                    next_scan_at_ms: nonzero_time(row.get(4)?),
+                },
+            ))
+        },
+    )
+    .optional()
+    .map_err(Into::into)
 }
 
 fn matches_fragments(value: &str, filter: &FragmentFilter) -> bool {
