@@ -6572,7 +6572,7 @@ USE CASES: Patch executables, fix binary data, search-replace in non-text files.
 impl FileSystemServer {
     #[tool(
         name = "locate_search",
-        description = "Indexed names in path or paths. kind: all (default), files, directories. query modes: exact/prefix/contains/glob/regex. filters.name/extension/path use include/exclude substring arrays (AND, case-sensitive; extension without dot). Queues missing scans; waitMs waits. Update with locate_refresh; contents: grep_files."
+        description = "Indexed names in path or paths (not a live scan — an unindexed/stale root queues a background scan and returns partial/empty results; poll locate_status or pass waitMs, then re-search). kind: all (default), files, directories. query modes: exact/prefix/contains/glob/regex. filters.name/extension/path use include/exclude substring arrays (AND, case-sensitive; extension without dot). Update with locate_refresh; contents: grep_files."
     )]
     async fn locate_search(
         &self,
@@ -6769,7 +6769,7 @@ impl FileSystemServer {
 
     #[tool(
         name = "locate_refresh",
-        description = "Start initial indexing or refresh an allowed directory recursively. Use list_allowed_directories for roots and locate_status for asynchronous progress. Choose the smallest useful directory; overlapping requests coalesce. Use waitMs to wait, or reuse requestId to check the same request."
+        description = "Queues a recursive scan of an allowed directory and returns immediately — indexing happens in the background, not synchronously. Poll locate_status (or reuse requestId here) to see when it lands. Use list_allowed_directories for roots; choose the smallest useful directory — overlapping requests coalesce. waitMs blocks here instead of polling separately."
     )]
     async fn locate_refresh(
         &self,
@@ -6821,7 +6821,7 @@ impl FileSystemServer {
 
     #[tool(
         name = "locate_status",
-        description = "Index state and background scan progress for an allowed directory. waitMs long-polls asynchronously and sends MCP progress notifications when the client supplies a progress token. Use locate_refresh for an explicit update."
+        description = "Poll this after locate_search/locate_refresh to see whether a queued scan has caught up: index state and background scan progress for an allowed directory. waitMs long-polls asynchronously and sends MCP progress notifications when the client supplies a progress token. Use locate_refresh for an explicit update."
     )]
     async fn locate_status(
         &self,
