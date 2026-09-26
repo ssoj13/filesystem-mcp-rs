@@ -42,12 +42,11 @@ pub(crate) struct RootRow {
     pub(crate) desired_seq: i64,
     pub(crate) completed_seq: i64,
     pub(crate) covered_by: Option<i64>,
-    pub(crate) background: bool,
 }
 
 pub(crate) fn root_rows(conn: &Connection) -> Result<Vec<RootRow>> {
     let mut stmt = conn.prepare(
-        "SELECT id,path,active_generation,desired_seq,completed_seq,covered_by,published_attempt,background,state FROM roots",
+        "SELECT id,path,active_generation,desired_seq,completed_seq,covered_by,published_attempt,state FROM roots",
     )?;
     let rows = stmt.query_map([], |row| {
         Ok(RootRow {
@@ -58,8 +57,7 @@ pub(crate) fn root_rows(conn: &Connection) -> Result<Vec<RootRow>> {
             completed_seq: row.get(4)?,
             covered_by: row.get(5)?,
             published_attempt: row.get(6)?,
-            background: row.get(7)?,
-            state: row.get(8)?,
+            state: row.get(7)?,
         })
     })?;
     rows.collect::<rusqlite::Result<Vec<_>>>()
@@ -72,21 +70,6 @@ pub(crate) fn pending_ancestor<'a>(rows: &'a [RootRow], path: &Path) -> Option<&
             path.starts_with(&row.path)
                 && (path == row.path || row.state != "partial")
                 && row.covered_by.is_none()
-                && !row.background
-                && row.desired_seq > row.completed_seq
-        })
-        .min_by_key(|row| row.path.components().count())
-}
-
-pub(crate) fn pending_background_ancestor<'a>(
-    rows: &'a [RootRow],
-    path: &Path,
-) -> Option<&'a RootRow> {
-    rows.iter()
-        .filter(|row| {
-            path.starts_with(&row.path)
-                && row.covered_by.is_none()
-                && row.background
                 && row.desired_seq > row.completed_seq
         })
         .min_by_key(|row| row.path.components().count())
@@ -101,9 +84,6 @@ pub(crate) fn active_provider<'a>(rows: &'a [RootRow], path: &Path) -> Option<&'
 pub(crate) fn status_for_path(conn: &Connection, path: &Path) -> Result<Status> {
     let rows = root_rows(conn)?;
     if let Some(pending) = pending_ancestor(&rows, path) {
-        return status_by_id(conn, pending.id);
-    }
-    if let Some(pending) = pending_background_ancestor(&rows, path) {
         return status_by_id(conn, pending.id);
     }
     if let Some(exact) = rows.iter().find(|row| row.path == path)
@@ -180,7 +160,7 @@ pub(crate) fn status_by_path(conn: &Connection, path: &Path) -> Result<Status> {
 
 pub(crate) fn status_by_id(conn: &Connection, id: i64) -> Result<Status> {
     let mut status = conn.query_row(
-        "SELECT state,active_generation,desired_seq,completed_seq,last_verified,last_error,debounce_until_ms,background,control FROM roots WHERE id=?1",
+        "SELECT state,active_generation,desired_seq,completed_seq,last_verified,last_error,debounce_until_ms,control FROM roots WHERE id=?1",
         [id],
         parse_status,
     )?;
@@ -216,8 +196,7 @@ fn parse_status(row: &rusqlite::Row<'_>) -> rusqlite::Result<Status> {
             0 => None,
             when => Some(when),
         },
-        background: row.get(7)?,
-        control: row.get(8)?,
+        control: row.get(7)?,
         progress: None,
     })
 }

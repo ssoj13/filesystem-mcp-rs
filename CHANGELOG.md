@@ -8,14 +8,20 @@ Post-0.2.1 work on `main`. The crate version is still 0.2.1 until the next tag.
 
 - Added `locate_search`, `locate_refresh`, and `locate_status` for indexed filename searches, explicit refresh requests, and asynchronous progress. Search accepts multiple roots, five query modes, file/directory filtering, and any number of required or excluded fragments in names, extensions, or paths.
 - Added the `filesystem-locate` crate. Multiple MCP processes share one SQLite index and queue; overlapping requests coalesce with a bounded 3–10 second debounce. A single worker scans, preserves the published generation during refresh, and applies changed rows instead of rewriting unchanged index rows.
-- Added low-priority background indexing controlled by `FS_MCP_LOCATE_BACKGROUND*` settings. It yields to foreground work and reports progress through `locate_status`.
+- ~~Added low-priority background indexing controlled by `FS_MCP_LOCATE_BACKGROUND*` settings.~~ Removed before release; see "Locate: no automatic full scans" below.
 - Both filesystem MCP and Squarebob consume the private GitHub `fscan-rs` crate at pinned revisions. Locate uses native NTFS scans for foreground subtrees and the portable walker for background scans and volume roots; cancellation remains distinct from a backend failure. Every refresh still traverses the filesystem.
 
 ### Locate reliability fixes
 
 - Repeated `locate_search` calls for an already queued or published index, and `locate_refresh` calls with an existing request ID, read their state without acquiring a SQLite write lock. This avoids `database is locked` failures while a scan is writing batches.
-- A traversal that skips inaccessible entries now finishes with `partial` status instead of discarding the first index or retrying the entire tree every minute. The first scan keeps its searchable entries; a partial refresh preserves the previously published generation until a complete scan succeeds. Explicit refreshes and scheduled background scans can recheck the tree.
+- A traversal that skips inaccessible entries now finishes with `partial` status instead of discarding the first index or retrying the entire tree every minute. The first scan keeps its searchable entries; a partial refresh preserves the previously published generation until a complete scan succeeds. Explicit refreshes can recheck the tree.
 - An explicit refresh of a child directory can start its own scan when a pending ancestor is `partial`, so a failed volume scan does not force every child request back onto that volume.
+
+### Locate: no automatic full scans
+
+- **Searching no longer starts a scan, and nothing rescans on a timer.** `locate_search` on a path that was never indexed used to queue a full scan by itself, which is how a search of `C:\` began an 11 GB, multi-hour index. It now returns no matches, `indexState: "unindexed"` and a `hint`; a scan starts only on request (`locate_refresh`, `bgnd_scan_ctl start`). `waitMs` waits only for a scan that is already running.
+- **The background indexer is gone**: `FS_MCP_LOCATE_BACKGROUND`, `_ROOTS`, `_INTERVAL_SECS`, `_PAUSE_MS` and `_START_DELAY_MS`, the periodic loop, the background scan priority/yield machinery, `Indexer::ensure_index` and `Indexer::schedule_background`, and the `background` field of `locate_status`. (The columns stay in the schema; nothing writes them.)
+- **New `FS_MCP_LOCATE_*` keys, all written by `install` with their defaults and listed by `--list-env`:** `SCAN_BATCH` (2000 rows per commit), `WRITE_REST` (2: rest twice as long as the last commit took), `WRITE_PAUSE_MAX_MS` (2000) and `EXCLUDE` (JSON array of paths the scanner never enters; default: `C:\Windows\WinSxS`, `C:\ProgramData\Microsoft\Windows\Containers`, `C:\System Volume Information`; `[]` skips nothing). Values are clamped, and an unparsable one falls back to the default instead of failing; a malformed `EXCLUDE` keeps the default list rather than scanning everything. `filesystem-locate` reads no environment: it takes an `IndexerConfig`.
 
 ### Locate: scans survive a restart, and can be controlled
 

@@ -9,7 +9,13 @@ use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
 
 use super::*;
 
-pub(crate) fn worker_loop(db_path: &Path, lock_path: &Path, state_root: &Path, stop: &AtomicBool) {
+pub(crate) fn worker_loop(
+    db_path: &Path,
+    lock_path: &Path,
+    state_root: &Path,
+    stop: &AtomicBool,
+    config: &IndexerConfig,
+) {
     let lock_file = match File::options()
         .read(true)
         .write(true)
@@ -34,7 +40,7 @@ pub(crate) fn worker_loop(db_path: &Path, lock_path: &Path, state_root: &Path, s
             }
         }
         if let Ok(mut conn) = connect(db_path)
-            && process_next(&mut conn, state_root, stop).is_err()
+            && process_next(&mut conn, state_root, stop, config).is_err()
         {
             let _ = recover(&conn);
         }
@@ -123,8 +129,8 @@ pub(crate) fn recover(conn: &Connection) -> Result<()> {
 /// holds the disk about a third of the time however slow the commits get. The floor still
 /// hands the single writer slot to other processes; the ceiling keeps one bad commit from
 /// parking the scan.
-pub(crate) fn pause_after_commit(commit_took: Duration) -> Duration {
-    (commit_took * COMMIT_REST_FACTOR).clamp(MIN_COMMIT_PAUSE, MAX_COMMIT_PAUSE)
+pub(crate) fn pause_after_commit(commit_took: Duration, rest: u32, max: Duration) -> Duration {
+    (commit_took * rest).clamp(MIN_COMMIT_PAUSE, max.max(MIN_COMMIT_PAUSE))
 }
 
 pub(crate) struct Work {
@@ -136,20 +142,19 @@ pub(crate) struct Work {
     /// reuses the generation of the attempt it continues).
     pub(crate) generation: i64,
     pub(crate) active_generation: i64,
-    pub(crate) background: bool,
-    pub(crate) background_pause_ms: u64,
+    pub(crate) settings: IndexerConfig,
 }
 
 pub(crate) fn claim_next(conn: &mut Connection) -> Result<Option<Work>> {
     let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
     let next = tx
         .query_row(
-            "SELECT id,path,desired_seq,active_generation,background,background_pause_ms,resume_generation FROM roots
+            "SELECT id,path,desired_seq,active_generation,resume_generation FROM roots
              WHERE desired_seq>completed_seq AND state!='building'
                AND covered_by IS NULL AND control='run'
                AND retry_not_before<=?1
                AND debounce_until_ms<=?2
-             ORDER BY background ASC,last_started,id LIMIT 1",
+             ORDER BY last_started,id LIMIT 1",
             params![now_secs(), now_millis()],
             |row| {
                 Ok((
@@ -157,23 +162,12 @@ pub(crate) fn claim_next(conn: &mut Connection) -> Result<Option<Work>> {
                     row.get::<_, String>(1)?,
                     row.get::<_, i64>(2)?,
                     row.get::<_, i64>(3)?,
-                    row.get::<_, bool>(4)?,
-                    row.get::<_, i64>(5)?.max(0) as u64,
-                    row.get::<_, i64>(6)?,
+                    row.get::<_, i64>(4)?,
                 ))
             },
         )
         .optional()?;
-    let Some((
-        root_id,
-        root,
-        claimed_seq,
-        active_generation,
-        background,
-        background_pause_ms,
-        resume_generation,
-    )) = next
-    else {
+    let Some((root_id, root, claimed_seq, active_generation, resume_generation)) = next else {
         tx.commit()?;
         return Ok(None);
     };
@@ -203,8 +197,7 @@ pub(crate) fn claim_next(conn: &mut Connection) -> Result<Option<Work>> {
         attempt_id,
         generation,
         active_generation,
-        background,
-        background_pause_ms,
+        settings: IndexerConfig::default(),
     }))
 }
 
@@ -212,10 +205,12 @@ pub(crate) fn process_next(
     conn: &mut Connection,
     state_root: &Path,
     stop: &AtomicBool,
+    config: &IndexerConfig,
 ) -> Result<()> {
-    let Some(work) = claim_next(conn)? else {
+    let Some(mut work) = claim_next(conn)? else {
         return Ok(());
     };
+    work.settings = config.clone();
     let started = Instant::now();
     tracing::info!(
         root = %work.root.display(),
@@ -223,17 +218,11 @@ pub(crate) fn process_next(
         generation = work.generation,
         resumed = work.generation != work.attempt_id,
         refresh = work.active_generation != 0,
-        background = work.background,
         "locate scan started"
     );
-    let background_priority = BackgroundPriority::enter(work.background);
     let outcome = scan(conn, &work, state_root, stop);
-    drop(background_priority);
     if is_covered(conn, work.root_id)? {
         return abandon_covered_attempt(conn, &work);
-    }
-    if work.background && foreground_work_pending(conn)? {
-        return yield_background_attempt(conn, &work);
     }
     // A completed traversal with skipped entries is usable but incomplete.
     // Only an aborted traversal needs the short automatic retry backoff.
@@ -258,9 +247,6 @@ pub(crate) fn process_next(
                 &work,
                 &format!("{errors} entries could not be indexed"),
             )
-        }
-        Err(error) if error.downcast_ref::<BackgroundYield>().is_some() => {
-            yield_background_attempt(conn, &work)
         }
         // Shutting down is not a failure: no backoff, and nothing built so far is thrown away.
         Err(error)
@@ -296,43 +282,6 @@ pub(crate) fn interrupt_attempt(conn: &mut Connection, work: &Work) -> Result<()
     Ok(())
 }
 
-struct BackgroundPriority {
-    #[cfg(windows)]
-    active: bool,
-}
-
-impl BackgroundPriority {
-    fn enter(background: bool) -> Self {
-        #[cfg(windows)]
-        {
-            use windows::Win32::System::Threading::{
-                GetCurrentThread, SetThreadPriority, THREAD_MODE_BACKGROUND_BEGIN,
-            };
-            let active = background
-                && unsafe { SetThreadPriority(GetCurrentThread(), THREAD_MODE_BACKGROUND_BEGIN) }
-                    .is_ok();
-            Self { active }
-        }
-        #[cfg(not(windows))]
-        {
-            let _ = background;
-            Self {}
-        }
-    }
-}
-
-impl Drop for BackgroundPriority {
-    fn drop(&mut self) {
-        #[cfg(windows)]
-        if self.active {
-            use windows::Win32::System::Threading::{
-                GetCurrentThread, SetThreadPriority, THREAD_MODE_BACKGROUND_END,
-            };
-            let _ = unsafe { SetThreadPriority(GetCurrentThread(), THREAD_MODE_BACKGROUND_END) };
-        }
-    }
-}
-
 /// The scan was ended on request (`Indexer::scan_control`), not by a failure.
 #[derive(Debug)]
 pub(crate) struct ScanStopped;
@@ -360,50 +309,6 @@ fn honour_control(conn: &Connection, root_id: i64, stop: &AtomicBool) -> Result<
             _ => return Ok(()),
         }
     }
-}
-
-#[derive(Debug)]
-pub(crate) struct BackgroundYield;
-
-impl std::fmt::Display for BackgroundYield {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str("background scan yielded to foreground work")
-    }
-}
-
-impl std::error::Error for BackgroundYield {}
-
-fn foreground_work_pending(conn: &Connection) -> Result<bool> {
-    Ok(conn.query_row(
-        "SELECT EXISTS(SELECT 1 FROM roots WHERE desired_seq>completed_seq
-         AND covered_by IS NULL AND background=0)",
-        [],
-        |row| row.get(0),
-    )?)
-}
-
-pub(crate) fn yield_background_attempt(conn: &mut Connection, work: &Work) -> Result<()> {
-    let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
-    tx.execute(
-        "UPDATE roots SET state='pending',
-         debounce_until_ms=CASE WHEN background=0 THEN ?2 ELSE ?3 END
-         WHERE id=?1 AND covered_by IS NULL",
-        params![
-            work.root_id,
-            now_millis(),
-            now_millis() + BACKGROUND_RETRY_DELAY_MS
-        ],
-    )?;
-    tx.execute(
-        "UPDATE scan_attempts SET state='yielded',finished=?2 WHERE id=?1",
-        params![work.attempt_id, now_secs()],
-    )?;
-    tx.commit()?;
-    conn.execute(
-        "DELETE FROM staged_entries WHERE attempt_id=?1",
-        [work.attempt_id],
-    )?;
-    Ok(())
 }
 
 pub(crate) fn is_covered(conn: &Connection, root_id: i64) -> Result<bool> {
@@ -443,7 +348,7 @@ pub(crate) fn scan(
     state_root: &Path,
     stop: &AtomicBool,
 ) -> Result<u64> {
-    let mut batch = Vec::with_capacity(SCAN_BATCH_SIZE);
+    let mut batch = Vec::with_capacity(work.settings.scan_batch);
     let mut extra_errors = 0u64;
     let mut last_progress = Instant::now();
     #[cfg(windows)]
@@ -453,10 +358,7 @@ pub(crate) fn scan(
     #[cfg(windows)]
     let mut last_control_check: Option<Instant> = None;
     #[cfg(windows)]
-    let native_tree = if !work.background
-        && work.root.parent().is_some()
-        && fscan_rs::is_ntfs_available(&work.root)
-    {
+    let native_tree = if work.root.parent().is_some() && fscan_rs::is_ntfs_available(&work.root) {
         // The tree read cannot be told to stop except through the flag it is given, so the
         // callback forwards a shutdown or an operator's stop into a flag of its own.
         let result =
@@ -506,13 +408,6 @@ pub(crate) fn scan(
                 honour_control(conn, work.root_id, stop)?;
                 visit_control_check = Some(Instant::now());
             }
-            if work.background
-                && entry.kind == fscan_rs::EntryKind::Directory
-                && (progress.directories + 1).is_multiple_of(16)
-                && foreground_work_pending(conn)?
-            {
-                return Err(BackgroundYield.into());
-            }
             if entry.kind == fscan_rs::EntryKind::Directory
                 && (progress.directories + 1).is_multiple_of(128)
                 && is_covered(conn, work.root_id)?
@@ -528,13 +423,6 @@ pub(crate) fn scan(
                     &entry.path,
                 )?;
                 last_progress = Instant::now();
-            }
-            if progress.entries.is_multiple_of(64) && work.background {
-                thread::sleep(Duration::from_millis(work.background_pause_ms));
-                thread::yield_now();
-                if foreground_work_pending(conn)? {
-                    return Err(BackgroundYield.into());
-                }
             }
             let (Some(path), Some(name)) = (entry.path.to_str(), entry.name.to_str()) else {
                 extra_errors += 1;
@@ -556,7 +444,7 @@ pub(crate) fn scan(
                 entry.len as i64,
                 modified,
             ));
-            if batch.len() >= SCAN_BATCH_SIZE {
+            if batch.len() >= work.settings.scan_batch {
                 flush_batch(conn, work, &mut batch)?;
                 if is_covered(conn, work.root_id)? {
                     bail!("scan superseded by an ancestor request");
@@ -570,7 +458,7 @@ pub(crate) fn scan(
             tree,
             diagnostics,
             stop,
-            |path| !path.starts_with(state_root),
+            |path| !path.starts_with(state_root) && !work.settings.is_excluded(path),
             &mut visit,
         ) {
             Ok(progress) => Some(progress),
@@ -588,7 +476,7 @@ pub(crate) fn scan(
         None => fscan_rs::scan_standard(
             &work.root,
             stop,
-            |path| !path.starts_with(state_root),
+            |path| !path.starts_with(state_root) && !work.settings.is_excluded(path),
             &mut visit,
         )
         .map_err(|error| match error {
@@ -683,9 +571,13 @@ fn flush_batch(conn: &mut Connection, work: &Work, batch: &mut EntryBatch) -> Re
     }
     tx.commit()?;
     // A large scan otherwise reacquires SQLite's single writer slot almost
-    // immediately. Give foreground refresh and background scheduling calls a
+    // immediately. Give other requests a
     // chance to acquire it between batches, even across MCP processes.
-    thread::sleep(pause_after_commit(commit_started.elapsed()));
+    thread::sleep(pause_after_commit(
+        commit_started.elapsed(),
+        work.settings.write_rest,
+        work.settings.write_pause_max,
+    ));
     Ok(())
 }
 

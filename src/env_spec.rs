@@ -128,33 +128,32 @@ fn memory_vars() -> Vec<EnvVar> {
     ]
 }
 
+/// How the file index is built. Nothing here starts a scan: searching never scans, and there is
+/// no periodic rescan. A scan runs only when asked (`locate_refresh`, `bgnd_scan_ctl start`).
+/// Read by [`crate::locate_cfg`], which `shipped_defaults_match_what_the_crate_uses_when_nothing_is_set`
+/// holds to the crate's own defaults.
 #[cfg(feature = "locate-tools")]
 fn locate_vars() -> Vec<EnvVar> {
     vec![
         EnvVar {
-            key: "FS_MCP_LOCATE_BACKGROUND",
-            default: "off",
-            help: "Periodic indexing of configured roots: on | off. Set explicit background roots before enabling broad access.",
+            key: "FS_MCP_LOCATE_SCAN_BATCH",
+            default: "2000",
+            help: "Rows per scan commit, 200..20000. Larger = fewer disk syncs but longer write locks.",
         },
         EnvVar {
-            key: "FS_MCP_LOCATE_BACKGROUND_ROOTS",
-            default: "",
-            help: "Optional JSON array of allowed directories to index in background; blank = all allowed roots.",
+            key: "FS_MCP_LOCATE_WRITE_REST",
+            default: "2",
+            help: "After each scan commit the scanner rests this many times as long as the commit took, 0..8. Higher = gentler on a busy disk; 0 = a 10 ms floor only.",
         },
         EnvVar {
-            key: "FS_MCP_LOCATE_BACKGROUND_INTERVAL_SECS",
-            default: "3600",
-            help: "Minimum seconds between background verification scans of a root.",
+            key: "FS_MCP_LOCATE_WRITE_PAUSE_MAX_MS",
+            default: "2000",
+            help: "Upper bound of that rest in milliseconds, 10..30000.",
         },
         EnvVar {
-            key: "FS_MCP_LOCATE_BACKGROUND_PAUSE_MS",
-            default: "50",
-            help: "Background scan pause after every 64 entries (0..1000 ms); larger is gentler.",
-        },
-        EnvVar {
-            key: "FS_MCP_LOCATE_BACKGROUND_START_DELAY_MS",
-            default: "10000",
-            help: "Delay before a newly queued background scan can start, in milliseconds.",
+            key: "FS_MCP_LOCATE_EXCLUDE",
+            default: r#"["C:\\Windows\\WinSxS","C:\\ProgramData\\Microsoft\\Windows\\Containers","C:\\System Volume Information"]"#,
+            help: "JSON array of paths the scanner never enters (whole-component match, case-insensitive on Windows). Default skips the component store, container layer copies and an unreadable system area; `[]` skips nothing.",
         },
     ]
 }

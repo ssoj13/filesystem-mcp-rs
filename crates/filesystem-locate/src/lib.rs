@@ -13,8 +13,8 @@ mod worker;
 
 pub use indexer::Indexer;
 pub use types::{
-    EntryKind, FragmentFilter, Match, MatchMode, Receipt, ScanAction, ScanInfo, ScanProgress,
-    SearchFilters, SearchResult, Status,
+    EntryKind, FragmentFilter, IndexerConfig, Match, MatchMode, Receipt, ScanAction, ScanInfo,
+    ScanProgress, SearchFilters, SearchResult, Status,
 };
 
 pub(crate) use db::{connect, init_schema};
@@ -27,9 +27,9 @@ pub(crate) use worker::worker_loop;
 
 #[cfg(test)]
 pub(crate) use worker::{
-    BackgroundYield, ScanStopped, Work, claim_next, fail_attempt, finish_partial_refresh,
-    is_covered, pause_after_commit, process_next, publish, publish_partial_initial, recover, scan,
-    update_progress, yield_background_attempt,
+    ScanStopped, Work, claim_next, fail_attempt, finish_partial_refresh, is_covered,
+    pause_after_commit, process_next, publish, publish_partial_initial, recover, scan,
+    update_progress,
 };
 
 static REQUEST_COUNTER: AtomicU64 = AtomicU64::new(0);
@@ -38,14 +38,13 @@ const ERROR_BACKOFF_SECS: i64 = 60;
 /// Rows per delete transaction in recovery, where each row also pays two FTS deletes.
 const BATCH_SIZE: usize = 500;
 /// Rows per scan commit: fewer, larger commits mean fewer WAL syncs and page rewrites.
-const SCAN_BATCH_SIZE: usize = 2_000;
-const COMMIT_REST_FACTOR: u32 = 2;
+const DEFAULT_SCAN_BATCH: usize = 2_000;
+const DEFAULT_WRITE_REST: u32 = 2;
+const DEFAULT_WRITE_PAUSE_MAX: Duration = Duration::from_millis(2_000);
 const MIN_COMMIT_PAUSE: Duration = Duration::from_millis(10);
-const MAX_COMMIT_PAUSE: Duration = Duration::from_millis(2_000);
 const DEBOUNCE_QUIET_MS: i64 = 3_000;
 const DEBOUNCE_MAX_MS: i64 = 10_000;
 const DEBOUNCE_MAX_RESETS: i64 = 3;
-const BACKGROUND_RETRY_DELAY_MS: i64 = 15_000;
 const PROGRESS_LOG_INTERVAL_MS: i64 = 60_000;
 /// How often a running scan looks for a stop or pause request, and how often a paused one
 /// looks for the resume.

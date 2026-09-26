@@ -114,6 +114,8 @@ use reqwest::redirect::Policy;
 
 mod core;
 mod env_spec;
+#[cfg(feature = "locate-tools")]
+mod locate_cfg;
 /// Vendored copy of the private `mcp-setup-rs` crate — see `src/mcp_setup/VENDOR.md`.
 ///
 /// The upstream library API is kept verbatim so the copy can be resynced with a plain `cp` + the
@@ -1162,132 +1164,6 @@ struct BgndScanCtlArgs {
     /// Directory whose scans to control. Required by `start`; omitted, every other action covers every indexed root.
     #[serde(default)]
     path: Option<String>,
-}
-
-#[cfg(feature = "locate-tools")]
-struct LocateBackgroundConfig {
-    roots: Option<Vec<PathBuf>>,
-    interval_secs: u64,
-    pause_ms: u64,
-    start_delay_ms: u64,
-}
-
-#[cfg(feature = "locate-tools")]
-fn locate_setting(key: &str) -> String {
-    env_spec::get(key).unwrap_or_else(|| locate_default(key).to_owned())
-}
-
-#[cfg(feature = "locate-tools")]
-fn locate_default(key: &str) -> &'static str {
-    env_spec::vars()
-        .into_iter()
-        .find(|var| var.key == key)
-        .map(|var| var.default)
-        .unwrap_or_default()
-}
-
-#[cfg(feature = "locate-tools")]
-fn locate_background_config() -> Option<LocateBackgroundConfig> {
-    let enabled = locate_setting("FS_MCP_LOCATE_BACKGROUND");
-    if !matches!(enabled.as_str(), "on" | "true" | "1") {
-        if !matches!(enabled.as_str(), "off" | "false" | "0") {
-            warn!("Invalid FS_MCP_LOCATE_BACKGROUND={enabled:?}; background indexing is off");
-        }
-        return None;
-    }
-    let roots = env_spec::get("FS_MCP_LOCATE_BACKGROUND_ROOTS")
-        .map(|value| serde_json::from_str::<Vec<PathBuf>>(&value));
-    let roots = match roots.transpose() {
-        Ok(roots) => roots,
-        Err(error) => {
-            warn!("Invalid FS_MCP_LOCATE_BACKGROUND_ROOTS JSON array: {error}");
-            return None;
-        }
-    };
-    let interval_secs = locate_setting("FS_MCP_LOCATE_BACKGROUND_INTERVAL_SECS")
-        .parse::<u64>()
-        .unwrap_or_else(|_| {
-            warn!("Invalid FS_MCP_LOCATE_BACKGROUND_INTERVAL_SECS; using the registered default");
-            locate_default("FS_MCP_LOCATE_BACKGROUND_INTERVAL_SECS")
-                .parse()
-                .expect("registered interval default")
-        })
-        .clamp(1, 86_400);
-    let pause_ms = locate_setting("FS_MCP_LOCATE_BACKGROUND_PAUSE_MS")
-        .parse::<u64>()
-        .unwrap_or_else(|_| {
-            warn!("Invalid FS_MCP_LOCATE_BACKGROUND_PAUSE_MS; using the registered default");
-            locate_default("FS_MCP_LOCATE_BACKGROUND_PAUSE_MS")
-                .parse()
-                .expect("registered pause default")
-        })
-        .min(1_000);
-    let start_delay_ms = locate_setting("FS_MCP_LOCATE_BACKGROUND_START_DELAY_MS")
-        .parse::<u64>()
-        .unwrap_or_else(|_| {
-            warn!("Invalid FS_MCP_LOCATE_BACKGROUND_START_DELAY_MS; using the registered default");
-            locate_default("FS_MCP_LOCATE_BACKGROUND_START_DELAY_MS")
-                .parse()
-                .expect("registered delay default")
-        })
-        .min(600_000);
-    Some(LocateBackgroundConfig {
-        roots,
-        interval_secs,
-        pause_ms,
-        start_delay_ms,
-    })
-}
-
-#[cfg(feature = "locate-tools")]
-async fn locate_background_loop(
-    indexer: Arc<Indexer>,
-    allowed: AllowedDirs,
-    config: LocateBackgroundConfig,
-) {
-    let mut tick = tokio::time::interval(Duration::from_secs(config.interval_secs.min(30)));
-    loop {
-        tick.tick().await;
-        let allowed_roots = allowed.snapshot().await;
-        let candidates = config
-            .roots
-            .as_ref()
-            .unwrap_or(&allowed_roots)
-            .iter()
-            .filter_map(|path| std::fs::canonicalize(path).ok())
-            .filter(|path| {
-                path.is_dir()
-                    && allowed_roots
-                        .iter()
-                        .any(|allowed| path.starts_with(allowed))
-            });
-        let mut roots: Vec<PathBuf> = candidates.collect();
-        roots.sort_by_key(|path| path.components().count());
-        let mut minimal = Vec::new();
-        for root in roots {
-            if !minimal
-                .iter()
-                .any(|parent: &PathBuf| root.starts_with(parent))
-            {
-                minimal.push(root);
-            }
-        }
-        for root in minimal {
-            let index = indexer.clone();
-            let interval_secs = config.interval_secs;
-            let pause_ms = config.pause_ms;
-            let start_delay_ms = config.start_delay_ms;
-            match tokio::task::spawn_blocking(move || {
-                index.schedule_background(&root, interval_secs, pause_ms, start_delay_ms)
-            })
-            .await
-            {
-                Ok(Err(error)) => warn!("Background locate scheduling failed: {error:#}"),
-                Err(error) => warn!("Background locate task failed: {error}"),
-                Ok(Ok(_)) => {}
-            }
-        }
-    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
@@ -6592,7 +6468,7 @@ USE CASES: Patch executables, fix binary data, search-replace in non-text files.
 impl FileSystemServer {
     #[tool(
         name = "locate_search",
-        description = "Indexed names in path or paths (not a live scan — an unindexed/stale root queues a background scan and returns partial/empty results; poll locate_status or pass waitMs, then re-search). kind: all (default), files, directories. query modes: exact/prefix/contains/glob/regex. filters.name/extension/path use include/exclude substring arrays (AND, case-sensitive; extension without dot). Update with locate_refresh; contents: grep_files."
+        description = "Indexed names in path or paths. Searching never scans: a path nobody indexed returns no matches (indexState unindexed) — index it first with locate_refresh, poll locate_status, then search. waitMs only waits for a scan already running. kind: all (default), files, directories. query modes: exact/prefix/contains/glob/regex. filters.name/extension/path use include/exclude substring arrays (AND, case-sensitive; extension without dot). Update with locate_refresh; contents: grep_files."
     )]
     async fn locate_search(
         &self,
@@ -6671,7 +6547,6 @@ impl FileSystemServer {
         let mut statuses = tokio::task::spawn_blocking(move || -> anyhow::Result<Vec<_>> {
             let mut statuses = Vec::new();
             for root in &roots_for_work {
-                index_for_work.ensure_index(root)?;
                 statuses.push(index_for_work.status(root)?);
             }
             Ok(statuses)
@@ -6679,7 +6554,10 @@ impl FileSystemServer {
         .await
         .map_err(internal_err("Index task failed"))?
         .map_err(internal_err("Index queue failed"))?;
-        if statuses.iter().any(|s| s.active_generation == 0) && wait_ms > 0 {
+        let scanning = |s: &filesystem_locate::Status| {
+            s.active_generation == 0 && matches!(s.state.as_str(), "pending" | "building")
+        };
+        if statuses.iter().any(scanning) && wait_ms > 0 {
             let deadline = Instant::now() + Duration::from_millis(wait_ms);
             while Instant::now() < deadline {
                 tokio::time::sleep(Duration::from_millis(200)).await;
@@ -6691,10 +6569,7 @@ impl FileSystemServer {
                 .await
                 .map_err(internal_err("Index task failed"))?
                 .map_err(internal_err("Index status failed"))?;
-                if statuses
-                    .iter()
-                    .all(|s| s.active_generation != 0 || s.state == "partial")
-                {
+                if !statuses.iter().any(scanning) {
                     break;
                 }
             }
@@ -6756,15 +6631,21 @@ impl FileSystemServer {
             matches.len(),
             roots.len()
         );
+        let unindexed = final_statuses.iter().any(|s| s.state == "unindexed");
         let state = if final_statuses.len() == 1 {
             final_statuses[0].state.as_str()
         } else if final_statuses.iter().all(|s| s.state == "ready") {
             "ready"
+        } else if final_statuses.iter().all(|s| s.state == "unindexed") {
+            "unindexed"
         } else if final_statuses.iter().any(|s| s.state == "partial") {
             "partial"
         } else {
             "pending"
         };
+        let hint = unindexed.then_some(
+            "a searched path was never indexed and searching does not start a scan: run locate_refresh on it (or bgnd_scan_ctl start), poll locate_status, then search again",
+        );
         let next_scan_at_ms = final_statuses
             .iter()
             .filter_map(|s| s.next_scan_at_ms)
@@ -6783,6 +6664,7 @@ impl FileSystemServer {
                 "lastVerified": last_verified,
                 "indexError": index_error,
                 "nextScanAtMs": next_scan_at_ms,
+                "hint": hint,
             })),
         )
     }
@@ -6841,7 +6723,7 @@ impl FileSystemServer {
 
     #[tool(
         name = "bgnd_scan_ctl",
-        description = "Control the background index scans behind locate_*. status lists every indexed root with its scan state and progress. start queues a scan of one directory and lets it run. stop ends the running scan but keeps what it read, so a later start resumes it. pause holds a scan in place. resume releases a paused or stopped root without queuing anything. The request is stored in the index, so it reaches a scan running in another MCP process."
+        description = "Control the index scans behind locate_*. status lists every indexed root with its scan state and progress. start queues a scan of one directory and lets it run. stop ends the running scan but keeps what it read, so a later start resumes it. pause holds a scan in place. resume releases a paused or stopped root without queuing anything. The request is stored in the index, so it reaches a scan running in another MCP process."
     )]
     async fn bgnd_scan_ctl(
         &self,
@@ -6933,7 +6815,7 @@ impl FileSystemServer {
 
     #[tool(
         name = "locate_status",
-        description = "Poll this after locate_search/locate_refresh to see whether a queued scan has caught up: index state and background scan progress for an allowed directory. waitMs long-polls asynchronously and sends MCP progress notifications when the client supplies a progress token. Use locate_refresh for an explicit update."
+        description = "Poll this after locate_refresh to see whether a queued scan has caught up: index state and scan progress for an allowed directory. waitMs long-polls asynchronously and sends MCP progress notifications when the client supplies a progress token. Use locate_refresh for an explicit update."
     )]
     async fn locate_status(
         &self,
@@ -7014,7 +6896,6 @@ impl FileSystemServer {
             "lastVerified": status.last_verified,
             "error": status.last_error,
             "nextScanAtMs": status.next_scan_at_ms,
-            "background": status.background,
             "progress": progress,
         })))
     }
@@ -8420,18 +8301,10 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
     #[cfg(feature = "locate-tools")]
     match core::paths::state_dir()
         .map_err(anyhow::Error::from)
-        .and_then(|path| Indexer::open(&path))
+        .and_then(|path| Indexer::open_with(&path, locate_cfg::indexer_config()))
     {
         Ok(indexer) => server.indexer = Some(Arc::new(indexer)),
         Err(error) => warn!("File index disabled: {error:#}"),
-    }
-    #[cfg(feature = "locate-tools")]
-    if let (Some(indexer), Some(config)) = (server.indexer.clone(), locate_background_config()) {
-        tokio::spawn(locate_background_loop(
-            indexer,
-            server.allowed.clone(),
-            config,
-        ));
     }
     server.session_footer_every = if args.no_session_footer {
         0

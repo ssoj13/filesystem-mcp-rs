@@ -42,21 +42,10 @@ fn sha256_hex(bytes: &[u8]) -> String {
 /// (`core::paths::resolve_root` rejects a relative one at startup), which `TempDir` always is.
 /// The directory is owned by the returned handle so it outlives the process that is using it.
 async fn spawn_server(args: &[&str]) -> Result<ServerHandle> {
-    spawn_server_with_background(args, false).await
-}
-
-async fn spawn_server_with_background(args: &[&str], background: bool) -> Result<ServerHandle> {
     let state = TempDir::new()?;
     let mut cmd = Command::new(assert_cmd());
     cmd.args(args)
         .env("FS_MCP_STATE_DIR", state.path())
-        .env(
-            "FS_MCP_LOCATE_BACKGROUND",
-            if background { "on" } else { "off" },
-        )
-        .env("FS_MCP_LOCATE_BACKGROUND_START_DELAY_MS", "0")
-        .env("FS_MCP_LOCATE_BACKGROUND_INTERVAL_SECS", "1")
-        .env("FS_MCP_LOCATE_BACKGROUND_PAUSE_MS", "0")
         .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::inherit());
@@ -275,71 +264,111 @@ async fn locate_invalid_query_returns_concise_protocol_error() -> Result<()> {
     Ok(())
 }
 
+/// Index `path` and wait for it: searching never scans, so a test that searches asks first.
+#[cfg(feature = "locate-tools")]
+async fn index_and_wait(srv: &ServerHandle, path: &Path) -> Result<()> {
+    let refreshed = srv
+        .call_tool("locate_refresh", json!({"path": path, "waitMs": 30_000}))
+        .await?;
+    assert_ok(&refreshed);
+    assert_eq!(
+        refreshed["result"]["structuredContent"]["status"],
+        "complete"
+    );
+    Ok(())
+}
+
 #[cfg(feature = "locate-tools")]
 #[tokio::test]
-async fn locate_background_scan_starts_from_mcp_env_and_reports_status() -> Result<()> {
+async fn searching_an_unindexed_path_reports_it_and_never_starts_a_scan() -> Result<()> {
     let tmp = TempDir::new()?;
-    std::fs::write(tmp.path().join("background-needle.txt"), b"found")?;
-    let srv =
-        spawn_server_with_background(&["--no-session-footer", tmp.path().to_str().unwrap()], true)
-            .await?;
-    let init = srv
-        .request(
-            "initialize",
-            json!({
-                "protocolVersion": "2025-06-18",
-                "capabilities": {},
-                "clientInfo": { "name": "test", "version": "1" }
-            }),
+    std::fs::write(tmp.path().join("needle.txt"), b"x")?;
+    let srv = start_server(tmp.path()).await?;
+
+    let search = srv
+        .call_tool(
+            "locate_search",
+            json!({"path": tmp.path(), "query": "needle", "mode": "prefix", "waitMs": 2_000}),
         )
         .await?;
-    assert!(init.get("error").is_none());
-    srv.notify("notifications/initialized", json!({})).await?;
-    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(15);
-    let status = loop {
-        let result = srv
-            .call_tool("locate_status", json!({"path": tmp.path()}))
-            .await?;
-        assert_ok(&result);
-        let status = result["result"]["structuredContent"].clone();
-        if status["state"] == "ready" || tokio::time::Instant::now() >= deadline {
-            break status;
-        }
-        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
-    };
+    assert_ok(&search);
+    let data = &search["result"]["structuredContent"];
+    assert_eq!(data["matches"], json!([]));
+    assert_eq!(data["indexState"], "unindexed");
+    assert!(
+        data["hint"].as_str().unwrap().contains("locate_refresh"),
+        "{}",
+        data["hint"]
+    );
+    // Nothing was queued: the index knows no roots, and it still knows none a moment later.
+    tokio::time::sleep(std::time::Duration::from_millis(1_500)).await;
+    let scans = srv
+        .call_tool("bgnd_scan_ctl", json!({"action": "status"}))
+        .await?;
+    assert_eq!(scans["result"]["structuredContent"]["scans"], json!([]));
+
+    // Asking for the scan is what starts it, and then the same search finds the file.
+    let asked = srv
+        .call_tool(
+            "locate_refresh",
+            json!({"path": tmp.path(), "waitMs": 30_000}),
+        )
+        .await?;
+    assert_ok(&asked);
+    let found = srv
+        .call_tool(
+            "locate_search",
+            json!({"path": tmp.path(), "query": "needle", "mode": "prefix", "waitMs": 30_000}),
+        )
+        .await?;
+    assert_eq!(
+        found["result"]["structuredContent"]["matches"]
+            .as_array()
+            .unwrap()
+            .len(),
+        1
+    );
+    srv.kill().await;
+    Ok(())
+}
+
+#[cfg(feature = "locate-tools")]
+#[tokio::test]
+async fn locate_status_reports_scan_progress_to_a_client_that_asks_for_it() -> Result<()> {
+    let tmp = TempDir::new()?;
+    std::fs::write(tmp.path().join("a.txt"), b"a")?;
+    let srv = start_server(tmp.path()).await?;
+    index_and_wait(&srv, tmp.path()).await?;
+
+    let plain = srv
+        .call_tool("locate_status", json!({"path": tmp.path()}))
+        .await?;
+    assert_ok(&plain);
+    let status = &plain["result"]["structuredContent"];
     assert_eq!(status["state"], "ready");
-    assert_eq!(status["background"], true);
     assert_eq!(status["progress"]["attemptState"], "complete");
     assert!(status["progress"]["entriesSeen"].as_u64().unwrap() >= 1);
+    assert!(
+        status.get("background").is_none(),
+        "the background flag is gone"
+    );
+
+    // A client that sends a progressToken is told what the index is doing.
     let followed = srv
         .request(
             "tools/call",
             json!({
                 "name": "locate_status",
                 "arguments": {"path": tmp.path(), "waitMs": 1000},
-                "_meta": {"progressToken": "background-probe"}
+                "_meta": {"progressToken": "status-probe"}
             }),
         )
         .await?;
     assert_ok(&followed);
     assert!(srv.notifications.lock().await.iter().any(|notification| {
         notification["method"] == "notifications/progress"
-            && notification["params"]["progressToken"] == "background-probe"
+            && notification["params"]["progressToken"] == "status-probe"
     }));
-    let result = srv
-        .call_tool(
-            "locate_search",
-            json!({"path": tmp.path(), "query": "background-needle.txt", "mode": "exact", "kind": "files"}),
-        )
-        .await?;
-    assert_ok(&result);
-    assert_eq!(
-        result["result"]["structuredContent"]["matches"]
-            .as_array()
-            .unwrap()
-            .len(),
-        1
-    );
     srv.kill().await;
     Ok(())
 }
@@ -447,6 +476,8 @@ async fn locate_search_combines_roots_and_fragment_rules() -> Result<()> {
     std::fs::write(left.join("report-2026-final-draft.pdf"), b"no")?;
     std::fs::write(right.join("report-2026-final.pdf"), b"yes")?;
     let srv = start_server(tmp.path()).await?;
+    index_and_wait(&srv, &left).await?;
+    index_and_wait(&srv, &right).await?;
     let search = srv
         .call_tool(
             "locate_search",
@@ -466,6 +497,7 @@ async fn locate_search_combines_roots_and_fragment_rules() -> Result<()> {
     assert_eq!(data["matches"].as_array().unwrap().len(), 2);
     assert_eq!(data["indexes"].as_array().unwrap().len(), 2);
     assert_eq!(data["indexState"], "ready");
+    index_and_wait(&srv, tmp.path()).await?;
     let by_path = srv
         .call_tool(
             "locate_search",

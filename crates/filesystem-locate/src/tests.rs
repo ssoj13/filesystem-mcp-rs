@@ -268,7 +268,13 @@ fn shutdown_during_an_initial_scan_interrupts_instead_of_deleting() {
     let work = interrupted_initial_scan(&mut conn, temp.path(), &["a.txt", "b.txt"]);
     recover(&conn).unwrap();
 
-    process_next(&mut conn, &state, &AtomicBool::new(true)).unwrap();
+    process_next(
+        &mut conn,
+        &state,
+        &AtomicBool::new(true),
+        &IndexerConfig::default(),
+    )
+    .unwrap();
 
     assert_eq!(entry_count(&conn), 2, "a clean shutdown discarded the scan");
     let (root_state, retry): (String, i64) = conn
@@ -450,13 +456,75 @@ fn every_connection_commits_without_an_fsync_each_in_wal_mode() {
 #[test]
 fn writer_pause_grows_with_the_commit_and_stays_within_bounds() {
     let ms = Duration::from_millis;
+    let pause = |took: Duration, rest: u32| pause_after_commit(took, rest, ms(2_000));
     // Trivial commits still yield the writer slot to other processes.
-    assert_eq!(pause_after_commit(ms(0)), ms(10));
-    // A slow commit (busy disk) earns twice its own length in rest: the writer holds the
-    // disk about a third of the time however slow it is.
-    assert_eq!(pause_after_commit(ms(300)), ms(600));
-    // ...but a pathological commit cannot park the scan for minutes.
-    assert_eq!(pause_after_commit(Duration::from_secs(60)), ms(2_000));
+    assert_eq!(pause(ms(0), 2), ms(10));
+    // A slow commit (busy disk) earns `rest` times its own length in rest, so the writer
+    // holds the disk 1/(rest+1) of the time however slow it is.
+    assert_eq!(pause(ms(300), 2), ms(600));
+    assert_eq!(pause(ms(300), 4), ms(1_200));
+    // rest = 0 switches the proportional part off; only the floor remains.
+    assert_eq!(pause(ms(300), 0), ms(10));
+    // A pathological commit cannot park the scan past the configured ceiling.
+    assert_eq!(pause(Duration::from_secs(60), 2), ms(2_000));
+    assert_eq!(
+        pause_after_commit(Duration::from_secs(60), 2, ms(500)),
+        ms(500)
+    );
+}
+
+#[test]
+fn exclusions_match_whole_components_ignoring_case_and_the_verbatim_prefix() {
+    let config = IndexerConfig::default().with_exclude([
+        r"C:\ProgramData\Microsoft\Windows\Containers",
+        r"c:/Windows/WinSxS/",
+    ]);
+    let hit = |path: &str| config.is_excluded(Path::new(path));
+    assert!(hit(r"C:\ProgramData\Microsoft\Windows\Containers"));
+    assert!(hit(
+        r"C:\ProgramData\Microsoft\Windows\Containers\Layers\x.dll"
+    ));
+    assert!(hit(r"\\?\C:\Windows\WinSxS\amd64_x\y.dll"));
+    // Case and slash direction are not part of a Windows path's identity.
+    assert!(hit(r"c:\programdata\MICROSOFT\windows\containers\a"));
+    // A shared name prefix is not a shared directory.
+    assert!(!hit(
+        r"C:\ProgramData\Microsoft\Windows\ContainersBackup\a.txt"
+    ));
+    assert!(!hit(r"C:\Windows\WinSxSExtra\a.txt"));
+    assert!(!hit(r"C:\Windows\System32\a.dll"));
+    assert!(!IndexerConfig::default().is_excluded(Path::new(r"C:\Windows\WinSxS")));
+}
+
+#[test]
+fn a_scan_skips_an_excluded_subtree_and_keeps_the_rest() {
+    let temp = tempdir().unwrap();
+    let root = temp.path().join("root");
+    let state = temp.path().join("state");
+    fs::create_dir_all(root.join("keep")).unwrap();
+    fs::create_dir_all(root.join("skip").join("deep")).unwrap();
+    fs::create_dir_all(&state).unwrap();
+    fs::write(root.join("keep").join("wanted.txt"), b"1").unwrap();
+    fs::write(root.join("skip").join("deep").join("unwanted.txt"), b"1").unwrap();
+    let mut conn = connect(&state.join("everything.db")).unwrap();
+    init_schema(&mut conn).unwrap();
+    let mut work = interrupted_initial_scan(&mut conn, &root, &[]);
+    let skipped = canonical_root(&root).unwrap().join("skip");
+    work.settings = IndexerConfig::default().with_exclude([skipped.to_str().unwrap()]);
+
+    assert_eq!(
+        scan(&mut conn, &work, &state, &AtomicBool::new(false)).unwrap(),
+        0
+    );
+
+    let names: Vec<String> = conn
+        .prepare("SELECT name FROM entries ORDER BY name")
+        .unwrap()
+        .query_map([], |row| row.get(0))
+        .unwrap()
+        .collect::<rusqlite::Result<_>>()
+        .unwrap();
+    assert_eq!(names, ["keep", "wanted.txt"]);
 }
 
 #[test]
@@ -482,7 +550,7 @@ fn pending_index_status_does_not_wait_for_a_writer() {
     let writer = conn
         .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
         .unwrap();
-    assert_eq!(indexer.ensure_index(&root).unwrap().state, "pending");
+    assert_eq!(indexer.status(&root).unwrap().state, "pending");
     assert_eq!(
         indexer
             .request_refresh(&root, Some("pending-request"))
@@ -918,64 +986,24 @@ fn newer_parent_delta_serves_child_even_with_an_older_generation_number() {
             .len(),
         1
     );
-    let child_canonical = canonical_root(&child).unwrap();
-    conn.execute(
-        "UPDATE roots SET last_verified=0 WHERE path=?1",
-        [path_text(&child_canonical).unwrap()],
-    )
-    .unwrap();
-    assert!(!indexer.schedule_background(&child, 3_600, 1, 0).unwrap());
     lock.unlock().unwrap();
 }
 
 #[test]
-fn background_scan_reports_progress_and_yields_to_foreground() {
+fn status_reports_the_progress_of_the_running_attempt() {
     let temp = tempdir().unwrap();
-    let root = temp.path().join("root");
-    let child = root.join("child");
-    let state = temp.path().join("state");
-    fs::create_dir_all(&child).unwrap();
-    fs::create_dir_all(&state).unwrap();
-    for n in 0..70 {
-        fs::write(child.join(format!("file-{n:03}.txt")), b"x").unwrap();
-    }
-    let lock = File::options()
-        .read(true)
-        .write(true)
-        .create(true)
-        .truncate(false)
-        .open(state.join("everything.lock"))
-        .unwrap();
-    lock.try_lock().unwrap();
-    let indexer = Indexer::open(&state).unwrap();
-    assert!(indexer.schedule_background(&root, 60, 1, 0).unwrap());
-    assert!(!indexer.schedule_background(&root, 60, 1, 0).unwrap());
-    let mut conn = connect(&state.join("everything.db")).unwrap();
-    indexer.ensure_index(&child).unwrap();
-    force_due(&conn, &child);
-    let foreground = claim_next(&mut conn).unwrap().unwrap();
-    assert_eq!(foreground.root, canonical_root(&child).unwrap());
-    assert!(!foreground.background);
-    scan(&mut conn, &foreground, &state, &AtomicBool::new(false)).unwrap();
-    publish(&mut conn, &foreground).unwrap();
+    let mut conn = connect(&temp.path().join("everything.db")).unwrap();
+    init_schema(&mut conn).unwrap();
+    let work = interrupted_initial_scan(&mut conn, temp.path(), &[]);
+    let child = canonical_root(temp.path()).unwrap().join("child");
 
-    force_due(&conn, &root);
-    let background = claim_next(&mut conn).unwrap().unwrap();
-    assert!(background.background);
-    update_progress(&conn, &background, 12, 2, &child).unwrap();
-    let status = indexer.status(&root).unwrap();
-    assert!(status.background);
-    assert_eq!(status.progress.unwrap().entries_seen, 12);
+    update_progress(&conn, &work, 12, 2, &child).unwrap();
 
-    indexer.request_refresh(&child, None).unwrap();
-    let error = scan(&mut conn, &background, &state, &AtomicBool::new(false)).unwrap_err();
-    assert!(error.downcast_ref::<BackgroundYield>().is_some());
-    yield_background_attempt(&mut conn, &background).unwrap();
-    force_due(&conn, &child);
-    let next = claim_next(&mut conn).unwrap().unwrap();
-    assert!(!next.background);
-    assert_eq!(next.root, canonical_root(&child).unwrap());
-    lock.unlock().unwrap();
+    let status = status_for_path(&conn, &canonical_root(temp.path()).unwrap()).unwrap();
+    let progress = status.progress.unwrap();
+    assert_eq!((progress.entries_seen, progress.dirs_seen), (12, 2));
+    assert_eq!(progress.attempt_state, "running");
+    assert_eq!(progress.current_path.as_deref(), Some(child.as_path()));
 }
 
 #[test]

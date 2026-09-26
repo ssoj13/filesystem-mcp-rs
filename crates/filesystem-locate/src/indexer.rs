@@ -22,6 +22,10 @@ pub struct Indexer {
 
 impl Indexer {
     pub fn open(state_root: &Path) -> Result<Self> {
+        Self::open_with(state_root, IndexerConfig::default())
+    }
+
+    pub fn open_with(state_root: &Path, config: IndexerConfig) -> Result<Self> {
         fs::create_dir_all(state_root)?;
         let state_root = fs::canonicalize(state_root)?;
         let db_path = state_root.join("everything.db");
@@ -44,7 +48,9 @@ impl Indexer {
         let worker_db = db_path.clone();
         let worker = thread::Builder::new()
             .name("filesystem-locate".into())
-            .spawn(move || worker_loop(&worker_db, &lock_path, &state_root, &worker_stop))?;
+            .spawn(move || {
+                worker_loop(&worker_db, &lock_path, &state_root, &worker_stop, &config)
+            })?;
         Ok(Self {
             db_path,
             stop,
@@ -84,7 +90,6 @@ impl Indexer {
         };
         tx.execute(
             "UPDATE roots SET desired_seq=desired_seq+1,covered_by=NULL,
-             background=0,background_pause_ms=0,
              state=CASE WHEN state='building' THEN state WHEN state='partial' THEN state ELSE 'pending' END WHERE id=?1",
             [root_id],
         )?;
@@ -109,89 +114,6 @@ impl Indexer {
             work_root: work_path,
             next_scan_at_ms,
         })
-    }
-
-    /// Queue one initial scan. Repeated searches while it is pending do not
-    /// create additional work or request records.
-    pub fn ensure_index(&self, root: &Path) -> Result<Status> {
-        let root = canonical_root(root)?;
-        let mut conn = connect(&self.db_path)?;
-        let rows = root_rows(&conn)?;
-        if pending_ancestor(&rows, &root).is_some() || active_provider(&rows, &root).is_some() {
-            return status_for_path(&conn, &root);
-        }
-        let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
-        let rows = root_rows(&tx)?;
-        if pending_ancestor(&rows, &root).is_some() || active_provider(&rows, &root).is_some() {
-            let status = status_for_path(&tx, &root)?;
-            tx.commit()?;
-            return Ok(status);
-        }
-        let root_id = ensure_root(&tx, &root)?;
-        let queued = tx.execute(
-            "UPDATE roots SET desired_seq=desired_seq+1, state='pending',background=0,background_pause_ms=0
-             WHERE id=?1 AND active_generation=0 AND desired_seq=completed_seq AND retry_not_before<=?2",
-            params![root_id, now_secs()],
-        )?;
-        if queued != 0 {
-            schedule_debounce(&tx, root_id, now_millis())?;
-        } else {
-            tx.execute(
-                "UPDATE roots SET background=0,background_pause_ms=0,debounce_until_ms=?2
-                 WHERE id=?1 AND active_generation=0 AND desired_seq>completed_seq AND background=1",
-                params![root_id, now_millis()],
-            )?;
-        }
-        let status = status_for_path(&tx, &root)?;
-        tx.commit()?;
-        Ok(status)
-    }
-
-    /// Schedule a low-priority reconciliation when this root is due. Multiple
-    /// MCP processes may call this; the immediate transaction makes it one job.
-    pub fn schedule_background(
-        &self,
-        root: &Path,
-        interval_secs: u64,
-        pause_ms: u64,
-        start_delay_ms: u64,
-    ) -> Result<bool> {
-        let root = canonical_root(root)?;
-        let mut conn = connect(&self.db_path)?;
-        let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
-        let id = ensure_root(&tx, &root)?;
-        let (desired, completed, last_verified, retry_not_before): (i64, i64, Option<i64>, i64) =
-            tx.query_row(
-                "SELECT desired_seq,completed_seq,last_verified,retry_not_before FROM roots WHERE id=?1",
-                [id],
-                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
-            )?;
-        let now = now_secs();
-        let effective = status_for_path(&tx, &root)?;
-        if desired > completed
-            || retry_not_before > now
-            || last_verified.is_some_and(|at| at.saturating_add(interval_secs as i64) > now)
-            || effective.desired_seq > effective.completed_seq
-            || effective
-                .last_verified
-                .is_some_and(|at| at.saturating_add(interval_secs as i64) > now)
-        {
-            tx.commit()?;
-            return Ok(false);
-        }
-        tx.execute(
-            "UPDATE roots SET desired_seq=desired_seq+1,state='pending',covered_by=NULL,
-             background=1,background_pause_ms=?2,
-             debounce_first_ms=?3,debounce_until_ms=?4,debounce_resets=0 WHERE id=?1",
-            params![
-                id,
-                pause_ms.min(1_000) as i64,
-                now_millis(),
-                now_millis() + start_delay_ms.min(600_000) as i64
-            ],
-        )?;
-        tx.commit()?;
-        Ok(true)
     }
 
     /// Control the scans of one root (`root`) or of every known root (`None`). The request is

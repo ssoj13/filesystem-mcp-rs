@@ -1,4 +1,81 @@
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
+use std::time::Duration;
+
+/// Knobs of the index worker. `Default` is the behaviour that ships; the MCP layer builds one
+/// from `FS_MCP_LOCATE_*` (this crate reads no environment itself).
+#[derive(Debug, Clone)]
+pub struct IndexerConfig {
+    /// Rows per scan commit.
+    pub scan_batch: usize,
+    /// After a commit the writer rests this many times as long as the commit took.
+    pub write_rest: u32,
+    /// Upper bound of that rest.
+    pub write_pause_max: Duration,
+    /// Normalised path prefixes the scanner does not enter (see [`IndexerConfig::with_exclude`]).
+    pub exclude: Vec<String>,
+}
+
+impl Default for IndexerConfig {
+    fn default() -> Self {
+        Self {
+            scan_batch: crate::DEFAULT_SCAN_BATCH,
+            write_rest: crate::DEFAULT_WRITE_REST,
+            write_pause_max: crate::DEFAULT_WRITE_PAUSE_MAX,
+            exclude: Vec::new(),
+        }
+    }
+}
+
+impl IndexerConfig {
+    /// Do not enter these directories. Each is matched as a whole path component prefix, so
+    /// `C:\Windows\WinSxS` covers everything below it but not `C:\Windows\WinSxSExtra`; on
+    /// Windows case, slash direction, a trailing slash and the `\\?\` prefix do not matter.
+    pub fn with_exclude<I, S>(mut self, paths: I) -> Self
+    where
+        I: IntoIterator<Item = S>,
+        S: AsRef<str>,
+    {
+        self.exclude = paths
+            .into_iter()
+            .map(|path| normalize_for_match(path.as_ref()))
+            .filter(|path| !path.is_empty())
+            .collect();
+        self
+    }
+
+    pub fn is_excluded(&self, path: &Path) -> bool {
+        if self.exclude.is_empty() {
+            return false;
+        }
+        let path = normalize_for_match(&path.to_string_lossy());
+        self.exclude.iter().any(|prefix| {
+            path == *prefix
+                || path
+                    .strip_prefix(prefix.as_str())
+                    .is_some_and(|rest| prefix.ends_with(MATCH_SEP) || rest.starts_with(MATCH_SEP))
+        })
+    }
+}
+
+#[cfg(windows)]
+const MATCH_SEP: char = '\\';
+#[cfg(not(windows))]
+const MATCH_SEP: char = '/';
+
+/// The form two paths are compared in: no verbatim prefix, one separator, no trailing
+/// separator (a bare drive root keeps its own), and on Windows no case.
+fn normalize_for_match(path: &str) -> String {
+    let path = path.trim();
+    let path = path.strip_prefix(r"\\?\").unwrap_or(path);
+    #[cfg(windows)]
+    let mut path = path.replace('/', "\\").to_lowercase();
+    #[cfg(not(windows))]
+    let mut path = path.to_owned();
+    while path.ends_with(MATCH_SEP) && path.len() > 3 {
+        path.pop();
+    }
+    path
+}
 
 #[derive(Debug, Clone)]
 pub struct Receipt {
@@ -18,7 +95,6 @@ pub struct Status {
     pub last_verified: Option<i64>,
     pub last_error: Option<String>,
     pub next_scan_at_ms: Option<i64>,
-    pub background: bool,
     /// `run`, `paused` or `stopped`: what an operator asked this root's scans to do.
     pub control: String,
     pub progress: Option<ScanProgress>,
@@ -66,7 +142,6 @@ impl Default for Status {
             last_verified: None,
             last_error: None,
             next_scan_at_ms: None,
-            background: false,
             control: "run".into(),
             progress: None,
         }
