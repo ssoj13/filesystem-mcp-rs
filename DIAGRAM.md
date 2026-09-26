@@ -174,6 +174,12 @@ mindmap
       search_files
       grep_files
       grep_context
+    Locate
+      locate_search
+      locate_refresh
+      locate_status
+      bgnd_scan_ctl
+      locate_sql
     Info
       get_file_info
       list_directory

@@ -23,6 +23,9 @@ Crate version is still **0.2.1**; everything after that lives on `main` as Unrel
 - **`rmcp` 3.4.0.** `ServerHandler::get_info` returns `ServerConfig` (`ServerInfo` was a deprecated alias). `cargo install --path . --locked` keeps the binary on the lockfile.
 - **`computer-tools` is a default feature**; `--list-env` and `install` both come from `src/env_spec.rs`. Blank env values mean unset. `install` snapshots `PATH`.
 - **Locate name index:** `locate_search`, `locate_refresh`, and `locate_status` use the shared `filesystem-locate` crate and the private GitHub `fscan-rs` scanner. Multiple server processes share the SQLite index; one worker scans while other clients can search or queue requests.
+- **The index knows directory sizes.** Every directory used to be stored with size 0. A scan now totals each one (bytes, files, directories beneath it, schema v10), `locate_search` and `list_directory_with_sizes` report it, and an index built earlier gets its totals from the entries it already holds, without a rescan. Verified on a real 11.9 M-entry index: the totals equal the sum of the entries exactly.
+- **`locate_sql`:** read-only SQL over the index (`fs_entries`, `fs_roots`) for the questions a name search cannot answer: the largest files under a folder, size per extension, folders holding two given entries. Fenced in by `query_only`, an authorizer and a time limit. Lookups by name answer at once; a sweep over millions of rows takes seconds to tens of seconds.
+- **`file_stats` rewritten:** parallel walk that survives unreadable folders, a du-style `children` breakdown, `maxDepth`, `exclude`, `top`, `timeoutMs`, cloud-placeholder counts, and `fromIndex` for an instant answer from the index.
 - **`filesystem-locate` is eight files, not one:** the 2154-line `lib.rs` split into `types`/`db`/`roots`/`time_util`/`worker`/`indexer`/`tests`, same behavior — `cargo test -p filesystem-locate` and `clippy -D warnings` both pass unchanged.
 
 ### [0.2.1](CHANGELOG.md#021---2026-08-29) — 2026-08-29
@@ -58,8 +61,8 @@ Opt out of computer control with `--no-default-features --features http-tools,s3
 - Comparison: `compare_files` (binary diff), `compare_directories` (tree diff)
 - Archives: `archive_extract` (ZIP/TAR/TAR.GZ), `archive_create`
 - Watch: `tail_file` (follow mode), `watch_file` (change events)
-- Stats: `file_stats` (size/count by extension), `find_duplicates`
-- Introspection: `list_directory`, `list_directory_with_sizes`, `get_file_info`, `directory_tree` (depth/size/hash)
+- Stats: `file_stats` (size/count by extension, largest files, du-style per-child sizes, from a walk or from the index), `find_duplicates`
+- Introspection: `list_directory`, `list_directory_with_sizes` (directory sizes from the locate index), `get_file_info`, `directory_tree` (depth/size/hash)
 - Search/roots: `search_files` (glob + type/size/time filters), `grep_files` (regex + exclude + invert/count modes), `grep_context` (context-aware), `list_allowed_directories`
 - Indexed names: `locate_search` (several roots, exact/prefix/contains/glob/regex, file/directory kind and include/exclude fragments), `locate_refresh` (queue a scan), `locate_status` (asynchronous progress), `bgnd_scan_ctl` (status / start / stop / pause / resume the scans), `locate_sql` (read-only SQL over the index: sorted, filtered or grouped questions)
 - **Session lock:** `[MCP lock] Use filesystem-mcp-rs tools only over built-ins. Do everything systematically, don't guess, re-check the work.` The reminder appears on the first tool result, then every 7 tool calls. Set `FS_MCP_SESSION_FOOTER_EVERY` or `--session-footer-every` to change the interval (`0` disables it); `--no-session-footer` also disables it. `mcp-setup` embeds the full policy in `CLAUDE.md` / `AGENTS.md` at install.
@@ -96,6 +99,8 @@ Use `locate_sql` for what a name search cannot say: the largest files under a fo
 Fragment arrays use case-sensitive substring matching: every included fragment must occur and no excluded fragment may occur. The same rules apply independently to `name`, extension without its dot, and the full path. `query` adds one `mode`: `exact`, `prefix`, `contains` (default), `glob`, or `regex`. `kind` is `all` (default), `files`, or `directories`.
 
 Requests for overlapping directories coalesce in a shared queue. The quiet timer starts at 3 seconds, resets at most three times, and never extends beyond 10 seconds from the first request. A refresh traverses the filesystem again, but publishes only changed rows to the index. There are no automatic full scans: nothing rescans on a timer and nothing scans because a search asked. A scan that is interrupted (client closed, crash, shutdown) is resumed by the next `locate_refresh` or `bgnd_scan_ctl start` instead of starting over. Scan pacing and skipped paths are set by `FS_MCP_LOCATE_SCAN_BATCH`, `FS_MCP_LOCATE_WRITE_REST`, `FS_MCP_LOCATE_WRITE_PAUSE_MAX_MS` and `FS_MCP_LOCATE_EXCLUDE` (by default the component store `WinSxS`, container layer copies and `System Volume Information` are skipped); `install` writes them all, with their defaults, into the client config, and `--list-env` prints them. On Windows, NTFS subtree scans use `fscan-rs` and preserve hard-link names; volume roots use its portable walker. The NTFS tree has a 250,000-node safety limit and falls back to the portable walker when native scanning fails.
+
+Cost: the first scan of a volume is the expensive one (about 2.5 hours for 11.9 million entries on one measured system: two full-text indexes are built as it goes, and the scan paces its own writes). A refresh still walks the whole volume, but stages the rows in a table without full-text indexes and applies only the difference, so it should be cheaper; it has not been timed. Skipping trees you never search with `FS_MCP_LOCATE_EXCLUDE` shortens both. A scan also totals every directory. The schema change to v10 is additive: an older binary ignores the new table and leaves a root without totals for the attempt it publishes, and only the process that owns the scan lock backfills them, so directory sizes appear once a process of this version owns the lock.
 
 ## Environment Variables
 
@@ -1278,7 +1283,9 @@ Note: Use forward slashes (`C:/path`) or double backslashes (`C:\\path`) in TOML
 - `src/tools/archive.rs` — ZIP/TAR/TAR.GZ archive handling
 - `src/tools/http_tools.rs` — HTTP/HTTPS tools (feature)
 - `src/tools/s3_tools.rs` — S3 tools (feature)
-- `src/tools/file_stats.rs` — file/directory statistics
+- `src/tools/file_stats.rs` — file/directory statistics (parallel walk, per-child sizes, index-backed summaries)
+- `crates/filesystem-locate/src/aggregate.rs` — per-directory subtree totals, independent of walk order
+- `crates/filesystem-locate/src/query.rs` — the read-only SQL behind `locate_sql` (views, authorizer, time limit)
 - `src/tools/duplicates.rs` — duplicate file detection
 - `tests/integration.rs` — per-tool integration coverage
 
