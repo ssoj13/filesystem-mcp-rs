@@ -1896,6 +1896,24 @@ struct FileStatsArgs {
     /// Recursive for directories (default: true)
     #[serde(default = "default_flex_true")]
     recursive: FlexBool,
+    /// Add byChild: du-style sizes of the direct children
+    #[serde(default)]
+    children: FlexBool,
+    /// Deepest level to walk (1 = direct children)
+    #[serde(default)]
+    max_depth: FlexUsize,
+    /// Globs of names or relative paths to skip, e.g. ["node_modules"]
+    #[serde(default)]
+    exclude: Vec<String>,
+    /// Rows per breakdown (largest files, children, extensions)
+    #[serde(default)]
+    top: FlexUsize,
+    /// Answer from the locate index when it covers the path
+    #[serde(default)]
+    from_index: FlexBool,
+    /// Walk time limit in ms (default 120000, 0 = none)
+    #[serde(default)]
+    timeout_ms: FlexU64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
@@ -3291,7 +3309,7 @@ impl FileSystemServer {
 
     #[tool(
         name = "list_directory_with_sizes",
-        description = "List directory entries with sizes and summary."
+        description = "List directory entries with sizes and summary. A file's size is its own; a directory's is the total of everything beneath it when the locate index covers it (dirSizes: \"index\", asOf = when it was last checked), else blank/0 - use file_stats with children:true for an exact walk."
     )]
     async fn list_directory_with_sizes(
         &self,
@@ -3324,6 +3342,36 @@ impl FileSystemServer {
             ));
         }
 
+        // A directory's own entry says nothing about what is in it: take that from the index.
+        #[cfg_attr(not(feature = "locate-tools"), allow(unused_mut))]
+        let mut sized_dirs: std::collections::HashSet<String> = std::collections::HashSet::new();
+        #[cfg_attr(not(feature = "locate-tools"), allow(unused_mut))]
+        let mut dirs_as_of: Option<i64> = None;
+        #[cfg(feature = "locate-tools")]
+        if let Some(indexer) = self.indexer.clone() {
+            let dir_paths: Vec<PathBuf> = entries
+                .iter()
+                .filter(|entry| entry.1)
+                .map(|entry| path.join(&entry.0))
+                .collect();
+            if !dir_paths.is_empty()
+                && let Ok(Ok(found)) =
+                    tokio::task::spawn_blocking(move || indexer.dir_stats(&dir_paths)).await
+            {
+                let mut found = found.into_iter();
+                for entry in entries.iter_mut().filter(|entry| entry.1) {
+                    if let Some(Some(totals)) = found.next() {
+                        entry.2 = totals.bytes;
+                        sized_dirs.insert(entry.0.clone());
+                        dirs_as_of = match (dirs_as_of, totals.as_of) {
+                            (Some(a), Some(b)) => Some(a.min(b)),
+                            (a, b) => a.or(b),
+                        };
+                    }
+                }
+            }
+        }
+
         match sort_by {
             SortBy::Name => entries.sort_by_key(|e| e.0.to_lowercase()),
             SortBy::Size => entries.sort_by_key(|e| std::cmp::Reverse(e.2)),
@@ -3333,7 +3381,7 @@ impl FileSystemServer {
             .iter()
             .map(|(name, is_dir, size)| {
                 let prefix = if *is_dir { "[DIR]" } else { "[FILE]" };
-                let size_str = if *is_dir {
+                let size_str = if *is_dir && !sized_dirs.contains(name) {
                     "".to_string()
                 } else {
                     format::format_size(*size)
@@ -3367,7 +3415,10 @@ impl FileSystemServer {
                 "entries": entries,
                 "totalFiles": total_files,
                 "totalDirectories": total_dirs,
-                "totalSize": total_size
+                "totalSize": total_size,
+                "dirSizes": if sized_dirs.is_empty() { "none" } else { "index" },
+                "sizedDirectories": sized_dirs.len(),
+                "asOf": dirs_as_of,
             })),
         )
     }
@@ -5253,7 +5304,7 @@ USE CASES: Patch executables, fix binary data, search-replace in non-text files.
 
     #[tool(
         name = "file_stats",
-        description = "Get statistics for file/directory: total files, size, breakdown by extension, largest files."
+        description = "Size statistics for a file or tree (parallel walk, skips unreadable folders): totals, by extension, largest files. children:true adds byChild, the direct children with their sizes, largest first: what takes the space. fromIndex:true answers totals and byChild instantly from the locate index when it covers the path (source, asOf and changedSinceScan say how fresh), else it walks. incomplete:true = time limit hit, lower bounds. Sizes are logical; cloudOnlyBytes are online-only placeholders. Links are counted, not followed."
     )]
     async fn file_stats(
         &self,
@@ -5261,14 +5312,82 @@ USE CASES: Patch executables, fix binary data, search-replace in non-text files.
     ) -> Result<CallToolResult, McpError> {
         let path = self.resolve(&args.path).await?;
 
-        let result = file_stats::file_stats(&path, *args.recursive, 10)
+        let defaults = file_stats::StatsOptions::default();
+        let top = args.top.get().filter(|rows| *rows > 0);
+        let options = file_stats::StatsOptions {
+            recursive: *args.recursive,
+            largest_count: top.unwrap_or(defaults.largest_count),
+            max_depth: args.max_depth.get().filter(|depth| *depth > 0),
+            exclude: args.exclude,
+            children: *args.children,
+            children_limit: top.unwrap_or(defaults.children_limit),
+            extensions_limit: top.unwrap_or(defaults.extensions_limit),
+            timeout: match args.timeout_ms.get() {
+                None => defaults.timeout,
+                Some(0) => None,
+                Some(ms) => Some(Duration::from_millis(ms)),
+            },
+            summary: *args.from_index,
+            ..defaults
+        };
+        #[cfg(feature = "locate-tools")]
+        let index: Option<file_stats::IndexLookup> = self.indexer.clone().map(|indexer| {
+            let lookup: file_stats::IndexLookup =
+                Arc::new(move |paths: &[PathBuf]| match indexer.dir_stats(paths) {
+                    Ok(found) => found
+                        .into_iter()
+                        .map(|totals| {
+                            totals.map(|t| file_stats::IndexedTotals {
+                                bytes: t.bytes,
+                                files: t.files,
+                                dirs: t.dirs,
+                                as_of: t.as_of,
+                                partial: t.partial,
+                            })
+                        })
+                        .collect(),
+                    Err(_) => vec![None; paths.len()],
+                });
+            lookup
+        });
+        #[cfg(not(feature = "locate-tools"))]
+        let index: Option<file_stats::IndexLookup> = None;
+
+        let result = file_stats::file_stats_with(&path, options, index)
             .await
             .map_err(|e| McpError::internal_error(e.to_string(), None))?;
 
-        let text = format!(
+        let mut text = format!(
             "Files: {}, Dirs: {}, Size: {}",
             result.total_files, result.total_dirs, result.total_size_human
         );
+        if result.source == file_stats::Source::Index {
+            text.push_str(" (from the index");
+            if result.changed_since_scan {
+                text.push_str(", changed since it was checked");
+            }
+            text.push(')');
+        }
+        if result.incomplete {
+            text.push_str(" (incomplete: time limit reached)");
+        }
+        if result.skipped.count > 0 {
+            text.push_str(&format!(
+                " ({} unreadable entries skipped)",
+                result.skipped.count
+            ));
+        }
+        let child_json = |c: &file_stats::ChildStats| {
+            json!({
+                "name": c.name,
+                "isDir": c.is_dir,
+                "size": c.bytes,
+                "files": c.files,
+                "dirs": c.dirs,
+            })
+        };
+        let mut top_extensions: Vec<_> = result.by_extension.iter().collect();
+        top_extensions.sort_by(|a, b| b.1.size.cmp(&a.1.size).then_with(|| a.0.cmp(b.0)));
 
         Ok(
             CallToolResult::success(vec![ContentBlock::text(text)]).with_structured(json!({
@@ -5276,13 +5395,33 @@ USE CASES: Patch executables, fix binary data, search-replace in non-text files.
                 "totalDirs": result.total_dirs,
                 "totalSize": result.total_size,
                 "totalSizeHuman": result.total_size_human,
+                "source": result.source.as_str(),
+                "asOf": result.as_of,
+                "indexPartial": result.index_partial,
+                "changedSinceScan": result.changed_since_scan,
+                "incomplete": result.incomplete,
+                "elapsedMs": result.elapsed_ms,
+                "links": result.links,
+                "cloudOnlyFiles": result.cloud_only_files,
+                "cloudOnlyBytes": result.cloud_only_bytes,
+                "skipped": {
+                    "count": result.skipped.count,
+                    "examples": result.skipped.examples,
+                },
                 "byExtension": result.by_extension.iter().map(|(k, v)| {
                     (k.clone(), json!({ "count": v.count, "size": v.size }))
                 }).collect::<std::collections::HashMap<_, _>>(),
+                "topExtensions": top_extensions.iter().map(|(k, v)| json!({
+                    "extension": k,
+                    "count": v.count,
+                    "size": v.size,
+                })).collect::<Vec<_>>(),
                 "largestFiles": result.largest_files.iter().map(|f| json!({
                     "path": f.path,
                     "size": f.size,
                 })).collect::<Vec<_>>(),
+                "byChild": result.by_child.iter().map(child_json).collect::<Vec<_>>(),
+                "childrenOmitted": result.children_omitted.as_ref().map(child_json),
             })),
         )
     }
@@ -6468,7 +6607,7 @@ USE CASES: Patch executables, fix binary data, search-replace in non-text files.
 impl FileSystemServer {
     #[tool(
         name = "locate_search",
-        description = "Indexed names in path or paths. Searching never scans: a path nobody indexed returns no matches (indexState unindexed) — index it first with locate_refresh, poll locate_status, then search. waitMs only waits for a scan already running. kind: all (default), files, directories. query modes: exact/prefix/contains/glob/regex. filters.name/extension/path use include/exclude substring arrays (AND, case-sensitive; extension without dot). Update with locate_refresh; contents: grep_files."
+        description = "Indexed names in path or paths. Searching never scans: a path nobody indexed returns no matches (indexState unindexed) — index it first with locate_refresh, poll locate_status, then search. waitMs only waits for a scan already running. kind: all (default), files, directories. A directory's size is its subtree total. query modes: exact/prefix/contains/glob/regex. filters.name/extension/path use include/exclude substring arrays (AND, case-sensitive; extension without dot). Update with locate_refresh; contents: grep_files."
     )]
     async fn locate_search(
         &self,
@@ -6616,6 +6755,8 @@ impl FileSystemServer {
                             "kind": hit.kind,
                             "size": hit.size,
                             "modified": hit.modified,
+                            "files": hit.files,
+                            "dirs": hit.dirs,
                         }),
                     ));
                 }

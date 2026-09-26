@@ -738,10 +738,13 @@ Create ZIP or TAR.GZ archives:
 ## Statistics Tools
 
 ### `file_stats` - File/Directory Statistics
-Get detailed statistics about files and directories:
-- **Parameters**: `path`, `recursive`
-- **Returns**: `{total_files, total_dirs, total_size, total_size_human, by_extension{}, largest_files[]}`
-- **Use cases**: Analyze project size, find large files, understand codebase composition
+Get detailed statistics about files and directories from a parallel walk that tolerates unreadable folders:
+- **Parameters**: `path`, `recursive`, `children` (du-style breakdown), `maxDepth`, `exclude[]` (globs of names or relative paths), `top` (rows per breakdown; default 10 largest files, 50 children, 100 extensions), `fromIndex`, `timeoutMs` (120000, 0 = none)
+- **Returns**: `{totalFiles, totalDirs, totalSize, totalSizeHuman, byExtension{}, topExtensions[], largestFiles[], byChild[], childrenOmitted, links, cloudOnlyFiles, cloudOnlyBytes, skipped{count, examples[]}, incomplete, source, asOf, indexPartial, changedSinceScan, elapsedMs}`
+- **`children: true`** adds `byChild`: the direct children with the size, file and directory counts of everything beneath each, largest first. This is the way to see what takes the space.
+- **`fromIndex: true`** returns totals and `byChild` only, instantly, from the locate index when it covers the path and knows every directory involved (`source: "index"`, `asOf` = when the index was last checked, `changedSinceScan` = a directory changed after that); otherwise it walks (`source: "live"`). The default is always a walk.
+- Sizes are logical. `cloudOnlyBytes` are online-only placeholders (OneDrive, iCloud, Dropbox) that occupy no disk. Symlinks and junctions are counted in `links` and not followed. `incomplete: true` means the time limit ended the walk and the numbers are lower bounds.
+- **Use cases**: Find what takes the space, analyze project size, find large files, understand codebase composition
 
 ### `find_duplicates` - Find Duplicate Files
 Find files with identical content:

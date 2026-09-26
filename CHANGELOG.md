@@ -4,6 +4,20 @@
 
 Post-0.2.1 work on `main`. The crate version is still 0.2.1 until the next tag.
 
+### Locate: directory sizes
+
+- **The index now knows how big a directory is.** Until now every directory was stored with size 0, so neither `locate_search` nor `list_directory_with_sizes` could say what a folder holds. A scan now totals every directory as it visits the tree (`dir_stats`, schema v10: bytes, files and directories beneath each). The walk order is not promised by the NTFS reader, so the roll-up does not depend on it. Totals are keyed by the attempt that published the entries, so a refresh replaces them atomically and a partial refresh drops its own.
+- **No rescan to get them.** The worker backfills totals for a published root that has none, from the entries it already holds: an index built before v10, or published by an older process (the older binary leaves the root without totals for the new attempt, which is exactly what triggers the backfill). On a real index (11.9 M entries) it took about four minutes; the totals matched the sum of the entries exactly for both roots. The root's own row is written last and is what marks a set complete, so a backfill that stops half way is redone.
+- `locate_search` reports a directory's `size` as its subtree total, with `files` and `dirs` counts (`null` while a root has no totals yet). `Indexer::dir_stats` looks directories up by path and says when the index was last verified and whether the scan skipped entries (`partial`: lower bounds).
+
+### `file_stats` rewritten
+
+- Parallel walk (the `ignore` walker) instead of a recursive read. An unreadable folder used to abort the whole call; it is now counted and reported in `skipped`. The largest files come from a bounded heap instead of a list of every file.
+- New: `children` (du-style `byChild`), `maxDepth`, `exclude` globs, `top` (rows per breakdown; extensions beyond it fold into `(other)`), `timeoutMs` (a walk cut short says `incomplete`), symlink/junction count, and `cloudOnlyFiles`/`cloudOnlyBytes` for online-only placeholders.
+- `fromIndex: true` answers totals and `byChild` from the index when it can vouch for every directory involved, and says so (`source`, `asOf`, `changedSinceScan`); otherwise it walks. Existing calls keep their fields and defaults.
+- The parameters are few on purpose: `tool_surface_guard` holds a tool to 2000 characters of description plus schema, because the tool list is loaded into every session.
+- `list_directory_with_sizes` takes directory sizes from the same totals (`dirSizes: "index"`, `asOf`) instead of printing an empty size.
+
 ### Shared Locate index
 
 - Added `locate_search`, `locate_refresh`, and `locate_status` for indexed filename searches, explicit refresh requests, and asynchronous progress. Search accepts multiple roots, five query modes, file/directory filtering, and any number of required or excluded fragments in names, extensions, or paths.
