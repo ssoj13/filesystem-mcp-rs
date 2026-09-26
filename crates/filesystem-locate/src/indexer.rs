@@ -15,7 +15,7 @@ use super::*;
 /// Owns a background thread. Clone the surrounding `Arc<Indexer>` for MCP
 /// connections; the thread itself never retains that Arc.
 pub struct Indexer {
-    db_path: PathBuf,
+    pub(crate) db_path: PathBuf,
     stop: Arc<AtomicBool>,
     worker: Mutex<Option<JoinHandle<()>>>,
 }

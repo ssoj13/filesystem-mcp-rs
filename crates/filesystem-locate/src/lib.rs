@@ -7,12 +7,14 @@ use std::time::Duration;
 mod aggregate;
 mod db;
 mod indexer;
+mod query;
 mod roots;
 mod time_util;
 mod types;
 mod worker;
 
 pub use indexer::Indexer;
+pub use query::{RootInfo, SQL_GUIDE, SqlOutcome, SqlQuery, SqlValue};
 pub use types::{
     DirStats, EntryKind, FragmentFilter, IndexerConfig, Match, MatchMode, Receipt, ScanAction,
     ScanInfo, ScanProgress, SearchFilters, SearchResult, Status,

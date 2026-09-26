@@ -10,7 +10,7 @@ anyhow = "1"
 fscan-rs = { git = "ssh://git@github.com/ssoj13/fscan-rs.git", rev = "c33d4474b5004ec047ecd065f96f6a53addbc97e" }
 globset = "0.4"
 regex = "1"
-rusqlite = { version = "0.40", features = ["bundled"] }
+rusqlite = { version = "0.40", features = ["bundled", "functions", "hooks"] }
 tracing = "0.1"
 
 [target.'cfg(windows)'.dependencies]

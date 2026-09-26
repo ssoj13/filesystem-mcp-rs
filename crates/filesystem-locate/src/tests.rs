@@ -1500,6 +1500,293 @@ fn search_and_dir_stats_report_directory_totals() {
     lock.unlock().unwrap();
 }
 
+/// The worker lock is held so the indexer this returns stays idle; keep the file alive.
+fn idle_indexer(state: &Path) -> (File, Indexer) {
+    let lock = File::options()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(state.join("everything.lock"))
+        .unwrap();
+    lock.try_lock().unwrap();
+    (lock, Indexer::open(state).unwrap())
+}
+
+fn run_sql(indexer: &Indexer, allowed: &[PathBuf], sql: &str) -> Result<Vec<Vec<SqlValue>>> {
+    let mut rows = Vec::new();
+    indexer.query_each(
+        &SqlQuery {
+            sql,
+            allowed,
+            timeout: Duration::from_secs(20),
+        },
+        |_, values| {
+            rows.push(values.to_vec());
+            Ok(true)
+        },
+    )?;
+    Ok(rows)
+}
+
+fn text(value: &str) -> SqlValue {
+    SqlValue::Text(value.to_owned())
+}
+
+#[test]
+fn sql_sees_directory_totals_extensions_and_parents() {
+    let temp = tempdir().unwrap();
+    let (root, state, _conn, _work) = published_tree(temp.path());
+    let (_lock, indexer) = idle_indexer(&state);
+    let allowed = [canonical_root(&root).unwrap()];
+
+    let dir = run_sql(
+        &indexer,
+        &allowed,
+        "SELECT size,files,dirs FROM fs_entries WHERE name='a' AND kind='dir'",
+    )
+    .unwrap();
+    assert_eq!(
+        dir,
+        [[SqlValue::Int(150), SqlValue::Int(2), SqlValue::Int(1)]]
+    );
+    let by_ext = run_sql(
+        &indexer,
+        &allowed,
+        "SELECT ext,count(*),sum(size) FROM fs_entries WHERE kind='file' GROUP BY ext",
+    )
+    .unwrap();
+    assert_eq!(
+        by_ext,
+        [[text("bin"), SqlValue::Int(4), SqlValue::Int(160)]]
+    );
+    let parent = run_sql(
+        &indexer,
+        &allowed,
+        "SELECT dir FROM fs_entries WHERE name='y.bin'",
+    )
+    .unwrap();
+    assert_eq!(parent, [[text(&indexed_path(&root, &["a", "b"]))]]);
+    let functions = run_sql(
+        &indexer,
+        &allowed,
+        "SELECT name FROM fs_entries WHERE name REGEXP '^[xy][.]bin$' ORDER BY name",
+    )
+    .unwrap();
+    assert_eq!(functions, [[text("x.bin")], [text("y.bin")]]);
+}
+
+#[test]
+fn sql_subtree_ranges_and_sibling_lookups_are_exact() {
+    let temp = tempdir().unwrap();
+    let (root, state, _conn, _work) = published_tree(temp.path());
+    let (_lock, indexer) = idle_indexer(&state);
+    let allowed = [canonical_root(&root).unwrap()];
+    let a = indexed_path(&root, &["a"]);
+
+    // `a-b` sorts between `a` and `a\b`, and is not beneath `a`.
+    let beneath = run_sql(
+        &indexer,
+        &allowed,
+        &format!("SELECT name FROM fs_entries WHERE path>='{a}\\' AND path<'{a}]' ORDER BY name"),
+    )
+    .unwrap();
+    assert_eq!(beneath, [[text("b")], [text("x.bin")], [text("y.bin")]]);
+
+    let holding_both = run_sql(
+        &indexer,
+        &allowed,
+        "SELECT a.dir FROM fs_entries a WHERE a.name='b' AND a.kind='dir'
+         AND EXISTS (SELECT 1 FROM fs_entries s WHERE s.path=a.dir||'\\x.bin')",
+    )
+    .unwrap();
+    assert_eq!(holding_both, [[text(&a)]]);
+}
+
+#[test]
+fn sql_refuses_everything_but_a_select_over_the_views() {
+    let temp = tempdir().unwrap();
+    let (root, state, conn, work) = published_tree(temp.path());
+    let (_lock, indexer) = idle_indexer(&state);
+    let allowed = [canonical_root(&root).unwrap()];
+    let before = (entry_count(&conn), dir_stats_rows(&conn));
+
+    for sql in [
+        "DELETE FROM entries",
+        "DELETE FROM fs_entries",
+        "INSERT INTO dir_stats VALUES(1,1,'x',1,1,1)",
+        "UPDATE roots SET state='x'",
+        "DROP TABLE entries",
+        "CREATE TABLE t(x)",
+        "PRAGMA query_only=OFF",
+        "ATTACH DATABASE 'other.db' AS other",
+        "SELECT * FROM entries",
+        "SELECT * FROM roots",
+        "SELECT * FROM dir_stats",
+        "SELECT * FROM sqlite_master",
+        "SELECT * FROM staged_entries",
+        "SELECT 1; SELECT 2",
+        "SELECT zeroblob(10)",
+        "SELECT load_extension('x')",
+    ] {
+        assert!(
+            run_sql(&indexer, &allowed, sql).is_err(),
+            "was allowed: {sql}"
+        );
+    }
+
+    assert_eq!((entry_count(&conn), dir_stats_rows(&conn)), before);
+    let state_after: String = conn
+        .query_row(
+            "SELECT state FROM roots WHERE id=?1",
+            [work.root_id],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(state_after, "ready");
+}
+
+#[test]
+fn sql_sees_only_the_directories_it_is_allowed() {
+    let temp = tempdir().unwrap();
+    let (root, state, _conn, _work) = published_tree(temp.path());
+    let (_lock, indexer) = idle_indexer(&state);
+
+    let only_a_b = run_sql(
+        &indexer,
+        &[canonical_root(&root).unwrap().join("a-b")],
+        "SELECT name FROM fs_entries ORDER BY name",
+    )
+    .unwrap();
+    assert_eq!(only_a_b, [[text("a-b")], [text("z.bin")]]);
+    let nothing = run_sql(&indexer, &[], "SELECT name FROM fs_entries").unwrap();
+    assert!(nothing.is_empty());
+}
+
+#[test]
+fn sql_is_stopped_at_its_time_limit_and_can_be_stopped_early() {
+    let temp = tempdir().unwrap();
+    let (root, state, _conn, _work) = published_tree(temp.path());
+    let (_lock, indexer) = idle_indexer(&state);
+    let allowed = [canonical_root(&root).unwrap()];
+
+    let error = indexer
+        .query_each(
+            &SqlQuery {
+                sql: "WITH RECURSIVE c(x) AS (SELECT 1 UNION ALL SELECT x+1 FROM c)
+                      SELECT count(*) FROM c",
+                allowed: &allowed,
+                timeout: Duration::from_millis(100),
+            },
+            |_, _| Ok(true),
+        )
+        .unwrap_err();
+    assert!(format!("{error}").contains("time limit"), "{error}");
+
+    let mut seen = 0;
+    let outcome = indexer
+        .query_each(
+            &SqlQuery {
+                sql: "SELECT name FROM fs_entries",
+                allowed: &allowed,
+                timeout: Duration::from_secs(10),
+            },
+            |columns, _| {
+                assert_eq!(columns, ["name"]);
+                seen += 1;
+                Ok(seen < 2)
+            },
+        )
+        .unwrap();
+    assert_eq!((outcome.rows, outcome.stopped), (2, true));
+    assert_eq!(outcome.roots.len(), 1);
+    assert_eq!(outcome.roots[0].state, "ready");
+    assert!(outcome.roots[0].last_verified.is_some());
+}
+
+/// Timings of typical `locate_sql` questions on a COPY of a real index, run by hand:
+/// `LOCATE_DB_COPY=<dir> cargo test -p filesystem-locate --release real_index_sql -- --ignored --nocapture`.
+#[test]
+#[ignore]
+fn real_index_sql_answers_typical_questions_in_reasonable_time() {
+    let Ok(dir) = std::env::var("LOCATE_DB_COPY") else {
+        return;
+    };
+    let dir = PathBuf::from(dir);
+    let indexer = Indexer::open(&dir).unwrap();
+    let everything = [PathBuf::from(r"\\?\C:\"), PathBuf::from(r"\\?\D:\")];
+    let queries = [
+        (
+            "largest files under a folder",
+            r"SELECT path,size FROM fs_entries WHERE kind='file' AND path>='\\?\C:\Users\joss1\' AND path<'\\?\C:\Users\joss1]' ORDER BY size DESC LIMIT 10",
+        ),
+        (
+            "children of a folder by size",
+            r"SELECT name,size,files FROM fs_entries WHERE path>='\\?\C:\Users\joss1\' AND path<'\\?\C:\Users\joss1]' AND dir='\\?\C:\Users\joss1' ORDER BY size DESC LIMIT 10",
+        ),
+        (
+            "size per extension over the volume",
+            r"SELECT ext,count(*) n,sum(size) bytes FROM fs_entries WHERE kind='file' AND path>='\\?\C:\' AND path<'\\?\C:]' GROUP BY ext ORDER BY bytes DESC LIMIT 10",
+        ),
+        (
+            "Unity projects (two siblings)",
+            r"SELECT a.dir FROM fs_entries a WHERE a.name='Assets' AND a.kind='dir' AND EXISTS (SELECT 1 FROM fs_entries b WHERE b.path=a.dir||'\ProjectSettings') LIMIT 20",
+        ),
+        (
+            "top-level node_modules by size",
+            r"SELECT path,size FROM fs_entries WHERE name='node_modules' AND kind='dir' AND instr(path,'\node_modules\')=0 ORDER BY size DESC LIMIT 10",
+        ),
+        (
+            "target folders by size",
+            r"SELECT path,size FROM fs_entries WHERE name='target' AND kind='dir' ORDER BY size DESC LIMIT 10",
+        ),
+        (
+            "old big files",
+            r"SELECT path,size FROM fs_entries WHERE kind='file' AND size>1000000000 AND modified < strftime('%s','now','-1 year') ORDER BY size DESC LIMIT 10",
+        ),
+    ];
+    for (title, sql) in queries {
+        if std::env::var("LOCATE_SQL_PLAN").is_ok() {
+            let plan = format!("EXPLAIN QUERY PLAN {sql}");
+            println!("{title}");
+            let _ = indexer.query_each(
+                &SqlQuery {
+                    sql: &plan,
+                    allowed: &everything,
+                    timeout: Duration::from_secs(60),
+                },
+                |_, values| {
+                    println!("  plan: {:?}", values.last());
+                    Ok(true)
+                },
+            );
+            if std::env::var("LOCATE_SQL_PLAN").as_deref() == Ok("only") {
+                continue;
+            }
+        }
+        let started = std::time::Instant::now();
+        let outcome = indexer.query_each(
+            &SqlQuery {
+                sql,
+                allowed: &everything,
+                timeout: Duration::from_secs(600),
+            },
+            |_, values| {
+                println!("    {values:?}");
+                Ok(true)
+            },
+        );
+        match outcome {
+            Ok(outcome) => println!(
+                "{title}: {} rows in {:.1}s\n",
+                outcome.rows,
+                started.elapsed().as_secs_f32()
+            ),
+            Err(error) => println!("{title}: FAILED {error:#}\n"),
+        }
+    }
+}
+
 /// Real-data check, run by hand against a COPY of a real index:
 /// `LOCATE_DB_COPY=<dir holding everything.db> cargo test -p filesystem-locate --release
 /// real_index_totals -- --ignored --nocapture`. The worker backfills the totals; each root's

@@ -1127,6 +1127,46 @@ impl From<LocateFilters> for SearchFilters {
 #[cfg(feature = "locate-tools")]
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
+struct LocateSqlArgs {
+    /// One SELECT over fs_entries and fs_roots
+    #[serde(default)]
+    sql: Option<String>,
+    /// Rows returned inline (default 100, max 1000)
+    #[serde(default)]
+    limit: FlexUsize,
+    /// Write every row here as JSON lines instead of returning them all
+    #[serde(default)]
+    save_to: Option<String>,
+    /// Describe the views, functions and example queries
+    #[serde(default)]
+    help: FlexBool,
+    /// Time limit in ms (default 120000)
+    #[serde(default)]
+    timeout_ms: FlexU64,
+}
+
+#[cfg(feature = "locate-tools")]
+fn sql_value_json(value: &filesystem_locate::SqlValue) -> serde_json::Value {
+    use filesystem_locate::SqlValue;
+    match value {
+        SqlValue::Null => serde_json::Value::Null,
+        SqlValue::Int(number) => json!(number),
+        SqlValue::Real(number) => serde_json::Number::from_f64(*number)
+            .map_or(serde_json::Value::Null, serde_json::Value::Number),
+        SqlValue::Text(text) => serde_json::Value::String(text.clone()),
+        SqlValue::Blob(bytes) => serde_json::Value::String(format!(
+            "x'{}'",
+            bytes
+                .iter()
+                .map(|byte| format!("{byte:02x}"))
+                .collect::<String>()
+        )),
+    }
+}
+
+#[cfg(feature = "locate-tools")]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
 struct LocateRefreshArgs {
     path: String,
     /// Reuse to retry a request without creating a second scan request.
@@ -6806,6 +6846,130 @@ impl FileSystemServer {
                 "indexError": index_error,
                 "nextScanAtMs": next_scan_at_ms,
                 "hint": hint,
+            })),
+        )
+    }
+
+    #[tool(
+        name = "locate_sql",
+        description = "Read-only SQL over the locate index: one SELECT over fs_entries(path, name, dir, ext, kind, size, modified, files, dirs, depth) and fs_roots. kind is file, dir or symlink; a directory's size is the total beneath it; modified is unix seconds. A subtree of P is path >= 'P\\' AND path < 'P]'. For sorted, filtered or grouped questions locate_search cannot answer: largest files, size per extension, folders holding two given entries. help:true lists the functions and examples. Answers reflect the last scan (roots[].lastVerified)."
+    )]
+    async fn locate_sql(
+        &self,
+        Parameters(args): Parameters<LocateSqlArgs>,
+    ) -> Result<CallToolResult, McpError> {
+        use std::io::Write as _;
+
+        if *args.help {
+            return Ok(CallToolResult::success(vec![ContentBlock::text(
+                filesystem_locate::SQL_GUIDE,
+            )])
+            .with_structured(json!({ "guide": filesystem_locate::SQL_GUIDE })));
+        }
+        let sql = args
+            .sql
+            .as_deref()
+            .map(str::trim)
+            .filter(|sql| !sql.is_empty())
+            .ok_or_else(|| McpError::invalid_params("sql is required (or help:true)", None))?
+            .to_owned();
+        let indexer = self
+            .indexer
+            .clone()
+            .ok_or_else(|| McpError::internal_error("File index is unavailable", None))?;
+        self.ensure_allowed().await?;
+        let allowed = self.allowed.snapshot().await;
+        let limit = args.limit.get().unwrap_or(100).clamp(1, 1_000);
+        let timeout =
+            Duration::from_millis(args.timeout_ms.get().unwrap_or(120_000).clamp(100, 600_000));
+        let save_to = match args
+            .save_to
+            .as_deref()
+            .map(str::trim)
+            .filter(|p| !p.is_empty())
+        {
+            Some(path) => Some(self.resolve(path).await?),
+            None => None,
+        };
+
+        let save_for_work = save_to.clone();
+        let run = tokio::task::spawn_blocking(move || -> anyhow::Result<_> {
+            /// Rows one saveTo file may take.
+            const SAVE_MAX_ROWS: u64 = 5_000_000;
+            let mut writer = match &save_for_work {
+                Some(path) => Some(std::io::BufWriter::new(std::fs::File::create(path)?)),
+                None => None,
+            };
+            let mut inline: Vec<Vec<serde_json::Value>> = Vec::new();
+            let mut saved = 0u64;
+            let mut more = false;
+            let outcome = indexer.query_each(
+                &filesystem_locate::SqlQuery {
+                    sql: &sql,
+                    allowed: &allowed,
+                    timeout,
+                },
+                |columns, values| {
+                    let json_values: Vec<serde_json::Value> =
+                        values.iter().map(sql_value_json).collect();
+                    if let Some(out) = writer.as_mut() {
+                        if saved >= SAVE_MAX_ROWS {
+                            more = true;
+                            return Ok(false);
+                        }
+                        // Column order matters, so the object is written by hand.
+                        out.write_all(b"{")?;
+                        for (index, (name, value)) in columns.iter().zip(&json_values).enumerate() {
+                            if index > 0 {
+                                out.write_all(b",")?;
+                            }
+                            out.write_all(serde_json::to_string(name)?.as_bytes())?;
+                            out.write_all(b":")?;
+                            out.write_all(serde_json::to_string(value)?.as_bytes())?;
+                        }
+                        out.write_all(b"}\n")?;
+                        saved += 1;
+                    }
+                    if inline.len() < limit {
+                        inline.push(json_values);
+                        Ok(true)
+                    } else {
+                        more = true;
+                        Ok(writer.is_some())
+                    }
+                },
+            )?;
+            if let Some(out) = writer.as_mut() {
+                out.flush()?;
+            }
+            Ok((outcome, inline, more, saved))
+        })
+        .await
+        .map_err(internal_err("Index task failed"))?;
+        let (outcome, inline, more, saved) =
+            run.map_err(|error| McpError::invalid_params(format!("{error:#}"), None))?;
+
+        let mut text = format!("{} rows", inline.len());
+        if save_to.is_some() {
+            text.push_str(&format!(", {saved} written to the file"));
+        } else if more {
+            text.push_str(" (more exist: narrow the query, raise limit or use saveTo)");
+        }
+        Ok(
+            CallToolResult::success(vec![ContentBlock::text(text)]).with_structured(json!({
+                "columns": outcome.columns,
+                "rows": inline,
+                "rowCount": inline.len(),
+                "truncated": more && save_to.is_none(),
+                "savedTo": save_to,
+                "savedRows": save_to.as_ref().map(|_| saved),
+                "elapsedMs": outcome.elapsed_ms,
+                "roots": outcome.roots.iter().map(|root| json!({
+                    "path": root.path,
+                    "state": root.state,
+                    "lastVerified": root.last_verified,
+                    "error": root.last_error,
+                })).collect::<Vec<_>>(),
             })),
         )
     }
