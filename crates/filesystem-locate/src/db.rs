@@ -7,7 +7,16 @@ use rusqlite::{Connection, TransactionBehavior};
 pub(crate) fn connect(path: &Path) -> Result<Connection> {
     let conn = Connection::open(path)?;
     conn.busy_timeout(Duration::from_secs(5))?;
-    conn.execute_batch("PRAGMA foreign_keys=ON;")?;
+    // WAL + NORMAL never corrupts the file; a power cut can only drop the newest commits,
+    // and this index is rebuildable. FULL would fsync on every scan batch. A larger
+    // checkpoint interval rewrites hot b-tree pages to the main file once per checkpoint
+    // instead of once per 4 MB of WAL, and the size limit gives the space back afterwards.
+    conn.execute_batch(
+        "PRAGMA foreign_keys=ON;
+         PRAGMA synchronous=NORMAL;
+         PRAGMA wal_autocheckpoint=8000;
+         PRAGMA journal_size_limit=268435456;",
+    )?;
     Ok(conn)
 }
 

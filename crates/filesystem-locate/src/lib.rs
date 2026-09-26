@@ -28,14 +28,20 @@ pub(crate) use worker::worker_loop;
 #[cfg(test)]
 pub(crate) use worker::{
     BackgroundYield, Work, claim_next, fail_attempt, finish_partial_refresh, is_covered,
-    process_next, publish, publish_partial_initial, recover, scan, update_progress,
-    yield_background_attempt,
+    pause_after_commit, process_next, publish, publish_partial_initial, recover, scan,
+    update_progress, yield_background_attempt,
 };
 
 static REQUEST_COUNTER: AtomicU64 = AtomicU64::new(0);
 const POLL_INTERVAL: Duration = Duration::from_millis(350);
 const ERROR_BACKOFF_SECS: i64 = 60;
+/// Rows per delete transaction in recovery, where each row also pays two FTS deletes.
 const BATCH_SIZE: usize = 500;
+/// Rows per scan commit: fewer, larger commits mean fewer WAL syncs and page rewrites.
+const SCAN_BATCH_SIZE: usize = 2_000;
+const COMMIT_REST_FACTOR: u32 = 2;
+const MIN_COMMIT_PAUSE: Duration = Duration::from_millis(10);
+const MAX_COMMIT_PAUSE: Duration = Duration::from_millis(2_000);
 const DEBOUNCE_QUIET_MS: i64 = 3_000;
 const DEBOUNCE_MAX_MS: i64 = 10_000;
 const DEBOUNCE_MAX_RESETS: i64 = 3;

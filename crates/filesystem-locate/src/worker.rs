@@ -118,6 +118,15 @@ pub(crate) fn recover(conn: &Connection) -> Result<()> {
     Ok(())
 }
 
+/// How long the writer rests after a commit that took `commit_took`. Proportional, so a slow
+/// disk (or a huge FTS merge) is given more room rather than the same fixed slice: the scan
+/// holds the disk about a third of the time however slow the commits get. The floor still
+/// hands the single writer slot to other processes; the ceiling keeps one bad commit from
+/// parking the scan.
+pub(crate) fn pause_after_commit(commit_took: Duration) -> Duration {
+    (commit_took * COMMIT_REST_FACTOR).clamp(MIN_COMMIT_PAUSE, MAX_COMMIT_PAUSE)
+}
+
 pub(crate) struct Work {
     pub(crate) root_id: i64,
     pub(crate) root: PathBuf,
@@ -403,7 +412,7 @@ pub(crate) fn scan(
     state_root: &Path,
     stop: &AtomicBool,
 ) -> Result<u64> {
-    let mut batch = Vec::with_capacity(BATCH_SIZE);
+    let mut batch = Vec::with_capacity(SCAN_BATCH_SIZE);
     let mut extra_errors = 0u64;
     let mut last_progress = Instant::now();
     #[cfg(windows)]
@@ -491,7 +500,7 @@ pub(crate) fn scan(
                 entry.len as i64,
                 modified,
             ));
-            if batch.len() >= BATCH_SIZE {
+            if batch.len() >= SCAN_BATCH_SIZE {
                 flush_batch(conn, work, &mut batch)?;
                 if is_covered(conn, work.root_id)? {
                     bail!("scan superseded by an ancestor request");
@@ -582,6 +591,7 @@ fn flush_batch(conn: &mut Connection, work: &Work, batch: &mut EntryBatch) -> Re
     if batch.is_empty() {
         return Ok(());
     }
+    let commit_started = Instant::now();
     let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
     if work.active_generation == 0 {
         // A resumed scan meets rows it wrote before. Unchanged ones cost a lookup and no
@@ -619,7 +629,7 @@ fn flush_batch(conn: &mut Connection, work: &Work, batch: &mut EntryBatch) -> Re
     // A large scan otherwise reacquires SQLite's single writer slot almost
     // immediately. Give foreground refresh and background scheduling calls a
     // chance to acquire it between batches, even across MCP processes.
-    thread::sleep(Duration::from_millis(20));
+    thread::sleep(pause_after_commit(commit_started.elapsed()));
     Ok(())
 }
 

@@ -291,6 +291,37 @@ fn shutdown_during_an_initial_scan_interrupts_instead_of_deleting() {
 }
 
 #[test]
+fn every_connection_commits_without_an_fsync_each_in_wal_mode() {
+    // The index can be rebuilt, so a power cut may cost the last commits but never the file.
+    // FULL would fsync the WAL on every batch of a multi-million-row scan.
+    let temp = tempdir().unwrap();
+    let mut conn = connect(&temp.path().join("everything.db")).unwrap();
+    init_schema(&mut conn).unwrap();
+    let pragma = |name: &str| -> i64 {
+        conn.query_row(&format!("PRAGMA {name}"), [], |row| row.get(0))
+            .unwrap()
+    };
+    assert_eq!(pragma("synchronous"), 1, "NORMAL");
+    assert_eq!(pragma("wal_autocheckpoint"), 8_000);
+    let mode: String = conn
+        .query_row("PRAGMA journal_mode", [], |row| row.get(0))
+        .unwrap();
+    assert_eq!(mode, "wal");
+}
+
+#[test]
+fn writer_pause_grows_with_the_commit_and_stays_within_bounds() {
+    let ms = Duration::from_millis;
+    // Trivial commits still yield the writer slot to other processes.
+    assert_eq!(pause_after_commit(ms(0)), ms(10));
+    // A slow commit (busy disk) earns twice its own length in rest: the writer holds the
+    // disk about a third of the time however slow it is.
+    assert_eq!(pause_after_commit(ms(300)), ms(600));
+    // ...but a pathological commit cannot park the scan for minutes.
+    assert_eq!(pause_after_commit(Duration::from_secs(60)), ms(2_000));
+}
+
+#[test]
 fn pending_index_status_does_not_wait_for_a_writer() {
     let temp = tempdir().unwrap();
     let root = temp.path().join("root");
