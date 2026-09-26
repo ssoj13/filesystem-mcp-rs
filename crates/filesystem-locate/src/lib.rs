@@ -27,8 +27,9 @@ pub(crate) use worker::worker_loop;
 
 #[cfg(test)]
 pub(crate) use worker::{
-    BackgroundYield, claim_next, fail_attempt, finish_partial_refresh, is_covered, publish,
-    publish_partial_initial, recover, scan, update_progress, yield_background_attempt,
+    BackgroundYield, Work, claim_next, fail_attempt, finish_partial_refresh, is_covered,
+    process_next, publish, publish_partial_initial, recover, scan, update_progress,
+    yield_background_attempt,
 };
 
 static REQUEST_COUNTER: AtomicU64 = AtomicU64::new(0);
@@ -39,6 +40,7 @@ const DEBOUNCE_QUIET_MS: i64 = 3_000;
 const DEBOUNCE_MAX_MS: i64 = 10_000;
 const DEBOUNCE_MAX_RESETS: i64 = 3;
 const BACKGROUND_RETRY_DELAY_MS: i64 = 15_000;
+const PROGRESS_LOG_INTERVAL_MS: i64 = 60_000;
 
 #[cfg(test)]
 #[path = "tests.rs"]

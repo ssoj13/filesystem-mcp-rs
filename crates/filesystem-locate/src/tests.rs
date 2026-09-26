@@ -99,6 +99,197 @@ fn recovery_cleans_large_abandoned_scan_without_dropping_published_entries() {
     assert_eq!(attempt_state, "abandoned");
 }
 
+/// A never-published root with a claimed attempt and `paths` already written under its
+/// generation: the shape an initial scan has when its process dies mid-way.
+fn interrupted_initial_scan(conn: &mut Connection, root: &Path, paths: &[&str]) -> Work {
+    let root = canonical_root(root).unwrap();
+    let root_id = ensure_root(conn, &root).unwrap();
+    conn.execute(
+        "UPDATE roots SET desired_seq=1,state='pending',debounce_until_ms=0 WHERE id=?1",
+        [root_id],
+    )
+    .unwrap();
+    let work = claim_next(conn).unwrap().unwrap();
+    for path in paths {
+        let full = root.join(path);
+        conn.execute(
+            "INSERT INTO entries(root_id,generation,path,name,kind,size,modified)
+             VALUES(?1,?2,?3,?4,'file',999,1)",
+            params![
+                work.root_id,
+                work.generation,
+                path_text(&full).unwrap(),
+                path
+            ],
+        )
+        .unwrap();
+    }
+    work
+}
+
+fn entry_count(conn: &Connection) -> i64 {
+    conn.query_row("SELECT count(*) FROM entries", [], |row| row.get(0))
+        .unwrap()
+}
+
+fn resume_generation(conn: &Connection, root_id: i64) -> i64 {
+    conn.query_row(
+        "SELECT resume_generation FROM roots WHERE id=?1",
+        [root_id],
+        |row| row.get(0),
+    )
+    .unwrap()
+}
+
+#[test]
+fn recovery_keeps_an_interrupted_initial_scan_so_it_can_resume() {
+    let temp = tempdir().unwrap();
+    let mut conn = connect(&temp.path().join("everything.db")).unwrap();
+    init_schema(&mut conn).unwrap();
+    let work = interrupted_initial_scan(&mut conn, temp.path(), &["a.txt", "b.txt"]);
+
+    recover(&conn).unwrap();
+
+    assert_eq!(
+        entry_count(&conn),
+        2,
+        "recovery threw the partial scan away"
+    );
+    assert_eq!(resume_generation(&conn, work.root_id), work.generation);
+    let attempt_state: String = conn
+        .query_row(
+            "SELECT state FROM scan_attempts WHERE id=?1",
+            [work.attempt_id],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(attempt_state, "interrupted");
+    let next = claim_next(&mut conn).unwrap().unwrap();
+    assert_ne!(next.attempt_id, work.attempt_id);
+    assert_eq!(
+        next.generation, work.generation,
+        "resume must reuse the generation"
+    );
+}
+
+#[test]
+fn recovery_still_drops_generations_that_nothing_can_resume() {
+    let temp = tempdir().unwrap();
+    let mut conn = connect(&temp.path().join("everything.db")).unwrap();
+    init_schema(&mut conn).unwrap();
+    let work = interrupted_initial_scan(&mut conn, temp.path(), &["keep.txt"]);
+    conn.execute(
+        "INSERT INTO entries(root_id,generation,path,name,kind,size)
+         VALUES(?1,?2,'orphan.txt','orphan.txt','file',0)",
+        params![work.root_id, work.generation + 1_000],
+    )
+    .unwrap();
+
+    recover(&conn).unwrap();
+
+    let left: Vec<String> = conn
+        .prepare("SELECT name FROM entries")
+        .unwrap()
+        .query_map([], |row| row.get(0))
+        .unwrap()
+        .collect::<rusqlite::Result<_>>()
+        .unwrap();
+    assert_eq!(left, ["keep.txt"]);
+}
+
+#[test]
+fn resumed_scan_publishes_the_same_generation_without_duplicates() {
+    let temp = tempdir().unwrap();
+    let root = temp.path().join("root");
+    let state = temp.path().join("state");
+    fs::create_dir_all(&root).unwrap();
+    fs::create_dir_all(&state).unwrap();
+    fs::write(root.join("a.txt"), b"a").unwrap();
+    fs::write(root.join("b.txt"), b"bb").unwrap();
+    fs::write(root.join("c.txt"), b"ccc").unwrap();
+    let mut conn = connect(&state.join("everything.db")).unwrap();
+    init_schema(&mut conn).unwrap();
+    // a.txt was written before the interruption, with metadata that has since gone stale.
+    let first = interrupted_initial_scan(&mut conn, &root, &["a.txt"]);
+    recover(&conn).unwrap();
+
+    let second = claim_next(&mut conn).unwrap().unwrap();
+    assert_eq!(second.generation, first.generation);
+    assert_eq!(
+        scan(&mut conn, &second, &state, &AtomicBool::new(false)).unwrap(),
+        0
+    );
+    publish(&mut conn, &second).unwrap();
+
+    let status = status_for_path(&conn, &canonical_root(&root).unwrap()).unwrap();
+    assert_eq!(status.active_generation, first.generation);
+    assert_eq!(resume_generation(&conn, second.root_id), 0);
+    let rows: Vec<(String, i64)> = conn
+        .prepare("SELECT name,size FROM entries ORDER BY name")
+        .unwrap()
+        .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
+        .unwrap()
+        .collect::<rusqlite::Result<_>>()
+        .unwrap();
+    let names: Vec<&str> = rows.iter().map(|(name, _)| name.as_str()).collect();
+    assert_eq!(names, ["a.txt", "b.txt", "c.txt"]);
+    assert_eq!(rows[0].1, 1, "a stale row must take the rescanned size");
+    // The FTS index has to agree with the table after an upsert, not just the table.
+    let hits: i64 = conn
+        .query_row(
+            "SELECT count(*) FROM entry_names_fts WHERE entry_names_fts MATCH '\"a.tx\"'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(hits, 1);
+}
+
+#[test]
+fn failed_initial_scan_keeps_its_entries_for_the_retry() {
+    let temp = tempdir().unwrap();
+    let mut conn = connect(&temp.path().join("everything.db")).unwrap();
+    init_schema(&mut conn).unwrap();
+    let work = interrupted_initial_scan(&mut conn, temp.path(), &["a.txt", "b.txt"]);
+
+    fail_attempt(&mut conn, &work, "simulated read error").unwrap();
+
+    assert_eq!(entry_count(&conn), 2);
+    assert_eq!(resume_generation(&conn, work.root_id), work.generation);
+}
+
+#[test]
+fn shutdown_during_an_initial_scan_interrupts_instead_of_deleting() {
+    let temp = tempdir().unwrap();
+    let state = temp.path().join("state");
+    fs::create_dir_all(&state).unwrap();
+    let mut conn = connect(&state.join("everything.db")).unwrap();
+    init_schema(&mut conn).unwrap();
+    let work = interrupted_initial_scan(&mut conn, temp.path(), &["a.txt", "b.txt"]);
+    recover(&conn).unwrap();
+
+    process_next(&mut conn, &state, &AtomicBool::new(true)).unwrap();
+
+    assert_eq!(entry_count(&conn), 2, "a clean shutdown discarded the scan");
+    let (root_state, retry): (String, i64) = conn
+        .query_row(
+            "SELECT state,retry_not_before FROM roots WHERE id=?1",
+            [work.root_id],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .unwrap();
+    assert_eq!(root_state, "pending");
+    assert_eq!(retry, 0, "shutdown is not a failure and must not back off");
+    let last: String = conn
+        .query_row(
+            "SELECT state FROM scan_attempts ORDER BY id DESC LIMIT 1",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(last, "interrupted");
+}
+
 #[test]
 fn pending_index_status_does_not_wait_for_a_writer() {
     let temp = tempdir().unwrap();

@@ -127,6 +127,12 @@ pub(crate) fn init_schema(conn: &mut Connection) -> Result<()> {
              PRAGMA user_version=7;",
         )?;
     }
+    if version < 8 {
+        tx.execute_batch(
+            "ALTER TABLE roots ADD COLUMN resume_generation INTEGER NOT NULL DEFAULT 0;
+             PRAGMA user_version=8;",
+        )?;
+    }
     tx.commit()?;
     Ok(())
 }
