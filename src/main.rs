@@ -2280,12 +2280,12 @@ struct PatchBinaryArgs {
 #[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "lowercase")]
 enum RunModeArg {
-    /// Wait for completion, send heartbeat every ~30s (default)
+    /// Wait; heartbeat every ~30s (default)
     #[default]
     Sync,
-    /// Wait for completion; progress carries output snippets every ~10s
+    /// Wait; progress carries output snippets every ~10s
     Managed,
-    /// Return a pid immediately; read the output with tail_file on the log files
+    /// Return a pid at once; read the log files with tail_file
     Detached,
 }
 
@@ -2293,22 +2293,22 @@ enum RunModeArg {
 #[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 struct OutputFilterArgs {
-    /// Regex patterns to include (show lines matching ANY pattern)
+    /// Regexes: keep lines matching any
     #[serde(default, deserialize_with = "vec_or_string")]
     include: Vec<String>,
-    /// Regex patterns to exclude (hide lines matching ANY, applied after include)
+    /// Regexes: drop lines matching any (after include)
     #[serde(default, deserialize_with = "vec_or_string")]
     exclude: Vec<String>,
-    /// Context lines before each match (like grep -B)
+    /// Lines of context before a match
     #[serde(default)]
     context_before: FlexUsize,
-    /// Context lines after each match (like grep -A)
+    /// Lines of context after a match
     #[serde(default)]
     context_after: FlexUsize,
-    /// Context lines before AND after (like grep -C, overridden by specific before/after)
+    /// Context on both sides (the two above override it)
     #[serde(default)]
     context: FlexUsize,
-    /// Max filtered lines to return (prevents context overflow)
+    /// Cap on returned lines
     #[serde(default)]
     max_lines: FlexUsize,
 }
@@ -2466,21 +2466,18 @@ mod cmdline_tests {
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 struct RunCommandArgs {
-    /// Program to run, or a whole command line: when `args` is empty and no
-    /// shell is requested it is split into program + arguments (quote-aware).
-    ///
-    /// WINDOWS PATHS: JSON eats a single backslash before this server sees it
-    /// (`\r`/`\t` become control chars, other `\x` is invalid JSON), so double
-    /// every backslash — `"type \"C:\\dir\\file\""`. Forward slashes work for
-    /// most programs, but cmd.exe built-ins read a leading `/` as a switch.
+    /// Program, or a whole command line (split quote-aware into program + args
+    /// when `args` is empty and no shell is set). Windows: double every
+    /// backslash in JSON or use forward slashes; cmd.exe built-ins read a
+    /// leading `/` as a switch.
     command: String,
     /// Command arguments
     #[serde(default, deserialize_with = "vec_or_string")]
     args: Vec<String>,
-    /// Working directory. Absolute, forward slashes, as a plain JSON string
-    /// with no quote characters inside the value: "C:/projects/repo". Aliases
-    /// accepted: `working_directory`, `workingDir`, `working_dir`, `workdir`,
-    /// `dir`.
+    /// Working directory: absolute, forward slashes, no quote characters
+    /// inside the value, e.g. "C:/projects/repo".
+    // Also accepted, and deliberately not in the schema: working_directory,
+    // workingDir, working_dir, workdir, dir.
     #[serde(
         alias = "working_directory",
         alias = "workingDir",
@@ -2545,27 +2542,21 @@ struct RunCommandArgs {
     output_filter: Option<OutputFilterArgs>,
     #[serde(default)]
     mode: RunModeArg,
-    /// Bool or shell name: `false` (default) = no shell; `true` = `cmd /C` on
-    /// Windows, `sh -c` on Unix; `"bash"`, `"pwsh"` (PowerShell 7, NOT an alias
-    /// for `"powershell"` = Windows PowerShell 5), `"cmd"`, `"sh"`.
-    ///
-    /// On Windows `"bash"` means git-bash, resolved from the installed git; the
-    /// `System32` WSL launcher is refused, because through it variables expand
-    /// on the Linux side and the `env` map never arrives. Under `"cmd"` the line
-    /// reaches cmd.exe verbatim, so backslash paths survive as typed.
+    /// `false` (default) = no shell; `true` = `cmd /C` on Windows, `sh -c` on
+    /// Unix; or `"bash"`, `"pwsh"` (PowerShell 7), `"powershell"` (Windows
+    /// PowerShell 5), `"cmd"`, `"sh"`. Windows `bash` is git-bash: the WSL
+    /// launcher is refused. Under `cmd` the line reaches cmd.exe verbatim.
     #[serde(default)]
     shell: ShellArg,
-    /// Stop after a failing line (default true): `|| exit /b 1` under cmd,
-    /// ErrorAction Stop under PowerShell. `if`/`for` blocks are left alone —
-    /// chain those with `&&`. False = batch "run every line".
+    /// Stop after a failing line (default true; false = run every line).
+    /// `if`/`for` blocks are not covered: chain them with `&&`.
     #[serde(default = "default_flex_true", alias = "fail_fast")]
     fail_fast: FlexBool,
-    /// Stream output to log files, auto-created when not given (default true).
-    /// Independent of the inline result, which is returned either way.
+    /// Write output to log files (default true); the inline result is
+    /// returned either way.
     #[serde(default = "default_flex_true", alias = "stream_output")]
     stream_output: FlexBool,
-    /// Directory for auto-created log files. Default: the server's own scratch
-    /// dir (`~/.filesystem-mcp-rs/tmp/`), swept by the usual retention.
+    /// Directory for auto-created log files (default `~/.filesystem-mcp-rs/tmp/`)
     #[serde(alias = "stream_dir")]
     stream_dir: Option<String>,
     // Removed parameter, kept out of the schema (`schemars(skip)`) and captured
@@ -5509,10 +5500,10 @@ USE CASES: Patch executables, fix binary data, search-replace in non-text files.
     #[tool(
         name = "run_command",
         description = "Execute a command with full process lifecycle control (Windows/macOS/Linux).\n\
-            Output: the full output always goes to the log files. The inline copy is the last ~200 lines / 16 KB unless stdoutHead/stdoutTail/outputFilter narrow it (they combine: head + matches + tail); stdoutTotalLines is the true length. captureTruncated=true means a surviving child still held the pipe — read the log file.\n\
-            A timeout, an MCP cancellation or kill_process kills the whole process tree, not just the direct child.\n\
-            Windows: cmd.exe understands neither ';' nor tail/grep/sed — pass shell:'bash' for a unix pipeline. A multi-line command under cmd runs as a temp .bat, i.e. BATCH semantics: %%i (not %i) in for, the exit code is the LAST line's, and only failFast stops a failing middle line.\n\
-            A leftover $NAME token in command/args is REJECTED: the MCP host may delete such tokens before the call arrives, which would silently run a different command. Pass the script via stdin or a file."
+            Output always goes to the log files; the inline copy is the last ~200 lines / 16 KB unless stdoutHead/stdoutTail/outputFilter narrow it (they combine: head + matches + tail). stdoutTotalLines is the true length; captureTruncated=true means a surviving child held the pipe: read the log file.\n\
+            A timeout, an MCP cancellation or kill_process kills the whole process tree, not just the child.\n\
+            Windows: cmd.exe understands neither ';' nor tail/grep/sed: pass shell:'bash' for a unix pipeline. A multi-line command under cmd is a temp .bat, i.e. BATCH semantics: %%i (not %i) in for, the exit code is the LAST line's, only failFast stops a failing middle line.\n\
+            A leftover $NAME token in command/args is REJECTED (the host may delete such tokens, silently changing the command): pass the script via stdin or a file."
     )]
     async fn run_command(
         &self,

@@ -98,7 +98,7 @@ mod tests {
     const OVER_BUDGET_ALLOWED: &[(&str, usize, &str)] = &[
         // Twenty-six parameters, six shared $defs. The surface is the price of one tool that
         // replaces a shell; splitting it would duplicate the process-lifecycle machinery.
-        ("run_command", 8_600, "26 parameters + 6 shared definitions"),
+        ("run_command", 7_200, "26 parameters + 6 shared definitions"),
         // Eight nearby* parameters on top of the full grep_files option set; the pairing IS the
         // tool. Its description is already 418 chars.
         ("grep_context", 3_900, "grep options + 8 nearby* parameters"),
@@ -170,7 +170,7 @@ mod tests {
         (
             "serde aliases: keys the deserializer accepts but the schema does not advertise, so \
              documenting them is true even though they are not properties",
-            &["workingDir", "working_dir", "working_directory", "end_line"],
+            &["end_line"],
         ),
     ];
 
