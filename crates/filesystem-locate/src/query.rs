@@ -20,36 +20,8 @@ use super::*;
 
 type BoxError = Box<dyn std::error::Error + Send + Sync + 'static>;
 
-/// What `locate_sql` tells the caller about the views and how to use them.
-pub const SQL_GUIDE: &str = r"fs_entries: one row per indexed file, directory or symlink (the latest published scan of each root)
-  path            full path, verbatim form: \\?\C:\dir\file
-  name            last component
-  dir             parent path (computed, not indexed)
-  ext             lowercase extension without the dot; '' for directories and files without one
-  kind            'file' | 'dir' | 'symlink'
-  size            a file's own bytes; a directory's total beneath it (when the scan has totalled it)
-  files, dirs     directories only: how many files and directories lie beneath
-  modified        unix seconds
-  depth           number of separators in path
-fs_roots: path, state, last_verified (unix seconds), last_error
-
-Functions: fs_ext(name); `text REGEXP pattern` (Rust regex); SQLite's GLOB, LIKE, lower, instr, substr, strftime(..., 'unixepoch'), CTEs and window functions. One SELECT only.
-
-A subtree of P is  path >= 'P\' AND path < 'P]'  (']' follows '\'), which uses the primary key; filters on dir, ext and depth scan the subtree. Directory rows carry subtree totals, so SUM(size) over everything double counts: add kind='file'. The index is as fresh as fs_roots.last_verified.
-
-Examples:
--- the 20 largest files under a folder
-SELECT path,size FROM fs_entries WHERE kind='file' AND path>='\\?\C:\Temp\' AND path<'\\?\C:\Temp]' ORDER BY size DESC LIMIT 20
--- what takes the space: the children of a folder
-SELECT name,size,files FROM fs_entries WHERE path>='\\?\C:\Users\me\' AND path<'\\?\C:\Users\me]' AND dir='\\?\C:\Users\me' ORDER BY size DESC LIMIT 20
--- size per extension
-SELECT ext,count(*) n,sum(size) bytes FROM fs_entries WHERE kind='file' GROUP BY ext ORDER BY bytes DESC LIMIT 20
--- folders holding both Assets and ProjectSettings
-SELECT a.dir FROM fs_entries a WHERE a.name='Assets' AND a.kind='dir' AND EXISTS (SELECT 1 FROM fs_entries b WHERE b.path=a.dir||'\ProjectSettings')
--- node_modules folders not nested in another one, biggest first
-SELECT path,size FROM fs_entries WHERE name='node_modules' AND kind='dir' AND instr(path,'\node_modules\')=0 ORDER BY size DESC
--- files untouched for a year
-SELECT path,size FROM fs_entries WHERE kind='file' AND modified < strftime('%s','now','-1 year') ORDER BY size DESC LIMIT 50";
+/// What `locate_sql` tells the caller about the views and how to use them: `sql_guide.txt`.
+pub const SQL_GUIDE: &str = include_str!("sql_guide.txt");
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum SqlValue {
@@ -64,6 +36,10 @@ pub struct SqlQuery<'a> {
     pub sql: &'a str,
     /// Directories the caller may read; a row outside all of them is not visible. Empty: none.
     pub allowed: &'a [PathBuf],
+    /// Narrow the views to this directory and what lies beneath it (it is still only visible
+    /// where `allowed` lets it be). The `under` column then holds its path, so `dir = under`
+    /// lists its children.
+    pub under: Option<&'a Path>,
     pub timeout: Duration,
 }
 
@@ -98,7 +74,7 @@ impl Indexer {
         let started = Instant::now();
         let conn = connect(&self.db_path)?;
         let (roots, published) = published_roots(&conn)?;
-        install_views(&conn, query.allowed, &published)?;
+        install_views(&conn, query.allowed, query.under, &published)?;
         // Views exist; from here on the connection can only read them. The index is far
         // bigger than SQLite's default cache and a scan over it is one long sweep: map the file
         // and keep a sizeable cache so the sweep is not a page-by-page read.
@@ -228,6 +204,7 @@ fn authorize(ctx: AuthContext<'_>) -> Authorization {
 fn install_views(
     conn: &Connection,
     allowed: &[PathBuf],
+    under: Option<&Path>,
     published: &[PublishedRoot],
 ) -> Result<()> {
     let flags = FunctionFlags::SQLITE_UTF8 | FunctionFlags::SQLITE_DETERMINISTIC;
@@ -253,7 +230,12 @@ fn install_views(
     // One arm per root, with its generation written in as a constant. Joined through `roots`
     // instead, SQLite reads the generation as a range and sweeps every index it owns rather
     // than seeking a name or a path, which turned seconds into minutes on a real index.
-    let visible = visible(allowed)?;
+    let visible = visible(allowed, under)?;
+    let under_column = match under {
+        // `dir` of a direct child is the path without a trailing separator, drive roots too.
+        Some(dir) => sql_literal(path_text(dir)?.trim_end_matches(std::path::MAIN_SEPARATOR)),
+        None => "NULL".to_owned(),
+    };
     let arms: Vec<String> = published
         .iter()
         .map(|root| {
@@ -265,7 +247,8 @@ fn install_views(
                         COALESCE(d.bytes,e.size) AS size,
                         d.files AS files, d.dirs AS dirs,
                         e.modified AS modified,
-                        length(e.path)-length(replace(e.path,'\\','')) AS depth
+                        length(e.path)-length(replace(e.path,'\\','')) AS depth,
+                        {under_column} AS under
                  FROM entries e
                  LEFT JOIN dir_stats d
                    ON e.kind='dir' AND d.root_id={id} AND d.generation={attempt}
@@ -279,7 +262,7 @@ fn install_views(
         .collect();
     let body = if arms.is_empty() {
         "SELECT '' AS path, '' AS name, '' AS dir, '' AS ext, '' AS kind, 0 AS size,
-                0 AS files, 0 AS dirs, 0 AS modified, 0 AS depth WHERE 0"
+                0 AS files, 0 AS dirs, 0 AS modified, 0 AS depth, NULL AS under WHERE 0"
             .to_owned()
     } else {
         arms.join(" UNION ALL ")
@@ -293,25 +276,37 @@ fn install_views(
     Ok(())
 }
 
-/// SQL over `e.path` that is true for the allowed directories and everything beneath them.
-fn visible(allowed: &[PathBuf]) -> Result<String> {
+fn sql_literal(text: &str) -> String {
+    format!("'{}'", text.replace('\'', "''"))
+}
+
+/// SQL over `e.path` that is true for `dir` and everything beneath it.
+fn subtree(dir: &Path) -> Result<String> {
+    let text = path_text(dir)?;
+    let bare = text.trim_end_matches(std::path::MAIN_SEPARATOR);
+    // Descendants are `bare\...`; `]` is the character after the separator.
+    Ok(format!(
+        "e.path={eq} OR (e.path>={lo} AND e.path<{hi})",
+        eq = sql_literal(text),
+        lo = sql_literal(&format!("{bare}{}", std::path::MAIN_SEPARATOR)),
+        hi = sql_literal(&format!("{bare}]")),
+    ))
+}
+
+/// SQL over `e.path` that is true for the allowed directories, and beneath `under` when given.
+fn visible(allowed: &[PathBuf], under: Option<&Path>) -> Result<String> {
     if allowed.is_empty() {
         return Ok("0".into());
     }
-    let literal = |text: &str| format!("'{}'", text.replace('\'', "''"));
-    let mut terms = Vec::new();
-    for dir in allowed {
-        let text = path_text(dir)?;
-        let bare = text.trim_end_matches(std::path::MAIN_SEPARATOR);
-        // Descendants are `bare\...`; `]` is the character after the separator.
-        terms.push(format!(
-            "e.path={eq} OR (e.path>={lo} AND e.path<{hi})",
-            eq = literal(text),
-            lo = literal(&format!("{bare}{}", std::path::MAIN_SEPARATOR)),
-            hi = literal(&format!("{bare}]")),
-        ));
-    }
-    Ok(terms.join(" OR "))
+    let terms = allowed
+        .iter()
+        .map(|dir| subtree(dir))
+        .collect::<Result<Vec<_>>>()?;
+    let allowed = terms.join(" OR ");
+    Ok(match under {
+        Some(dir) => format!("({allowed}) AND ({})", subtree(dir)?),
+        None => allowed,
+    })
 }
 
 /// Lowercase extension without the dot; empty when there is none.

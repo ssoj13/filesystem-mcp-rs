@@ -1140,6 +1140,9 @@ struct LocateSqlArgs {
     /// Describe the views, functions and example queries
     #[serde(default)]
     help: FlexBool,
+    /// Narrow fs_entries to this folder and what lies beneath it
+    #[serde(default)]
+    under: Option<String>,
     /// Time limit in ms (default 120000)
     #[serde(default)]
     timeout_ms: FlexU64,
@@ -6852,7 +6855,7 @@ impl FileSystemServer {
 
     #[tool(
         name = "locate_sql",
-        description = "Read-only SQL over the locate index: one SELECT over fs_entries(path, name, dir, ext, kind, size, modified, files, dirs, depth) and fs_roots. kind is file, dir or symlink; a directory's size is the total beneath it; modified is unix seconds. A subtree of P is path >= 'P\\' AND path < 'P]'. For sorted, filtered or grouped questions locate_search cannot answer: largest files, size per extension, folders holding two given entries. help:true lists the functions and examples. Answers reflect the last scan (roots[].lastVerified)."
+        description = "Read-only SQL over the locate index: one SELECT over fs_entries(path, name, dir, ext, kind, size, modified, files, dirs, depth, under) and fs_roots. kind is file, dir or symlink; a directory's size is the total beneath it; modified is unix seconds. under narrows the view to one folder and what lies beneath it, and dir = under lists its children. For sorted, filtered or grouped questions locate_search cannot answer: largest files, size per extension, folders holding two given entries. help:true lists the functions and recipes. Answers reflect the last scan (roots[].lastVerified)."
     )]
     async fn locate_sql(
         &self,
@@ -6891,8 +6894,18 @@ impl FileSystemServer {
             Some(path) => Some(self.resolve(path).await?),
             None => None,
         };
+        let under = match args
+            .under
+            .as_deref()
+            .map(str::trim)
+            .filter(|p| !p.is_empty())
+        {
+            Some(path) => Some(self.resolve(path).await?),
+            None => None,
+        };
 
         let save_for_work = save_to.clone();
+        let under_for_work = under.clone();
         let run = tokio::task::spawn_blocking(move || -> anyhow::Result<_> {
             /// Rows one saveTo file may take.
             const SAVE_MAX_ROWS: u64 = 5_000_000;
@@ -6907,6 +6920,7 @@ impl FileSystemServer {
                 &filesystem_locate::SqlQuery {
                     sql: &sql,
                     allowed: &allowed,
+                    under: under_for_work.as_deref(),
                     timeout,
                 },
                 |columns, values| {
@@ -6961,6 +6975,7 @@ impl FileSystemServer {
                 "rows": inline,
                 "rowCount": inline.len(),
                 "truncated": more && save_to.is_none(),
+                "under": under,
                 "savedTo": save_to,
                 "savedRows": save_to.as_ref().map(|_| saved),
                 "elapsedMs": outcome.elapsed_ms,

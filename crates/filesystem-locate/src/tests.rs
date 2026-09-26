@@ -1514,11 +1514,21 @@ fn idle_indexer(state: &Path) -> (File, Indexer) {
 }
 
 fn run_sql(indexer: &Indexer, allowed: &[PathBuf], sql: &str) -> Result<Vec<Vec<SqlValue>>> {
+    run_sql_under(indexer, allowed, None, sql)
+}
+
+fn run_sql_under(
+    indexer: &Indexer,
+    allowed: &[PathBuf],
+    under: Option<&Path>,
+    sql: &str,
+) -> Result<Vec<Vec<SqlValue>>> {
     let mut rows = Vec::new();
     indexer.query_each(
         &SqlQuery {
             sql,
             allowed,
+            under,
             timeout: Duration::from_secs(20),
         },
         |_, values| {
@@ -1647,6 +1657,112 @@ fn sql_refuses_everything_but_a_select_over_the_views() {
 }
 
 #[test]
+fn sql_under_narrows_the_view_to_one_folder_and_lists_its_children() {
+    let temp = tempdir().unwrap();
+    let (root, state, _conn, _work) = published_tree(temp.path());
+    let (_lock, indexer) = idle_indexer(&state);
+    let allowed = [canonical_root(&root).unwrap()];
+    let a = canonical_root(&root).unwrap().join("a");
+
+    // Only `a` and what lies beneath it: not `a-b`, which sorts between them in byte order.
+    let beneath = run_sql_under(
+        &indexer,
+        &allowed,
+        Some(&a),
+        "SELECT name FROM fs_entries ORDER BY name",
+    )
+    .unwrap();
+    assert_eq!(
+        beneath,
+        [[text("a")], [text("b")], [text("x.bin")], [text("y.bin")]]
+    );
+    // `dir = under` lists the children, whatever the depth of the folder.
+    let children = run_sql_under(
+        &indexer,
+        &allowed,
+        Some(&a),
+        "SELECT name,size FROM fs_entries WHERE dir=under ORDER BY size DESC",
+    )
+    .unwrap();
+    assert_eq!(
+        children,
+        [
+            [text("x.bin"), SqlValue::Int(100)],
+            [text("b"), SqlValue::Int(50)]
+        ]
+    );
+    // Without it the column is NULL and nothing matches.
+    let none = run_sql(
+        &indexer,
+        &allowed,
+        "SELECT name FROM fs_entries WHERE dir=under",
+    )
+    .unwrap();
+    assert!(none.is_empty());
+
+    // The root of the allowed tree itself: its children are the entries with no deeper parent.
+    let top = canonical_root(&root).unwrap();
+    let top_children = run_sql_under(
+        &indexer,
+        &allowed,
+        Some(&top),
+        "SELECT name FROM fs_entries WHERE dir=under ORDER BY name",
+    )
+    .unwrap();
+    assert_eq!(
+        top_children,
+        [[text("a")], [text("a-b")], [text("c.bin")], [text("e")]]
+    );
+}
+
+#[test]
+fn sql_under_cannot_reach_beyond_the_allowed_directories() {
+    let temp = tempdir().unwrap();
+    let (root, state, _conn, _work) = published_tree(temp.path());
+    let (_lock, indexer) = idle_indexer(&state);
+    let top = canonical_root(&root).unwrap();
+    // Allowed is only `a-b`; asking for `a` (or the whole tree) shows nothing beyond it.
+    let allowed = [top.join("a-b")];
+
+    let outside = run_sql_under(
+        &indexer,
+        &allowed,
+        Some(&top.join("a")),
+        "SELECT name FROM fs_entries",
+    )
+    .unwrap();
+    assert!(outside.is_empty());
+    let wider = run_sql_under(
+        &indexer,
+        &allowed,
+        Some(&top),
+        "SELECT name FROM fs_entries ORDER BY name",
+    )
+    .unwrap();
+    assert_eq!(wider, [[text("a-b")], [text("z.bin")]]);
+}
+
+#[test]
+fn the_sql_guide_names_under_and_its_recipes_run() {
+    assert!(SQL_GUIDE.contains("`under`"));
+    let temp = tempdir().unwrap();
+    let (root, state, _conn, _work) = published_tree(temp.path());
+    let (_lock, indexer) = idle_indexer(&state);
+    let top = canonical_root(&root).unwrap();
+    let allowed = [top.clone()];
+    // Every recipe in the guide is a SELECT the views accept.
+    let recipes: Vec<&str> = SQL_GUIDE
+        .lines()
+        .filter(|line| line.starts_with("SELECT "))
+        .collect();
+    assert!(recipes.len() >= 8, "the guide lost its recipes");
+    for sql in recipes {
+        run_sql_under(&indexer, &allowed, Some(&top), sql)
+            .unwrap_or_else(|error| panic!("a recipe failed: {sql}\n{error:#}"));
+    }
+}
+
+#[test]
 fn sql_sees_only_the_directories_it_is_allowed() {
     let temp = tempdir().unwrap();
     let (root, state, _conn, _work) = published_tree(temp.path());
@@ -1676,6 +1792,7 @@ fn sql_is_stopped_at_its_time_limit_and_can_be_stopped_early() {
                 sql: "WITH RECURSIVE c(x) AS (SELECT 1 UNION ALL SELECT x+1 FROM c)
                       SELECT count(*) FROM c",
                 allowed: &allowed,
+                under: None,
                 timeout: Duration::from_millis(100),
             },
             |_, _| Ok(true),
@@ -1689,6 +1806,7 @@ fn sql_is_stopped_at_its_time_limit_and_can_be_stopped_early() {
             &SqlQuery {
                 sql: "SELECT name FROM fs_entries",
                 allowed: &allowed,
+                under: None,
                 timeout: Duration::from_secs(10),
             },
             |columns, _| {
@@ -1772,6 +1890,7 @@ fn real_index_sql_answers_typical_questions_in_reasonable_time() {
                 &SqlQuery {
                     sql: &plan,
                     allowed: &everything,
+                    under: None,
                     timeout: Duration::from_secs(60),
                 },
                 |_, values| {
@@ -1788,6 +1907,7 @@ fn real_index_sql_answers_typical_questions_in_reasonable_time() {
             &SqlQuery {
                 sql,
                 allowed: &everything,
+                under: None,
                 timeout: Duration::from_secs(600),
             },
             |_, values| {
