@@ -197,6 +197,54 @@ impl Indexer {
         .map_err(Into::into)
     }
 
+    /// Totals for each of `paths`, in order: `None` where the index has none (not covered by
+    /// an index, not a directory it saw, or totals not stored yet). A path that is itself a
+    /// symlink or junction is looked up as itself, not as its target.
+    pub fn dir_stats(&self, paths: &[PathBuf]) -> Result<Vec<Option<DirStats>>> {
+        let conn = connect(&self.db_path)?;
+        let tx = conn.unchecked_transaction()?;
+        let rows = root_rows(&tx)?;
+        let mut totals = tx.prepare(
+            "SELECT bytes,files,dirs FROM dir_stats WHERE root_id=?1 AND generation=?2 AND path=?3",
+        )?;
+        let mut roots = tx.prepare("SELECT last_verified,state FROM roots WHERE id=?1")?;
+        let mut out = Vec::with_capacity(paths.len());
+        for path in paths {
+            let found = (|| -> Result<Option<DirStats>> {
+                let path = index_path(path)?;
+                let Some(provider) = active_provider(&rows, &path) else {
+                    return Ok(None);
+                };
+                let Some((bytes, files, dirs)) = totals
+                    .query_row(
+                        params![provider.id, provider.published_attempt, path_text(&path)?],
+                        |row| {
+                            Ok((
+                                row.get::<_, i64>(0)?,
+                                row.get::<_, i64>(1)?,
+                                row.get::<_, i64>(2)?,
+                            ))
+                        },
+                    )
+                    .optional()?
+                else {
+                    return Ok(None);
+                };
+                let (as_of, state): (Option<i64>, String) =
+                    roots.query_row([provider.id], |row| Ok((row.get(0)?, row.get(1)?)))?;
+                Ok(Some(DirStats {
+                    bytes: bytes.max(0) as u64,
+                    files: files.max(0) as u64,
+                    dirs: dirs.max(0) as u64,
+                    as_of,
+                    partial: state == "partial",
+                }))
+            })();
+            out.push(found.unwrap_or(None));
+        }
+        Ok(out)
+    }
+
     pub fn search(
         &self,
         root: &Path,
@@ -290,6 +338,9 @@ impl Indexer {
         };
         let sql = format!("{base_sql}{kind_sql} ORDER BY e.path");
         let mut stmt = tx.prepare(&sql)?;
+        let mut totals = tx.prepare(
+            "SELECT bytes,files,dirs FROM dir_stats WHERE root_id=?1 AND generation=?2 AND path=?3",
+        )?;
         let root_text = path_text(&provider.path)?;
         let mut rows = if exact {
             stmt.query(params![root_text, query.unwrap().0])?
@@ -336,11 +387,33 @@ impl Indexer {
                 truncated = true;
                 break;
             }
+            let mut size = row.get::<_, i64>(2)?.max(0) as u64;
+            let (mut files, mut dirs) = (None, None);
+            if kind == "dir"
+                && let Some((bytes, file_count, dir_count)) = totals
+                    .query_row(
+                        params![provider.id, provider.published_attempt, path],
+                        |row| {
+                            Ok((
+                                row.get::<_, i64>(0)?,
+                                row.get::<_, i64>(1)?,
+                                row.get::<_, i64>(2)?,
+                            ))
+                        },
+                    )
+                    .optional()?
+            {
+                size = bytes.max(0) as u64;
+                files = Some(file_count.max(0) as u64);
+                dirs = Some(dir_count.max(0) as u64);
+            }
             matches.push(Match {
                 path: PathBuf::from(path),
                 kind,
-                size: row.get::<_, i64>(2)?.max(0) as u64,
+                size,
                 modified: row.get(3)?,
+                files,
+                dirs,
             });
         }
         Ok(SearchResult {
@@ -348,6 +421,17 @@ impl Indexer {
             truncated,
             status,
         })
+    }
+}
+
+/// The form a path has in the index: its parent directories resolved, its own last
+/// component not, so a symlink or junction is a directory of its own.
+fn index_path(path: &Path) -> Result<PathBuf> {
+    match (path.parent(), path.file_name()) {
+        (Some(parent), Some(name)) if !parent.as_os_str().is_empty() => {
+            Ok(fs::canonicalize(parent)?.join(name))
+        }
+        _ => Ok(fs::canonicalize(path)?),
     }
 }
 

@@ -8,6 +8,7 @@ use anyhow::{Result, bail};
 use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
 
 use super::*;
+use crate::aggregate::{DirAggregator, Totals};
 
 pub(crate) fn worker_loop(
     db_path: &Path,
@@ -39,10 +40,16 @@ pub(crate) fn worker_loop(
                 continue;
             }
         }
-        if let Ok(mut conn) = connect(db_path)
-            && process_next(&mut conn, state_root, stop, config).is_err()
-        {
-            let _ = recover(&conn);
+        if let Ok(mut conn) = connect(db_path) {
+            if let Err(error) = backfill_dir_stats(&mut conn, stop, config) {
+                static WARNED: AtomicBool = AtomicBool::new(false);
+                if !WARNED.swap(true, Ordering::Relaxed) {
+                    tracing::warn!("locate: directory totals backfill failed: {error:#}");
+                }
+            }
+            if process_next(&mut conn, state_root, stop, config).is_err() {
+                let _ = recover(&conn);
+            }
         }
         thread::sleep(POLL_INTERVAL);
     }
@@ -120,6 +127,19 @@ pub(crate) fn recover(conn: &Connection) -> Result<()> {
             break;
         }
         thread::sleep(Duration::from_millis(20));
+    }
+    // Totals that no published generation points at: a scan that never published, or a root
+    // that a wider one now covers.
+    let keep: Vec<(i64, i64)> = {
+        let mut stmt = conn.prepare(
+            "SELECT id,CASE WHEN active_generation>0 AND covered_by IS NULL
+                            THEN published_attempt ELSE -1 END FROM roots",
+        )?;
+        stmt.query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?
+            .collect::<rusqlite::Result<_>>()?
+    };
+    for (root_id, generation) in keep {
+        drop_dir_stats(conn, root_id, StatsScope::Except(generation))?;
     }
     Ok(())
 }
@@ -279,6 +299,7 @@ pub(crate) fn interrupt_attempt(conn: &mut Connection, work: &Work) -> Result<()
         "DELETE FROM staged_entries WHERE attempt_id=?1",
         [work.attempt_id],
     )?;
+    drop_dir_stats(conn, work.root_id, StatsScope::Generation(work.attempt_id))?;
     Ok(())
 }
 
@@ -339,6 +360,7 @@ fn abandon_covered_attempt(conn: &mut Connection, work: &Work) -> Result<()> {
         "DELETE FROM staged_entries WHERE attempt_id=?1",
         [work.attempt_id],
     )?;
+    drop_dir_stats(conn, work.root_id, StatsScope::Generation(work.attempt_id))?;
     Ok(())
 }
 
@@ -349,6 +371,7 @@ pub(crate) fn scan(
     stop: &AtomicBool,
 ) -> Result<u64> {
     let mut batch = Vec::with_capacity(work.settings.scan_batch);
+    let mut agg = DirAggregator::new(path_text(&work.root)?);
     let mut extra_errors = 0u64;
     let mut last_progress = Instant::now();
     #[cfg(windows)]
@@ -437,6 +460,11 @@ pub(crate) fn scan(
                 .modified
                 .and_then(|time| time.duration_since(UNIX_EPOCH).ok())
                 .map(|duration| duration.as_secs() as i64);
+            agg.add(
+                path,
+                entry.kind == fscan_rs::EntryKind::Directory,
+                entry.len,
+            );
             batch.push((
                 path.to_owned(),
                 name.to_owned(),
@@ -493,7 +521,167 @@ pub(crate) fn scan(
         progress.directories + 1,
         &work.root,
     )?;
+    let rows = agg.finish();
+    match write_dir_stats(
+        conn,
+        work.root_id,
+        work.attempt_id,
+        &rows,
+        &work.settings,
+        stop,
+        true,
+    ) {
+        Ok(()) => {}
+        Err(error)
+            if stop.load(Ordering::Acquire) || error.downcast_ref::<ScanStopped>().is_some() =>
+        {
+            return Err(error);
+        }
+        Err(error) => {
+            // Totals are a convenience: the entries are complete without them, and the
+            // worker backfills a published root that has none.
+            tracing::warn!(root = %work.root.display(), "locate: could not store directory totals: {error:#}");
+            let _ = drop_dir_stats(conn, work.root_id, StatsScope::Generation(work.attempt_id));
+        }
+    }
     Ok(progress.errors.saturating_add(extra_errors))
+}
+
+/// Rows per `drop_dir_stats` commit. No FTS rides on this table, so it takes far more than
+/// `entries` per statement.
+const STATS_DELETE_BATCH: i64 = 5_000;
+
+/// Which generations of one root's `dir_stats` to remove.
+pub(crate) enum StatsScope {
+    Generation(i64),
+    Below(i64),
+    Except(i64),
+    Root,
+}
+
+/// Delete `dir_stats` rows in bounded statements so the single writer slot is handed back
+/// between them, as recovery does for `entries`.
+pub(crate) fn drop_dir_stats(conn: &Connection, root_id: i64, scope: StatsScope) -> Result<()> {
+    let (condition, bound) = match scope {
+        StatsScope::Generation(generation) => ("generation=?2", generation),
+        StatsScope::Below(generation) => ("generation<?2", generation),
+        StatsScope::Except(generation) => ("generation!=?2", generation),
+        StatsScope::Root => ("generation>=?2", i64::MIN),
+    };
+    let mut stmt = conn.prepare(&format!(
+        "DELETE FROM dir_stats WHERE (root_id,generation,path) IN (
+           SELECT root_id,generation,path FROM dir_stats
+           WHERE root_id=?1 AND {condition} LIMIT ?3)"
+    ))?;
+    loop {
+        if stmt.execute(params![root_id, bound, STATS_DELETE_BATCH])? == 0 {
+            return Ok(());
+        }
+        thread::sleep(Duration::from_millis(20));
+    }
+}
+
+fn clamp_i64(value: u64) -> i64 {
+    value.min(i64::MAX as u64) as i64
+}
+
+/// Store one root's totals under `generation`. The root's own row goes last: it is what
+/// says the set is complete, so a write that stops half way is redone rather than trusted.
+fn write_dir_stats(
+    conn: &mut Connection,
+    root_id: i64,
+    generation: i64,
+    rows: &[(String, Totals)],
+    settings: &IndexerConfig,
+    stop: &AtomicBool,
+    obey_control: bool,
+) -> Result<()> {
+    let ordered: Vec<&(String, Totals)> = rows.iter().skip(1).chain(rows.iter().take(1)).collect();
+    for chunk in ordered.chunks(settings.scan_batch.max(1)) {
+        if stop.load(Ordering::Acquire) {
+            bail!("scan cancelled during shutdown");
+        }
+        if obey_control {
+            honour_control(conn, root_id, stop)?;
+        }
+        let commit_started = Instant::now();
+        let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        {
+            let mut insert = tx.prepare_cached(
+                "INSERT OR REPLACE INTO dir_stats(root_id,generation,path,bytes,files,dirs)
+                 VALUES(?1,?2,?3,?4,?5,?6)",
+            )?;
+            for (path, totals) in chunk.iter().copied() {
+                insert.execute(params![
+                    root_id,
+                    generation,
+                    path,
+                    clamp_i64(totals.bytes),
+                    clamp_i64(totals.files),
+                    clamp_i64(totals.dirs)
+                ])?;
+            }
+        }
+        tx.commit()?;
+        thread::sleep(pause_after_commit(
+            commit_started.elapsed(),
+            settings.write_rest,
+            settings.write_pause_max,
+        ));
+    }
+    Ok(())
+}
+
+/// Give every published root that has no totals its own, from the entries it already holds:
+/// a root indexed before totals existed, or published by a process that predates them. No
+/// rescan is needed, so this costs a read of the entries instead of hours of disk walking.
+pub(crate) fn backfill_dir_stats(
+    conn: &mut Connection,
+    stop: &AtomicBool,
+    settings: &IndexerConfig,
+) -> Result<()> {
+    let due: Vec<(i64, String, i64, i64)> = {
+        let mut stmt = conn.prepare(
+            "SELECT r.id,r.path,r.active_generation,r.published_attempt FROM roots r
+             WHERE r.active_generation>0 AND r.covered_by IS NULL AND r.published_attempt>0
+               AND r.state!='building'
+               AND NOT EXISTS (SELECT 1 FROM dir_stats d
+                               WHERE d.root_id=r.id AND d.generation=r.published_attempt
+                                 AND d.path=r.path)",
+        )?;
+        stmt.query_map([], |row| {
+            Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?))
+        })?
+        .collect::<rusqlite::Result<_>>()?
+    };
+    for (root_id, root, generation, attempt) in due {
+        if stop.load(Ordering::Acquire) {
+            break;
+        }
+        let started = Instant::now();
+        let mut agg = DirAggregator::new(&root);
+        {
+            let mut stmt = conn
+                .prepare("SELECT path,kind,size FROM entries WHERE root_id=?1 AND generation=?2")?;
+            let mut entries = stmt.query(params![root_id, generation])?;
+            while let Some(row) = entries.next()? {
+                let path: String = row.get(0)?;
+                let kind: String = row.get(1)?;
+                let size: i64 = row.get(2)?;
+                agg.add(&path, kind == "dir", size.max(0) as u64);
+            }
+        }
+        let rows = agg.finish();
+        write_dir_stats(conn, root_id, attempt, &rows, settings, stop, false)?;
+        drop_dir_stats(conn, root_id, StatsScope::Except(attempt))?;
+        tracing::info!(
+            root = %root,
+            dirs = rows.len(),
+            elapsed_secs = started.elapsed().as_secs(),
+            "locate: directory totals backfilled"
+        );
+    }
+    Ok(())
 }
 
 pub(crate) fn update_progress(
@@ -648,7 +836,10 @@ pub(crate) fn publish(conn: &mut Connection, work: &Work) -> Result<()> {
     )?;
     for child_id in covered_children {
         conn.execute("DELETE FROM entries WHERE root_id=?1", [child_id])?;
+        drop_dir_stats(conn, child_id, StatsScope::Root)?;
     }
+    // This attempt's totals now describe the published entries; the older ones do not.
+    drop_dir_stats(conn, work.root_id, StatsScope::Below(work.attempt_id))?;
     Ok(())
 }
 
@@ -748,6 +939,8 @@ pub(crate) fn finish_partial_refresh(
         "DELETE FROM staged_entries WHERE attempt_id=?1",
         [work.attempt_id],
     )?;
+    // The refresh was not applied, so the totals it computed describe nothing published.
+    drop_dir_stats(conn, work.root_id, StatsScope::Generation(work.attempt_id))?;
     Ok(())
 }
 
@@ -771,10 +964,11 @@ pub(crate) fn fail_attempt(conn: &mut Connection, work: &Work, error: &str) -> R
     )?;
     tx.commit()?;
     // A failed initial scan keeps what it read: the retry continues it instead of paying for
-    // the whole tree again.
+    // the whole tree again. Its totals are not worth keeping: the retry computes them anew.
     conn.execute(
         "DELETE FROM staged_entries WHERE attempt_id=?1",
         [work.attempt_id],
     )?;
+    drop_dir_stats(conn, work.root_id, StatsScope::Generation(work.attempt_id))?;
     Ok(())
 }

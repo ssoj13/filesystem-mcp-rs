@@ -4,6 +4,7 @@
 use std::sync::atomic::AtomicU64;
 use std::time::Duration;
 
+mod aggregate;
 mod db;
 mod indexer;
 mod roots;
@@ -13,8 +14,8 @@ mod worker;
 
 pub use indexer::Indexer;
 pub use types::{
-    EntryKind, FragmentFilter, IndexerConfig, Match, MatchMode, Receipt, ScanAction, ScanInfo,
-    ScanProgress, SearchFilters, SearchResult, Status,
+    DirStats, EntryKind, FragmentFilter, IndexerConfig, Match, MatchMode, Receipt, ScanAction,
+    ScanInfo, ScanProgress, SearchFilters, SearchResult, Status,
 };
 
 pub(crate) use db::{connect, init_schema};
@@ -23,6 +24,8 @@ pub(crate) use roots::{
     root_rows, schedule_debounce, status_by_id, status_for_path,
 };
 pub(crate) use time_util::{new_request_id, nonzero_time, now_millis, now_secs};
+#[cfg(test)]
+pub(crate) use worker::backfill_dir_stats;
 pub(crate) use worker::worker_loop;
 
 #[cfg(test)]

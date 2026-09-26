@@ -148,6 +148,20 @@ pub(crate) fn init_schema(conn: &mut Connection) -> Result<()> {
              PRAGMA user_version=9;",
         )?;
     }
+    if version < 10 {
+        // Subtree totals per directory. `generation` is the scan attempt that published the
+        // matching `entries`, i.e. `roots.published_attempt`, so a reader joins on that and a
+        // writer that predates this table simply leaves the root without totals until the
+        // worker backfills them.
+        tx.execute_batch(
+            "CREATE TABLE IF NOT EXISTS dir_stats(
+               root_id INTEGER NOT NULL, generation INTEGER NOT NULL, path TEXT NOT NULL,
+               bytes INTEGER NOT NULL, files INTEGER NOT NULL, dirs INTEGER NOT NULL,
+               PRIMARY KEY(root_id,generation,path)
+             ) WITHOUT ROWID;
+             PRAGMA user_version=10;",
+        )?;
+    }
     tx.commit()?;
     Ok(())
 }

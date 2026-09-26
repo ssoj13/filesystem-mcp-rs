@@ -1,5 +1,6 @@
+use std::collections::BTreeMap;
 use std::fs::{self, File};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::AtomicBool;
 use std::thread::{self};
 use std::time::Duration;
@@ -1294,4 +1295,278 @@ fn grandparent_absorbs_an_already_coalesced_subtree() {
         .unwrap();
     assert_eq!(attempts, 1);
     lock.unlock().unwrap();
+}
+
+/// root/a/x.bin (100), root/a/b/y.bin (50), root/a-b/z.bin (3), root/c.bin (7), root/e/ (empty).
+/// `a-b` sorts between `a` and `a\b` in byte order, which a naive roll-up gets wrong.
+fn totals_tree(base: &Path) -> PathBuf {
+    let root = base.join("root");
+    fs::create_dir_all(root.join("a").join("b")).unwrap();
+    fs::create_dir_all(root.join("a-b")).unwrap();
+    fs::create_dir_all(root.join("e")).unwrap();
+    fs::write(root.join("a").join("x.bin"), [0u8; 100]).unwrap();
+    fs::write(root.join("a").join("b").join("y.bin"), [0u8; 50]).unwrap();
+    fs::write(root.join("a-b").join("z.bin"), [0u8; 3]).unwrap();
+    fs::write(root.join("c.bin"), [0u8; 7]).unwrap();
+    root
+}
+
+/// The tree scanned and published: (root, state dir, connection, the scan's work).
+fn published_tree(base: &Path) -> (PathBuf, PathBuf, Connection, Work) {
+    let root = totals_tree(base);
+    let state = base.join("state");
+    fs::create_dir_all(&state).unwrap();
+    let mut conn = connect(&state.join("everything.db")).unwrap();
+    init_schema(&mut conn).unwrap();
+    let work = interrupted_initial_scan(&mut conn, &root, &[]);
+    assert_eq!(
+        scan(&mut conn, &work, &state, &AtomicBool::new(false)).unwrap(),
+        0
+    );
+    publish(&mut conn, &work).unwrap();
+    (root, state, conn, work)
+}
+
+type StoredTotals = BTreeMap<String, (i64, i64, i64)>;
+
+fn stored_totals(conn: &Connection, root_id: i64) -> StoredTotals {
+    conn.prepare("SELECT path,bytes,files,dirs FROM dir_stats WHERE root_id=?1")
+        .unwrap()
+        .query_map([root_id], |row| {
+            Ok((row.get(0)?, (row.get(1)?, row.get(2)?, row.get(3)?)))
+        })
+        .unwrap()
+        .collect::<rusqlite::Result<_>>()
+        .unwrap()
+}
+
+fn indexed_path(root: &Path, relative: &[&str]) -> String {
+    let mut path = canonical_root(root).unwrap();
+    path.extend(relative);
+    path_text(&path).unwrap().to_owned()
+}
+
+fn expected_totals(root: &Path) -> StoredTotals {
+    BTreeMap::from([
+        (indexed_path(root, &[]), (160, 4, 4)),
+        (indexed_path(root, &["a"]), (150, 2, 1)),
+        (indexed_path(root, &["a", "b"]), (50, 1, 0)),
+        (indexed_path(root, &["a-b"]), (3, 1, 0)),
+        (indexed_path(root, &["e"]), (0, 0, 0)),
+    ])
+}
+
+fn dir_stats_rows(conn: &Connection) -> i64 {
+    conn.query_row("SELECT count(*) FROM dir_stats", [], |row| row.get(0))
+        .unwrap()
+}
+
+#[test]
+fn a_scan_stores_subtree_totals_for_every_directory() {
+    let temp = tempdir().unwrap();
+    let (root, _state, conn, work) = published_tree(temp.path());
+
+    assert_eq!(stored_totals(&conn, work.root_id), expected_totals(&root));
+}
+
+#[test]
+fn backfill_rebuilds_missing_totals_and_leaves_a_complete_set_alone() {
+    let temp = tempdir().unwrap();
+    let (root, _state, mut conn, work) = published_tree(temp.path());
+    let stop = AtomicBool::new(false);
+    let settings = IndexerConfig::default();
+
+    // A root indexed before totals existed.
+    conn.execute("DELETE FROM dir_stats", []).unwrap();
+    backfill_dir_stats(&mut conn, &stop, &settings).unwrap();
+    assert_eq!(stored_totals(&conn, work.root_id), expected_totals(&root));
+
+    // Complete: nothing is rewritten.
+    let a = indexed_path(&root, &["a"]);
+    conn.execute("UPDATE dir_stats SET bytes=999999 WHERE path=?1", [&a])
+        .unwrap();
+    backfill_dir_stats(&mut conn, &stop, &settings).unwrap();
+    assert_eq!(stored_totals(&conn, work.root_id)[&a].0, 999_999);
+
+    // The root's own row says the set is complete; without it the set is redone.
+    conn.execute(
+        "DELETE FROM dir_stats WHERE path=(SELECT path FROM roots WHERE id=?1)",
+        [work.root_id],
+    )
+    .unwrap();
+    backfill_dir_stats(&mut conn, &stop, &settings).unwrap();
+    assert_eq!(stored_totals(&conn, work.root_id), expected_totals(&root));
+}
+
+#[test]
+fn a_refresh_replaces_the_previous_totals() {
+    let temp = tempdir().unwrap();
+    let (root, state, mut conn, first) = published_tree(temp.path());
+    fs::write(root.join("a").join("new.bin"), [0u8; 1000]).unwrap();
+    conn.execute(
+        "UPDATE roots SET desired_seq=desired_seq+1,state='pending',debounce_until_ms=0 WHERE id=?1",
+        [first.root_id],
+    )
+    .unwrap();
+    let second = claim_next(&mut conn).unwrap().unwrap();
+    assert_ne!(second.attempt_id, first.attempt_id);
+    assert_ne!(second.active_generation, 0, "this must be a refresh");
+
+    scan(&mut conn, &second, &state, &AtomicBool::new(false)).unwrap();
+    publish(&mut conn, &second).unwrap();
+
+    let got = stored_totals(&conn, first.root_id);
+    assert_eq!(got[&indexed_path(&root, &[])].0, 1160);
+    assert_eq!(got[&indexed_path(&root, &["a"])].0, 1150);
+    assert_eq!(dir_stats_rows(&conn), 5, "the old totals were kept");
+}
+
+#[test]
+fn a_partial_refresh_keeps_the_published_totals_and_drops_its_own() {
+    let temp = tempdir().unwrap();
+    let (root, state, mut conn, first) = published_tree(temp.path());
+    fs::write(root.join("a").join("new.bin"), [0u8; 1000]).unwrap();
+    conn.execute(
+        "UPDATE roots SET desired_seq=desired_seq+1,state='pending',debounce_until_ms=0 WHERE id=?1",
+        [first.root_id],
+    )
+    .unwrap();
+    let second = claim_next(&mut conn).unwrap().unwrap();
+    scan(&mut conn, &second, &state, &AtomicBool::new(false)).unwrap();
+    assert_eq!(dir_stats_rows(&conn), 10, "both scans store totals");
+
+    finish_partial_refresh(&mut conn, &second, "1 entries could not be indexed").unwrap();
+
+    assert_eq!(dir_stats_rows(&conn), 5);
+    assert_eq!(stored_totals(&conn, first.root_id), expected_totals(&root));
+}
+
+#[test]
+fn recovery_drops_totals_that_no_published_generation_points_at() {
+    let temp = tempdir().unwrap();
+    let (root, _state, conn, work) = published_tree(temp.path());
+    conn.execute(
+        "INSERT INTO dir_stats(root_id,generation,path,bytes,files,dirs) VALUES(?1,999999,'stray',1,1,0)",
+        [work.root_id],
+    )
+    .unwrap();
+    assert_eq!(dir_stats_rows(&conn), 6);
+
+    recover(&conn).unwrap();
+
+    assert_eq!(dir_stats_rows(&conn), 5);
+    assert_eq!(stored_totals(&conn, work.root_id), expected_totals(&root));
+}
+
+#[test]
+fn search_and_dir_stats_report_directory_totals() {
+    let temp = tempdir().unwrap();
+    let (root, state, _conn, _work) = published_tree(temp.path());
+    // Hold the worker lock so this process's own worker stays idle.
+    let lock = File::options()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(state.join("everything.lock"))
+        .unwrap();
+    lock.try_lock().unwrap();
+    let indexer = Indexer::open(&state).unwrap();
+
+    let dir = indexer
+        .search(&root, "a", MatchMode::Exact, 10)
+        .unwrap()
+        .matches;
+    assert_eq!(dir.len(), 1);
+    assert_eq!(
+        (dir[0].size, dir[0].files, dir[0].dirs),
+        (150, Some(2), Some(1))
+    );
+    let file = indexer
+        .search(&root, "c.bin", MatchMode::Exact, 10)
+        .unwrap()
+        .matches;
+    assert_eq!((file[0].size, file[0].files, file[0].dirs), (7, None, None));
+
+    let stats = indexer
+        .dir_stats(&[root.join("a"), root.join("missing"), root.clone()])
+        .unwrap();
+    let first = stats[0].as_ref().unwrap();
+    assert_eq!((first.bytes, first.files, first.dirs), (150, 2, 1));
+    assert!(!first.partial);
+    assert!(first.as_of.is_some());
+    assert!(stats[1].is_none());
+    assert_eq!(stats[2].as_ref().unwrap().bytes, 160);
+    lock.unlock().unwrap();
+}
+
+/// Real-data check, run by hand against a COPY of a real index:
+/// `LOCATE_DB_COPY=<dir holding everything.db> cargo test -p filesystem-locate --release
+/// real_index_totals -- --ignored --nocapture`. The worker backfills the totals; each root's
+/// row must then equal what its entries add up to.
+#[test]
+#[ignore]
+fn real_index_totals_match_the_entries_they_summarise() {
+    let Ok(dir) = std::env::var("LOCATE_DB_COPY") else {
+        return;
+    };
+    let dir = PathBuf::from(dir);
+    let started = std::time::Instant::now();
+    let _indexer = Indexer::open(&dir).unwrap();
+    let conn = connect(&dir.join("everything.db")).unwrap();
+    let roots: Vec<(i64, String, i64, i64)> = conn
+        .prepare(
+            "SELECT id,path,active_generation,published_attempt FROM roots
+             WHERE active_generation>0 AND covered_by IS NULL",
+        )
+        .unwrap()
+        .query_map([], |row| {
+            Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?))
+        })
+        .unwrap()
+        .collect::<rusqlite::Result<_>>()
+        .unwrap();
+    assert!(!roots.is_empty(), "the copy holds no published root");
+    for (root_id, root, generation, attempt) in roots {
+        let deadline = std::time::Instant::now() + Duration::from_secs(45 * 60);
+        let stored: (i64, i64, i64) = loop {
+            let row = conn
+                .query_row(
+                    "SELECT bytes,files,dirs FROM dir_stats WHERE root_id=?1 AND generation=?2 AND path=?3",
+                    params![root_id, attempt, root],
+                    |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+                )
+                .ok();
+            if let Some(row) = row {
+                break row;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "no totals for {root} after 45 minutes"
+            );
+            thread::sleep(Duration::from_secs(2));
+        };
+        let summed: (i64, i64, i64) = conn
+            .query_row(
+                "SELECT COALESCE(SUM(CASE WHEN kind!='dir' THEN size END),0),
+                        COUNT(CASE WHEN kind!='dir' THEN 1 END),
+                        COUNT(CASE WHEN kind='dir' THEN 1 END)
+                 FROM entries WHERE root_id=?1 AND generation=?2",
+                params![root_id, generation],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .unwrap();
+        let rows: i64 = conn
+            .query_row(
+                "SELECT count(*) FROM dir_stats WHERE root_id=?1 AND generation=?2",
+                params![root_id, attempt],
+                |row| row.get(0),
+            )
+            .unwrap();
+        println!(
+            "{root}: totals {stored:?}, entries add up to {summed:?}, {rows} directory rows, {}s since start",
+            started.elapsed().as_secs()
+        );
+        assert_eq!(stored, summed, "{root}");
+    }
 }

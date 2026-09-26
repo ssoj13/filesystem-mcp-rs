@@ -152,8 +152,27 @@ impl Default for Status {
 pub struct Match {
     pub path: PathBuf,
     pub kind: String,
+    /// A file's own size; for a directory, the total of everything beneath it when the index
+    /// holds totals for it, else 0.
     pub size: u64,
     pub modified: Option<i64>,
+    /// Directories only: files and directories beneath it, when the index holds totals.
+    pub files: Option<u64>,
+    pub dirs: Option<u64>,
+}
+
+/// What a directory holds, as of the scan that published the index it comes from.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DirStats {
+    pub bytes: u64,
+    /// Non-directory entries beneath the directory.
+    pub files: u64,
+    /// Directories beneath the directory, not counting itself.
+    pub dirs: u64,
+    /// When the index was last verified against the disk (unix seconds).
+    pub as_of: Option<i64>,
+    /// The scan skipped entries it could not read, so the totals are lower bounds.
+    pub partial: bool,
 }
 
 #[derive(Debug, Clone, Copy)]
