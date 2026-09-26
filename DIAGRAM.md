@@ -38,6 +38,7 @@ graph TB
         compare["compare.rs — File/Dir Compare"]
         stats["stats.rs — Statistics"]
         duplicates["duplicates.rs — Duplicate Finder"]
+        file_stats["file_stats.rs — parallel walk, per-child sizes, index-backed summaries"]
     end
 
     subgraph Formats["Formats"]
@@ -62,6 +63,15 @@ graph TB
         wave2["wave2/ — System Utilities"]
         thinking["thinking/ — Sequential Thinking"]
         mcp_setup["mcp_setup/ — Client Install Matrix"]
+    end
+
+    subgraph Locate["Locate index — crates/filesystem-locate, feature locate-tools"]
+        indexer["indexer.rs — Indexer API: search, dir_stats, query_each"]
+        query["query.rs — read-only SQL: fs_entries, fs_roots"]
+        worker["worker.rs — claim, scan, publish, backfill, recovery"]
+        aggregate["aggregate.rs — per-directory subtree totals"]
+        locdb["db.rs + roots.rs — schema v10, roots, coverage"]
+        fscan["fscan-rs — NTFS and portable walker (external crate)"]
     end
 
     main --> allowed
@@ -92,6 +102,14 @@ graph TB
     main --> llm
     main --> wave2
     main --> thinking
+    main --> file_stats
+    main --> indexer
+    file_stats -.->|"fromIndex: dir totals"| indexer
+    indexer --> query
+    indexer --> locdb
+    worker --> aggregate
+    worker --> locdb
+    worker --> fscan
 ```
 
 ## Module Dependency Graph
@@ -122,6 +140,8 @@ graph TD
     TOOLS --> READERS["pdf / json / xlsx / docx / media"]
     TOOLS --> NET["http_tools / s3_tools"]
     TOOLS --> SCREEN["screenshot.rs"]
+    TOOLS --> FILESTATS["file_stats.rs"]
+    MAIN -.->|"feature: locate-tools"| LOCATE["filesystem-locate crate"]
 
     HASH --> MURMUR["murmur3.rs"]
     HASH --> SPOOKY["spooky.rs"]
@@ -131,6 +151,13 @@ graph TD
     NET -.->|"feature: http-tools"| REQWEST["reqwest"]
     NET -.->|"feature: s3-tools"| AWS["aws-sdk-s3"]
     SCREEN -.->|"feature: screenshot-tools"| XCAP["xcap + image"]
+
+    FILESTATS -.->|"fromIndex"| LOCATE
+    LOCATE --> LOCIDX["indexer.rs / query.rs — search, dir_stats, SQL"]
+    LOCATE --> LOCWORK["worker.rs / aggregate.rs — scan, totals, backfill"]
+    LOCIDX --> LOCDB[("SQLite everything.db: entries, dir_stats, FTS5")]
+    LOCWORK --> LOCDB
+    LOCWORK --> FSCAN["fscan-rs — NTFS and portable walker"]
 ```
 
 ## Tool Categories
