@@ -1745,7 +1745,26 @@ fn real_index_sql_answers_typical_questions_in_reasonable_time() {
             r"SELECT path,size FROM fs_entries WHERE kind='file' AND size>1000000000 AND modified < strftime('%s','now','-1 year') ORDER BY size DESC LIMIT 10",
         ),
     ];
-    for (title, sql) in queries {
+    // LOCATE_SQL_FILE: queries of your own, each a title line then the SQL, blocks split by
+    // a line of four equals signs.
+    let queries: Vec<(String, String)> = match std::env::var("LOCATE_SQL_FILE") {
+        Ok(path) => fs::read_to_string(path)
+            .unwrap()
+            .replace("\r\n", "\n")
+            .split("\n====\n")
+            .filter(|block| !block.trim().is_empty())
+            .map(|block| {
+                let (title, sql) = block.trim().split_once('\n').unwrap();
+                (title.trim().to_owned(), sql.trim().to_owned())
+            })
+            .collect(),
+        Err(_) => queries
+            .iter()
+            .map(|(title, sql)| (title.to_string(), sql.to_string()))
+            .collect(),
+    };
+    for (title, sql) in &queries {
+        let sql = sql.as_str();
         if std::env::var("LOCATE_SQL_PLAN").is_ok() {
             let plan = format!("EXPLAIN QUERY PLAN {sql}");
             println!("{title}");
