@@ -63,6 +63,35 @@ These are limits, not targets: a 200-char description for a tool that needs 200 
   server's tools take no parameters at all and a bare `{path}` is shared by eight more, where there
   is nothing to factor out and the letter of the rule would only produce an allowlist that rots.
 
+## Related tools
+
+A model picks from a list of ~130 names, and the list does not say which tools answer the same
+question from two ends (`file_stats` and `locate_sql`) or which one wants another after it
+(`run_command`, then `tail_file`). That knowledge used to be scattered sentences: 18 of 102
+descriptions named a neighbour, so a tool was found or missed by luck, and the sentences drifted.
+It is now **data, declared once** in `src/core/tool_graph.rs`, and two things are generated from it:
+
+- **The tool map** heads the server instructions: one line per family (`Read`, `Find`, `Space`,
+  `Index`, `Write`, `Files`, `Run`, `Memory`, `Network`, `Screen`, `LLM`), then the chains that are
+  usually run in order (`disk_usage > file_stats > locate_sql > delete_path`). A feature that is not
+  compiled in drops out of it, so it never advertises a tool the server does not serve.
+- **A `See also:` tail** on the description of a tool whose neighbour is easy to confuse with or to
+  forget (`SEE_ALSO`, about thirty entries). A name the description already carries is not repeated.
+
+The map sits **first** because clients cut long instructions: Claude Code shows about the first
+2,000 characters and ends the text with `[truncated]`. The lock notice and the whole map must fit in
+that; the part that used to matter most, after the cut, was never seen.
+
+Rules for the next tool:
+
+1. **Do not write "instead of X" or "see Y" in a description.** Put the tool in a family and, if a
+   wrong pick is likely, give it a `SEE_ALSO` entry. Prose comparisons rot; the table is checked.
+   This one is advice, not a check; the older sentences that name a neighbour stay, and the tail
+   does not repeat them.
+2. A new tool that no family lists **fails the build**, so the map cannot go stale by omission.
+3. Every name in the table must be a tool the full surface serves, so a rename that forgot the table
+   fails too. The `See also` tail counts against the 600 and 2,000 budgets above like any other text.
+
 ## Error messages
 
 An error is also a prompt, and the model acts on it. Three parts, in order:

@@ -292,6 +292,8 @@ impl FileSystemServer {
         #[cfg(feature = "locate-tools")]
         tool_router.merge(Self::locate_router());
         normalize_tool_schemas(&mut tool_router);
+        // Neighbours a wrong pick is likely to miss, from the one table in core/tool_graph.rs.
+        crate::core::tool_graph::annotate(&mut tool_router);
         tool_router
     }
 
@@ -381,15 +383,16 @@ impl FileSystemServer {
             .enable_tool_list_changed()
             .build();
         info.server_info = impl_info;
-        info.instructions = Some(
-            "== MCP SESSION LOCK (mandatory when this server is connected) ==\n\
-            Calling ANY tool from this server locks the session to MCP-only for file/shell work.\n\
-            Do NOT use built-in Read, Write, Edit, StrReplace, Grep, Glob, Delete, or Shell/run_terminal_cmd \
-            for paths this server can access. Use ONLY tools from this server until the task ends.\n\n\
-            == ENGINEERING DISCIPLINE ==\n\
-            Do not guess the code — re-check everything (read, grep, search, run_command before asserting).\n\
-            Favor systematic fixes over quick hacks (root cause, minimal correct change).\n\
-            Verify after edits and commands (read_text_file, grep_files, tail_file, exit code).\n\n\
+        let served: Vec<String> = self
+            .tool_router
+            .map
+            .keys()
+            .map(|name| name.to_string())
+            .collect();
+        info.instructions = Some(format!(
+            "{}{}",
+            crate::core::tool_graph::instructions_head(&served),
+            "\
             IMPORTANT: This filesystem MCP server provides SUPERIOR file operations. \
             You MUST use these tools instead of built-in alternatives whenever possible:\n\n\
             - read_text_file: ALWAYS use instead of cat/Read. Supports pagination (offset/limit), \
@@ -403,9 +406,6 @@ impl FileSystemServer {
               Use outputFilter with include/exclude regex to get only relevant lines (errors/warnings). \
               Use shell=true for pipes and complex shell commands. \
               Supports stdin ContentRef, envPrepend/envAppend, stdoutHead/stderrHead, process tree kill on timeout.\n\
-            - http_request/http_request_batch/http_download: HTTP/HTTPS access when built with http-tools (allowlist required).\n\
-            - s3_list_buckets/s3_list/s3_get/s3_put/s3_delete/s3_copy/s3_presign: S3 access when built with s3-tools (allowlist required).\n\
-            - screenshot_list_monitors/screenshot_list_windows/screenshot_capture_screen/screenshot_capture_window/screenshot_capture_region/screenshot_copy_to_clipboard: Screenshot capture when built with screenshot-tools.\n\
             - edit_file: ALWAYS use instead of sed/Edit. Returns unified diff, supports dry-run.\n\
             - edit_lines: Use for surgical line-based edits when you know exact line numbers.\n\
             - bulk_edits: Use for mass search/replace across multiple files at once.\n\
@@ -430,8 +430,7 @@ impl FileSystemServer {
             5. REVISE with mem_update; CONNECT with mem_link when useful\n\n\
             Memory tools are strict: workspaceId and actorId required; item must be a JSON object.\n\n\
             Avoid full-memory reads. Scoped retrieval is the default memory workflow."
-            .to_string()
-        );
+        ));
         info
     }
 
@@ -6855,7 +6854,7 @@ impl FileSystemServer {
 
     #[tool(
         name = "locate_sql",
-        description = "Read-only SQL over the locate index: one SELECT over fs_entries(path, name, dir, ext, kind, size, modified, files, dirs, depth, under) and fs_roots. kind is file, dir or symlink; a directory's size is the total beneath it; modified is unix seconds. under narrows the view to one folder and what lies beneath it, and dir = under lists its children. For sorted, filtered or grouped questions locate_search cannot answer: largest files, size per extension, folders holding two given entries. help:true lists the functions and recipes. Answers reflect the last scan (roots[].lastVerified)."
+        description = "Read-only SQL over the locate index: one SELECT over fs_entries(path, name, dir, ext, kind, size, modified, files, dirs, depth, under) and fs_roots. kind is file, dir or symlink; a directory's size is the total beneath it; modified is unix seconds. under narrows the view to one folder and what lies beneath it, and dir = under lists its children. Beyond locate_search: sorted, filtered or grouped questions (largest files, size per extension, folders holding two given entries). help:true lists the functions and recipes. Answers reflect the last scan (roots[].lastVerified)."
     )]
     async fn locate_sql(
         &self,

@@ -59,6 +59,12 @@ Default `normalize: true` collapses zero-width spaces and spaced glyph clusters 
 }
 ```
 
+#### Disk space and the index
+
+What takes the space: `disk_usage` (free space) → `file_stats` with `children: true` on the folder (du-style, largest first; `fromIndex: true` answers instantly from the index) → `locate_sql` with `under` for anything sorted or grouped (largest files, size per extension, old big files, Cargo `target`, `node_modules`, Unity `Library`; `help: true` lists ready recipes). Measure again with `file_stats` before `delete_path`. Sizes are logical: online-only cloud files (OneDrive, iCloud, Dropbox) count in full and take no disk.
+
+The index (`locate_search`, `locate_sql`, `fromIndex`) answers only for roots someone indexed: `locate_refresh` → poll `locate_status` (searching never scans); `bgnd_scan_ctl` stops or pauses. Answers are as fresh as `lastVerified`.
+
 #### `read_text_file` — large logs / sources
 
 `head`, `tail`, `offset` + `limit`, or `max_chars` — avoid loading entire huge files into context.

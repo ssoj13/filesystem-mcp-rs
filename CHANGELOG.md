@@ -4,6 +4,13 @@
 
 Post-0.2.1 work on `main`. The crate version is still 0.2.1 until the next tag.
 
+### Tool map and `See also`
+
+- **Related tools are declared once**, in `src/core/tool_graph.rs`: families, the chains usually run in order, and `SEE_ALSO` pairs for the places where a wrong pick is likely. Before this, 18 of 102 descriptions named another tool, by hand, and the instructions never mentioned `file_stats`, the `locate_*` family or `locate_sql` at all.
+- **The server instructions now open with a generated `TOOL MAP`**: one line per family and the usual chains, after a two-sentence session-lock notice. Tools that are not compiled in (`http`, `s3`, `screenshot`, computer control, `locate`) drop out of it; the three hand-written feature lines are gone. It comes first because Claude Code shows about the first 2,000 characters of a server's instructions and ends them with `[truncated]`: the `IMPORTANT` list, the content-plane note and the memory workflow used to sit after that cut. The session-lock notice and the map are 1,955 characters, and a test keeps them under the limit.
+- **A `See also:` tail** is appended to the descriptions of 27 tools where a neighbour is easy to confuse or forget (`search_files`/`grep_files`/`locate_search`, `file_stats`/`list_directory_with_sizes`/`locate_sql`/`disk_usage`, `delete_path` → `file_stats`, `run_command` → `tail_file`, the `mem_*` chain, and so on), skipping any name the description already carries. It counts against the 600/2,000 budgets; `locate_sql`'s own description was shortened to make room.
+- **Guarded**: every name in the table must be a tool the full surface serves, every served tool must belong to a family (a new tool that no family lists fails the build), and the map must fit the head. Skills are deliberately not referenced: they belong to the client, and this server also serves Codex and Cursor. A new "Disk space and the index" workflow is in `src/docs/mcp_workflows.md`, which `mcp-setup` embeds in the client's `CLAUDE.md`/`AGENTS.md`. Rules for the next tool are in `docs/TOOL_STYLE.md`.
+
 ### Locate: directory sizes
 
 - **The index now knows how big a directory is.** Until now every directory was stored with size 0, so neither `locate_search` nor `list_directory_with_sizes` could say what a folder holds. A scan now totals every directory as it visits the tree (`dir_stats`, schema v10: bytes, files and directories beneath each). The walk order is not promised by the NTFS reader, so the roll-up does not depend on it. Totals are keyed by the attempt that published the entries, so a refresh replaces them atomically and a partial refresh drops its own.
