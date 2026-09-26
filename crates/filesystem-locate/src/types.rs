@@ -19,7 +19,31 @@ pub struct Status {
     pub last_error: Option<String>,
     pub next_scan_at_ms: Option<i64>,
     pub background: bool,
+    /// `run`, `paused` or `stopped`: what an operator asked this root's scans to do.
+    pub control: String,
     pub progress: Option<ScanProgress>,
+}
+
+/// What `Indexer::scan_control` does. The request is written to the database, so it reaches a
+/// scan running in another process.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ScanAction {
+    /// Report only.
+    Status,
+    /// Let the root run again and queue a scan (needs a path).
+    Start,
+    /// End the running scan (its rows are kept for a later resume) and hold the root.
+    Stop,
+    /// Hold the running scan in place, and hold the root.
+    Pause,
+    /// Release a paused or stopped root; no new scan is queued.
+    Resume,
+}
+
+#[derive(Debug, Clone)]
+pub struct ScanInfo {
+    pub path: PathBuf,
+    pub status: Status,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -43,6 +67,7 @@ impl Default for Status {
             last_error: None,
             next_scan_at_ms: None,
             background: false,
+            control: "run".into(),
             progress: None,
         }
     }

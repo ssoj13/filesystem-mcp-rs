@@ -194,6 +194,61 @@ impl Indexer {
         Ok(true)
     }
 
+    /// Control the scans of one root (`root`) or of every known root (`None`). The request is
+    /// stored in the database, so it takes effect in whichever process runs the scan: a stop
+    /// ends the running scan within a fraction of a second and keeps its rows for a later
+    /// `Start`, a pause holds it in place. `Start` needs a path; every other action treats a
+    /// path that was never indexed as an error rather than silently doing nothing.
+    pub fn scan_control(&self, action: ScanAction, root: Option<&Path>) -> Result<Vec<ScanInfo>> {
+        let root = root.map(canonical_root).transpose()?;
+        if action == ScanAction::Start && root.is_none() {
+            bail!("start needs a path");
+        }
+        let mut conn = connect(&self.db_path)?;
+        let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let selected: Vec<(i64, PathBuf)> = root_rows(&tx)?
+            .into_iter()
+            .filter(|row| root.as_ref().is_none_or(|wanted| &row.path == wanted))
+            .map(|row| (row.id, row.path))
+            .collect();
+        if selected.is_empty() && root.is_some() && action != ScanAction::Start {
+            bail!("no scans are registered for that path");
+        }
+        let control = match action {
+            ScanAction::Status => None,
+            ScanAction::Stop => Some("stopped"),
+            ScanAction::Pause => Some("paused"),
+            ScanAction::Start | ScanAction::Resume => Some("run"),
+        };
+        if let Some(control) = control {
+            for (id, _) in &selected {
+                tx.execute(
+                    "UPDATE roots SET control=?2 WHERE id=?1",
+                    params![id, control],
+                )?;
+            }
+        }
+        tx.commit()?;
+        if action == ScanAction::Start
+            && let Some(root) = &root
+        {
+            self.request_refresh(root, None)?;
+        }
+        let conn = connect(&self.db_path)?;
+        let mut infos = Vec::new();
+        for (id, path) in root_rows(&conn)?
+            .into_iter()
+            .filter(|row| root.as_ref().is_none_or(|wanted| &row.path == wanted))
+            .map(|row| (row.id, row.path))
+        {
+            infos.push(ScanInfo {
+                path,
+                status: status_by_id(&conn, id)?,
+            });
+        }
+        Ok(infos)
+    }
+
     pub fn status(&self, root: &Path) -> Result<Status> {
         let root = canonical_root(root)?;
         let conn = connect(&self.db_path)?;

@@ -12,7 +12,7 @@ use std::time::{Duration, Instant, SystemTime};
 use async_recursion::async_recursion;
 use clap::Parser;
 #[cfg(feature = "locate-tools")]
-use filesystem_locate::{EntryKind, FragmentFilter, Indexer, MatchMode, SearchFilters};
+use filesystem_locate::{EntryKind, FragmentFilter, Indexer, MatchMode, ScanAction, SearchFilters};
 use futures::future::join_all;
 use rmcp::{
     ErrorData as McpError,
@@ -1142,6 +1142,26 @@ struct LocateStatusArgs {
     /// Wait for progress or completion (maximum 30000 ms).
     #[serde(default, rename = "waitMs")]
     wait_ms: Option<u64>,
+}
+
+#[cfg(feature = "locate-tools")]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "lowercase")]
+enum ScanCtlAction {
+    Status,
+    Start,
+    Stop,
+    Pause,
+    Resume,
+}
+
+#[cfg(feature = "locate-tools")]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+struct BgndScanCtlArgs {
+    action: ScanCtlAction,
+    /// Directory whose scans to control. Required by `start`; omitted, every other action covers every indexed root.
+    #[serde(default)]
+    path: Option<String>,
 }
 
 #[cfg(feature = "locate-tools")]
@@ -6817,6 +6837,98 @@ impl FileSystemServer {
             "workRoot": receipt.work_root,
             "nextScanAtMs": receipt.next_scan_at_ms,
         })))
+    }
+
+    #[tool(
+        name = "bgnd_scan_ctl",
+        description = "Control the background index scans behind locate_*. status lists every indexed root with its scan state and progress. start queues a scan of one directory and lets it run. stop ends the running scan but keeps what it read, so a later start resumes it. pause holds a scan in place. resume releases a paused or stopped root without queuing anything. The request is stored in the index, so it reaches a scan running in another MCP process."
+    )]
+    async fn bgnd_scan_ctl(
+        &self,
+        Parameters(args): Parameters<BgndScanCtlArgs>,
+    ) -> Result<CallToolResult, McpError> {
+        let indexer = self
+            .indexer
+            .clone()
+            .ok_or_else(|| McpError::internal_error("File index is unavailable", None))?;
+        let action = match args.action {
+            ScanCtlAction::Status => ScanAction::Status,
+            ScanCtlAction::Start => ScanAction::Start,
+            ScanCtlAction::Stop => ScanAction::Stop,
+            ScanCtlAction::Pause => ScanAction::Pause,
+            ScanCtlAction::Resume => ScanAction::Resume,
+        };
+        let root = match args.path.as_deref() {
+            Some(path) => Some(self.resolve(path).await?),
+            None if matches!(action, ScanAction::Start) => {
+                return Err(McpError::invalid_params(
+                    "start was refused without a path: it queues a scan of one directory.                      Pass path, for example an entry from list_allowed_directories.",
+                    None,
+                ));
+            }
+            None => None,
+        };
+        let scans = tokio::task::spawn_blocking(move || {
+            indexer.scan_control(action, root.as_deref())
+        })
+        .await
+        .map_err(internal_err("Index task failed"))?
+        .map_err(|error| {
+            McpError::invalid_params(
+                format!(
+                    "{error:#}; call bgnd_scan_ctl with action status to list the roots that are indexed, or start to index this one."
+                ),
+                None,
+            )
+        })?;
+        let shown = |path: &Path| {
+            path.to_string_lossy()
+                .trim_start_matches(r"\\?\")
+                .to_owned()
+        };
+        let list: Vec<Value> = scans
+            .iter()
+            .map(|scan| {
+                let status = &scan.status;
+                json!({
+                    "path": shown(&scan.path),
+                    "state": status.state,
+                    "control": status.control,
+                    "activeGeneration": status.active_generation,
+                    "lastVerified": status.last_verified,
+                    "error": status.last_error,
+                    "progress": status.progress.as_ref().map(|progress| json!({
+                        "attemptId": progress.attempt_id,
+                        "attemptState": progress.attempt_state,
+                        "entriesSeen": progress.entries_seen,
+                        "dirsSeen": progress.dirs_seen,
+                        "currentPath": progress.current_path.as_deref().map(shown),
+                        "started": progress.started,
+                    })),
+                })
+            })
+            .collect();
+        let text = if scans.is_empty() {
+            "No roots are indexed.".to_owned()
+        } else {
+            scans
+                .iter()
+                .map(|scan| {
+                    format!(
+                        "{}: {} ({})",
+                        shown(&scan.path),
+                        scan.status.state,
+                        scan.status.control
+                    )
+                })
+                .collect::<Vec<_>>()
+                .join(
+                    "
+",
+                )
+        };
+        Ok(CallToolResult::success(vec![ContentBlock::text(text)])
+            .with_structured(json!({ "scans": list })))
     }
 
     #[tool(

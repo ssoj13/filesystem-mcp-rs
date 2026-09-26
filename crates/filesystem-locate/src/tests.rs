@@ -290,6 +290,144 @@ fn shutdown_during_an_initial_scan_interrupts_instead_of_deleting() {
     assert_eq!(last, "interrupted");
 }
 
+fn set_control(conn: &Connection, root_id: i64, control: &str) {
+    conn.execute(
+        "UPDATE roots SET control=?2 WHERE id=?1",
+        params![root_id, control],
+    )
+    .unwrap();
+}
+
+#[test]
+fn a_stopped_or_paused_root_is_not_claimed_until_it_runs_again() {
+    let temp = tempdir().unwrap();
+    let mut conn = connect(&temp.path().join("everything.db")).unwrap();
+    init_schema(&mut conn).unwrap();
+    let root_id = ensure_root(&conn, &canonical_root(temp.path()).unwrap()).unwrap();
+    conn.execute(
+        "UPDATE roots SET desired_seq=1,state='pending',debounce_until_ms=0 WHERE id=?1",
+        [root_id],
+    )
+    .unwrap();
+    for held in ["stopped", "paused"] {
+        set_control(&conn, root_id, held);
+        assert!(
+            claim_next(&mut conn).unwrap().is_none(),
+            "{held} root was claimed"
+        );
+    }
+    set_control(&conn, root_id, "run");
+    assert!(claim_next(&mut conn).unwrap().is_some());
+}
+
+#[test]
+fn scan_control_stops_and_restarts_a_root_and_reports_it() {
+    let temp = tempdir().unwrap();
+    let root = temp.path().join("root");
+    let other = temp.path().join("other");
+    let state = temp.path().join("state");
+    for dir in [&root, &other, &state] {
+        fs::create_dir_all(dir).unwrap();
+    }
+    let lock = File::options()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(state.join("everything.lock"))
+        .unwrap();
+    lock.try_lock().unwrap();
+    let indexer = Indexer::open(&state).unwrap();
+    indexer.request_refresh(&root, Some("r")).unwrap();
+    indexer.request_refresh(&other, Some("o")).unwrap();
+    let mut conn = connect(&state.join("everything.db")).unwrap();
+    force_due(&conn, &root);
+    force_due(&conn, &other);
+
+    // One root by path: only that one is held back.
+    let held = indexer.scan_control(ScanAction::Stop, Some(&root)).unwrap();
+    assert_eq!(held.len(), 1);
+    assert_eq!(held[0].status.control, "stopped");
+    let claimed = claim_next(&mut conn).unwrap().unwrap();
+    assert_eq!(claimed.root, canonical_root(&other).unwrap());
+    assert!(
+        claim_next(&mut conn).unwrap().is_none(),
+        "the stopped root ran"
+    );
+
+    // No path: everything is held, and status sees it.
+    indexer.scan_control(ScanAction::Stop, None).unwrap();
+    let all = indexer.scan_control(ScanAction::Status, None).unwrap();
+    assert_eq!(all.len(), 2);
+    assert!(all.iter().all(|info| info.status.control == "stopped"));
+
+    // Start runs it again and asks for a scan; an unknown path is an error, not a no-op.
+    let started = indexer
+        .scan_control(ScanAction::Start, Some(&root))
+        .unwrap();
+    assert_eq!(started[0].status.control, "run");
+    // An existing directory that was never indexed is refused for a reason of its own, not
+    // because the path failed to resolve.
+    let stranger = temp.path().join("stranger");
+    fs::create_dir_all(&stranger).unwrap();
+    let refused = indexer
+        .scan_control(ScanAction::Stop, Some(&stranger))
+        .unwrap_err();
+    assert!(
+        format!("{refused}").contains("no scans are registered"),
+        "{refused}"
+    );
+    lock.unlock().unwrap();
+}
+
+#[test]
+fn a_stopped_scan_ends_with_its_rows_kept() {
+    let temp = tempdir().unwrap();
+    let state = temp.path().join("state");
+    fs::create_dir_all(&state).unwrap();
+    fs::write(temp.path().join("a.txt"), b"a").unwrap();
+    let mut conn = connect(&state.join("everything.db")).unwrap();
+    init_schema(&mut conn).unwrap();
+    let work = interrupted_initial_scan(&mut conn, temp.path(), &["earlier.txt"]);
+    set_control(&conn, work.root_id, "stopped");
+
+    let error = scan(&mut conn, &work, &state, &AtomicBool::new(false)).unwrap_err();
+
+    assert!(error.downcast_ref::<ScanStopped>().is_some(), "{error:#}");
+    assert!(entry_count(&conn) >= 1, "stopping threw the rows away");
+}
+
+#[test]
+fn a_paused_scan_waits_for_resume_and_then_completes() {
+    let temp = tempdir().unwrap();
+    let state = temp.path().join("state");
+    fs::create_dir_all(&state).unwrap();
+    fs::write(temp.path().join("a.txt"), b"a").unwrap();
+    let mut conn = connect(&state.join("everything.db")).unwrap();
+    init_schema(&mut conn).unwrap();
+    let work = interrupted_initial_scan(&mut conn, temp.path(), &[]);
+    set_control(&conn, work.root_id, "paused");
+    let db = state.join("everything.db");
+    let root_id = work.root_id;
+    let resumer = thread::spawn(move || {
+        thread::sleep(Duration::from_millis(700));
+        set_control(&connect(&db).unwrap(), root_id, "run");
+    });
+
+    let started = std::time::Instant::now();
+    let outcome = scan(&mut conn, &work, &state, &AtomicBool::new(false));
+    // Measured before the join: the resumer thread itself sleeps 700 ms.
+    let waited = started.elapsed();
+    resumer.join().unwrap();
+
+    assert!(outcome.is_ok(), "{outcome:?}");
+    assert!(
+        waited >= Duration::from_millis(600),
+        "the scan did not wait for the resume ({waited:?})"
+    );
+    assert!(entry_count(&conn) >= 1);
+}
+
 #[test]
 fn every_connection_commits_without_an_fsync_each_in_wal_mode() {
     // The index can be rebuilt, so a power cut may cost the last commits but never the file.

@@ -146,7 +146,7 @@ pub(crate) fn claim_next(conn: &mut Connection) -> Result<Option<Work>> {
         .query_row(
             "SELECT id,path,desired_seq,active_generation,background,background_pause_ms,resume_generation FROM roots
              WHERE desired_seq>completed_seq AND state!='building'
-               AND covered_by IS NULL
+               AND covered_by IS NULL AND control='run'
                AND retry_not_before<=?1
                AND debounce_until_ms<=?2
              ORDER BY background ASC,last_started,id LIMIT 1",
@@ -263,8 +263,10 @@ pub(crate) fn process_next(
             yield_background_attempt(conn, &work)
         }
         // Shutting down is not a failure: no backoff, and nothing built so far is thrown away.
-        Err(error) if stop.load(Ordering::Acquire) => {
-            tracing::info!(root = %work.root.display(), elapsed_secs, "locate scan interrupted by shutdown: {error:#}");
+        Err(error)
+            if stop.load(Ordering::Acquire) || error.downcast_ref::<ScanStopped>().is_some() =>
+        {
+            tracing::info!(root = %work.root.display(), elapsed_secs, "locate scan interrupted: {error:#}");
             interrupt_attempt(conn, &work)
         }
         Err(error) => {
@@ -327,6 +329,35 @@ impl Drop for BackgroundPriority {
                 GetCurrentThread, SetThreadPriority, THREAD_MODE_BACKGROUND_END,
             };
             let _ = unsafe { SetThreadPriority(GetCurrentThread(), THREAD_MODE_BACKGROUND_END) };
+        }
+    }
+}
+
+/// The scan was ended on request (`Indexer::scan_control`), not by a failure.
+#[derive(Debug)]
+pub(crate) struct ScanStopped;
+
+impl std::fmt::Display for ScanStopped {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("scan stopped by request")
+    }
+}
+
+impl std::error::Error for ScanStopped {}
+
+/// Obey an operator's request (`Indexer::scan_control`) for this root: fail with
+/// [`ScanStopped`] when stopped, and wait here while paused. The request lives in the
+/// database, so it reaches a scan that runs in another process. A shutdown ends the wait.
+fn honour_control(conn: &Connection, root_id: i64, stop: &AtomicBool) -> Result<()> {
+    loop {
+        let control: String =
+            conn.query_row("SELECT control FROM roots WHERE id=?1", [root_id], |row| {
+                row.get(0)
+            })?;
+        match control.as_str() {
+            "stopped" => return Err(ScanStopped.into()),
+            "paused" if !stop.load(Ordering::Acquire) => thread::sleep(CONTROL_POLL),
+            _ => return Ok(()),
         }
     }
 }
@@ -418,19 +449,39 @@ pub(crate) fn scan(
     #[cfg(windows)]
     let mut native_progress_error = None;
     #[cfg(windows)]
+    let cancel = AtomicBool::new(false);
+    #[cfg(windows)]
+    let mut last_control_check: Option<Instant> = None;
+    #[cfg(windows)]
     let native_tree = if !work.background
         && work.root.parent().is_some()
         && fscan_rs::is_ntfs_available(&work.root)
     {
-        let result = fscan_rs::scan_ntfs_tree_with_options(&work.root, stop, false, |progress| {
-            if native_progress_error.is_none() {
-                native_progress_error =
-                    update_progress(conn, work, progress.items, progress.dirs, &work.root).err();
-            }
-        });
+        // The tree read cannot be told to stop except through the flag it is given, so the
+        // callback forwards a shutdown or an operator's stop into a flag of its own.
+        let result =
+            fscan_rs::scan_ntfs_tree_with_options(&work.root, &cancel, false, |progress| {
+                if native_progress_error.is_none() {
+                    native_progress_error =
+                        update_progress(conn, work, progress.items, progress.dirs, &work.root)
+                            .err();
+                }
+                if native_progress_error.is_none()
+                    && last_control_check.is_none_or(|at| at.elapsed() >= CONTROL_CHECK_INTERVAL)
+                {
+                    native_progress_error = honour_control(conn, work.root_id, stop).err();
+                    last_control_check = Some(Instant::now());
+                }
+                if native_progress_error.is_some() || stop.load(Ordering::Acquire) {
+                    cancel.store(true, Ordering::Release);
+                }
+            });
         match result {
             Ok(tree) => Some(tree),
             Err(fscan_rs::ScanFailure::Cancelled) => {
+                if let Some(error) = native_progress_error.take() {
+                    return Err(error);
+                }
                 bail!("scan cancelled during shutdown")
             }
             Err(error) => {
@@ -448,8 +499,13 @@ pub(crate) fn scan(
     if let Some(error) = native_progress_error {
         return Err(error);
     }
+    let mut visit_control_check: Option<Instant> = None;
     let mut visit =
         |entry: &fscan_rs::Entry, progress: fscan_rs::Progress| -> Result<fscan_rs::Visit> {
+            if visit_control_check.is_none_or(|at| at.elapsed() >= CONTROL_CHECK_INTERVAL) {
+                honour_control(conn, work.root_id, stop)?;
+                visit_control_check = Some(Instant::now());
+            }
             if work.background
                 && entry.kind == fscan_rs::EntryKind::Directory
                 && (progress.directories + 1).is_multiple_of(16)

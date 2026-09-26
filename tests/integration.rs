@@ -346,6 +346,97 @@ async fn locate_background_scan_starts_from_mcp_env_and_reports_status() -> Resu
 
 #[cfg(feature = "locate-tools")]
 #[tokio::test]
+async fn bgnd_scan_ctl_holds_and_releases_a_root_and_refuses_what_it_cannot_do() -> Result<()> {
+    let tmp = TempDir::new()?;
+    let indexed = tmp.path().join("indexed");
+    let stranger = tmp.path().join("stranger");
+    std::fs::create_dir(&indexed)?;
+    std::fs::create_dir(&stranger)?;
+    std::fs::write(indexed.join("a.txt"), b"a")?;
+    let srv = start_server(tmp.path()).await?;
+
+    let none = srv
+        .call_tool("bgnd_scan_ctl", json!({"action": "status"}))
+        .await?;
+    assert_ok(&none);
+    assert_eq!(none["result"]["structuredContent"]["scans"], json!([]));
+
+    let started = srv
+        .call_tool(
+            "bgnd_scan_ctl",
+            json!({"action": "start", "path": &indexed}),
+        )
+        .await?;
+    assert_ok(&started);
+    let scans = started["result"]["structuredContent"]["scans"]
+        .as_array()
+        .unwrap();
+    assert_eq!(scans.len(), 1);
+    assert_eq!(scans[0]["control"], "run");
+    assert!(
+        !scans[0]["path"].as_str().unwrap().starts_with(r"\\?\"),
+        "the verbatim prefix leaked: {}",
+        scans[0]["path"]
+    );
+
+    let stopped = srv
+        .call_tool("bgnd_scan_ctl", json!({"action": "stop", "path": &indexed}))
+        .await?;
+    assert_ok(&stopped);
+    let after = srv
+        .call_tool("bgnd_scan_ctl", json!({"action": "status"}))
+        .await?;
+    assert_eq!(
+        after["result"]["structuredContent"]["scans"][0]["control"],
+        "stopped"
+    );
+    let resumed = srv
+        .call_tool("bgnd_scan_ctl", json!({"action": "resume"}))
+        .await?;
+    assert_eq!(
+        resumed["result"]["structuredContent"]["scans"][0]["control"],
+        "run"
+    );
+
+    let no_path = srv
+        .call_tool("bgnd_scan_ctl", json!({"action": "start"}))
+        .await?;
+    assert_eq!(no_path["error"]["code"], -32602);
+    assert!(
+        no_path["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("path")
+    );
+    let unknown = srv
+        .call_tool(
+            "bgnd_scan_ctl",
+            json!({"action": "stop", "path": &stranger}),
+        )
+        .await?;
+    assert_eq!(unknown["error"]["code"], -32602);
+    assert!(
+        unknown["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("status")
+    );
+    let bogus = srv
+        .call_tool("bgnd_scan_ctl", json!({"action": "explode"}))
+        .await?;
+    // A typed enum refuses the value by name and lists what is accepted.
+    assert_eq!(bogus["result"]["isError"], true);
+    let refusal = bogus["result"]["content"][0]["text"].as_str().unwrap();
+    assert!(
+        refusal.contains("explode") && refusal.contains("`pause`"),
+        "{refusal}"
+    );
+    srv.kill().await;
+    Ok(())
+}
+
+#[cfg(feature = "locate-tools")]
+#[tokio::test]
 async fn locate_search_combines_roots_and_fragment_rules() -> Result<()> {
     let tmp = TempDir::new()?;
     let left = tmp.path().join("left");

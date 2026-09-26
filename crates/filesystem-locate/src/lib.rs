@@ -13,8 +13,8 @@ mod worker;
 
 pub use indexer::Indexer;
 pub use types::{
-    EntryKind, FragmentFilter, Match, MatchMode, Receipt, ScanProgress, SearchFilters,
-    SearchResult, Status,
+    EntryKind, FragmentFilter, Match, MatchMode, Receipt, ScanAction, ScanInfo, ScanProgress,
+    SearchFilters, SearchResult, Status,
 };
 
 pub(crate) use db::{connect, init_schema};
@@ -27,8 +27,8 @@ pub(crate) use worker::worker_loop;
 
 #[cfg(test)]
 pub(crate) use worker::{
-    BackgroundYield, Work, claim_next, fail_attempt, finish_partial_refresh, is_covered,
-    pause_after_commit, process_next, publish, publish_partial_initial, recover, scan,
+    BackgroundYield, ScanStopped, Work, claim_next, fail_attempt, finish_partial_refresh,
+    is_covered, pause_after_commit, process_next, publish, publish_partial_initial, recover, scan,
     update_progress, yield_background_attempt,
 };
 
@@ -47,6 +47,10 @@ const DEBOUNCE_MAX_MS: i64 = 10_000;
 const DEBOUNCE_MAX_RESETS: i64 = 3;
 const BACKGROUND_RETRY_DELAY_MS: i64 = 15_000;
 const PROGRESS_LOG_INTERVAL_MS: i64 = 60_000;
+/// How often a running scan looks for a stop or pause request, and how often a paused one
+/// looks for the resume.
+const CONTROL_CHECK_INTERVAL: Duration = Duration::from_millis(250);
+const CONTROL_POLL: Duration = Duration::from_millis(250);
 
 #[cfg(test)]
 #[path = "tests.rs"]

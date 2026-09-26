@@ -142,6 +142,12 @@ pub(crate) fn init_schema(conn: &mut Connection) -> Result<()> {
              PRAGMA user_version=8;",
         )?;
     }
+    if version < 9 {
+        tx.execute_batch(
+            "ALTER TABLE roots ADD COLUMN control TEXT NOT NULL DEFAULT 'run';
+             PRAGMA user_version=9;",
+        )?;
+    }
     tx.commit()?;
     Ok(())
 }

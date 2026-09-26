@@ -180,7 +180,7 @@ pub(crate) fn status_by_path(conn: &Connection, path: &Path) -> Result<Status> {
 
 pub(crate) fn status_by_id(conn: &Connection, id: i64) -> Result<Status> {
     let mut status = conn.query_row(
-        "SELECT state,active_generation,desired_seq,completed_seq,last_verified,last_error,debounce_until_ms,background FROM roots WHERE id=?1",
+        "SELECT state,active_generation,desired_seq,completed_seq,last_verified,last_error,debounce_until_ms,background,control FROM roots WHERE id=?1",
         [id],
         parse_status,
     )?;
@@ -217,6 +217,7 @@ fn parse_status(row: &rusqlite::Row<'_>) -> rusqlite::Result<Status> {
             when => Some(when),
         },
         background: row.get(7)?,
+        control: row.get(8)?,
         progress: None,
     })
 }
