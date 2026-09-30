@@ -2,6 +2,98 @@
 
 Living architecture overview. Tool names match the MCP surface in `src/main.rs`.
 
+## Workspace Overview (ASCII)
+
+```
+Cargo workspace (3 crates, resolver = 3)
+══════════════════════════════════════════════════════════════════════════
+
+┌────────────────────────────────────────────────────────────────────────┐
+│  filesystem-mcp-rs  (bin, ".", v0.2.1)                                  │
+│  src/main.rs — FileSystemServer, #[tool_router] impls, MCP entry point  │
+└──────────────────────────────┬───────────────────────────────────────--┘
+                                │ optional dep, feature "locate-tools"
+                                ▼
+┌────────────────────────────────────────────────────────────────────────┐
+│  locate-rs  (crates/locate-rs, v0.1.0)                                  │
+│  shared SQLite name index (WAL, FTS5 trigram, schema v10)               │
+└──────────────────────────────┬───────────────────────────────────────--┘
+                                │ path dep (vendored, was git+ssh)
+                                ▼
+┌────────────────────────────────────────────────────────────────────────┐
+│  fscan-rs  (crates/vendor/fscan-rs, v0.1.0)                             │
+│  NTFS MFT reader + portable walkdir fallback (pinned snapshot, MIT)     │
+└────────────────────────────────────────────────────────────────────────┘
+
+  every crate also pulls windows 0.62 (feature-unioned into ONE compile)
+
+
+filesystem-mcp-rs internals — src/
+══════════════════════════════════════════════════════════════════════════
+
+main.rs ──┬── core/                (always compiled)
+          │    ├─ allowed.rs        symlink/allowlist policy
+          │    ├─ path.rs           canonicalize, verbatim-prefix handling
+          │    ├─ content_plane.rs  ContentRef / blob_* SSOT
+          │    ├─ dollar_guard.rs   refuses a leftover $NAME token
+          │    ├─ cfg_guard.rs      no item re-tests its own feature gate
+          │    ├─ paths_guard.rs    only core::paths resolves a platform dir
+          │    ├─ tool_surface_guard.rs  desc+schema size budget
+          │    ├─ tool_graph.rs     families + SEE_ALSO, feeds the TOOL MAP
+          │    ├─ logging.rs / housekeeping.rs / agent_policy.rs / schema.rs
+          │    └─ glob.rs / format.rs / serde.rs / instance.rs
+          │
+          ├── env_spec.rs           single FS_MCP_* registry (install/--list-env/hints)
+          ├── locate_cfg.rs         FS_MCP_LOCATE_* -> locate_rs::IndexerConfig
+          ├── setup.rs + mcp_setup/ client install matrix (Claude/Cursor/…)
+          │
+          └── tools/                (feature-gated families)
+               │
+               ├─ fs_ops / edit / line_edit / bulk_edit / search / grep /
+               │  fast_grep / hash (+murmur3/spooky) / compare / diff /
+               │  archive / binary / watch / duplicates / file_stats
+               │  json_reader / pdf_reader / xlsx / docx / media / mime
+               │        — always compiled, no feature gate
+               │
+               ├─ process.rs        run_command, kill/list/search processes
+               │
+               ├─ memory_v2/        [always on] scoped memory + ACL
+               │    mod.rs · types.rs · sqlite.rs · mcp_args.rs
+               │
+               ├─ llm/              [always on] multi-provider chat
+               │    mod.rs · config.rs · model.rs · model_mapping.rs ·
+               │    transform.rs · error.rs · providers/
+               │
+               ├─ wave2/, thinking/, stats/   [always on] misc + seq_think + counters
+               │
+               ├─ http_tools.rs     [feature: http-tools]
+               ├─ s3_tools.rs       [feature: s3-tools]
+               ├─ screenshot.rs     [feature: screenshot-tools]
+               │
+               └─ computer/         [feature: computer-tools = ctl-input +
+                    │                 ctl-uia + ctl-ocr + ctl-notify + ctl-clip-files]
+                    driver/          OS seam (backend select, Caps)
+                    safety.rs        arm gate, ops/min cap
+                    server_input.rs  mouse/key/macro/wait   (ctl-input)
+                    server_uia.rs    ui/ui_click/ui_set      (ctl-uia)
+                    ocrs_local.rs    OCR                     (ctl-ocr)
+                    server_readonly.rs / server_misc.rs      capture, notify, clip
+                    find.rs / steps.rs / capture.rs / annotate.rs
+
+
+Feature gate chain
+══════════════════════════════════════════════════════════════════════════
+
+default = http-tools + s3-tools + screenshot-tools + computer-tools + locate-tools
+
+computer-tools = ctl-input + ctl-uia + ctl-ocr + ctl-notify + ctl-clip-files
+                        │        │        │
+                        │        └────────┴─ ctl-desktop  (needs a window/screen)
+                        └────────────────────── ctl-any     (any ctl-* domain on)
+
+locate-tools = dep:locate-rs   (only feature gating the whole locate-rs crate)
+```
+
 ## Module Structure
 
 ```mermaid
