@@ -11,9 +11,9 @@ use std::time::{Duration, Instant, SystemTime};
 
 use async_recursion::async_recursion;
 use clap::Parser;
-#[cfg(feature = "locate-tools")]
-use filesystem_locate::{EntryKind, FragmentFilter, Indexer, MatchMode, ScanAction, SearchFilters};
 use futures::future::join_all;
+#[cfg(feature = "locate-tools")]
+use locate_rs::{EntryKind, FragmentFilter, Indexer, MatchMode, ScanAction, SearchFilters};
 use rmcp::{
     ErrorData as McpError,
     RoleServer,
@@ -1148,8 +1148,8 @@ struct LocateSqlArgs {
 }
 
 #[cfg(feature = "locate-tools")]
-fn sql_value_json(value: &filesystem_locate::SqlValue) -> serde_json::Value {
-    use filesystem_locate::SqlValue;
+fn sql_value_json(value: &locate_rs::SqlValue) -> serde_json::Value {
+    use locate_rs::SqlValue;
     match value {
         SqlValue::Null => serde_json::Value::Null,
         SqlValue::Int(number) => json!(number),
@@ -6726,7 +6726,7 @@ impl FileSystemServer {
         .await
         .map_err(internal_err("Index task failed"))?
         .map_err(internal_err("Index queue failed"))?;
-        let scanning = |s: &filesystem_locate::Status| {
+        let scanning = |s: &locate_rs::Status| {
             s.active_generation == 0 && matches!(s.state.as_str(), "pending" | "building")
         };
         if statuses.iter().any(scanning) && wait_ms > 0 {
@@ -6854,10 +6854,10 @@ impl FileSystemServer {
         use std::io::Write as _;
 
         if *args.help {
-            return Ok(CallToolResult::success(vec![ContentBlock::text(
-                filesystem_locate::SQL_GUIDE,
-            )])
-            .with_structured(json!({ "guide": filesystem_locate::SQL_GUIDE })));
+            return Ok(
+                CallToolResult::success(vec![ContentBlock::text(locate_rs::SQL_GUIDE)])
+                    .with_structured(json!({ "guide": locate_rs::SQL_GUIDE })),
+            );
         }
         let sql = args
             .sql
@@ -6907,7 +6907,7 @@ impl FileSystemServer {
             let mut saved = 0u64;
             let mut more = false;
             let outcome = indexer.query_each(
-                &filesystem_locate::SqlQuery {
+                &locate_rs::SqlQuery {
                     sql: &sql,
                     allowed: &allowed,
                     under: under_for_work.as_deref(),

@@ -1,5 +1,5 @@
 [package]
-name = "filesystem-locate"
+name = "locate-rs"
 version = "0.1.0"
 edition = "2024"
 license = "MIT"
@@ -7,7 +7,7 @@ description = "Shared, coalescing filesystem name index for local processes"
 
 [dependencies]
 anyhow = "1"
-fscan-rs = { git = "ssh://git@github.com/ssoj13/fscan-rs.git", rev = "c33d4474b5004ec047ecd065f96f6a53addbc97e" }
+fscan-rs = { path = "../vendor/fscan-rs" }
 globset = "0.4"
 regex = "1"
 rusqlite = { version = "0.40", features = ["bundled", "functions", "hooks"] }

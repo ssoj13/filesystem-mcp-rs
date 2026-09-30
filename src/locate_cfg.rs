@@ -1,10 +1,10 @@
 //! The locate worker's settings, read from the registered locate keys.
 //!
-//! `filesystem-locate` reads no environment itself; it takes an [`IndexerConfig`]. This is the one
+//! `locate-rs` reads no environment itself; it takes an [`IndexerConfig`]. This is the one
 //! place that turns the registered keys into one, so a blank or unparsable value can never reach
 //! the worker as an empty path or a zero batch.
 
-use filesystem_locate::IndexerConfig;
+use locate_rs::IndexerConfig;
 use tracing::warn;
 
 use crate::env_spec;

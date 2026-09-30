@@ -4,6 +4,18 @@
 
 Post-0.2.1 work on `main`. The crate version is still 0.2.1 until the next tag.
 
+### `filesystem-locate` renamed to `locate-rs`; `fscan-rs` vendored, not a git dependency
+
+- `crates/filesystem-locate` is now `crates/locate-rs` (package name, directory, `use locate_rs::...`).
+- `fscan-rs` was a `git` dependency fetched over SSH from a second private repo. `cargo release`'s
+  manifest verification refuses a crate with an unversioned git dependency outright, and crates.io
+  would refuse it too if publishing were ever attempted. It is now vendored at
+  `crates/vendor/fscan-rs` (pinned revision `c33d447`, MIT; see `VENDORED.md` there for how to pick
+  up a newer commit) and referenced by a plain path dependency.
+- `[workspace.metadata.release] publish = false`: nothing in this workspace goes to crates.io.
+  `release.yml` (binaries attached to a GitHub Release on a pushed `v*.*.*` tag) is and was the only
+  real release path; there is no `CARGO_REGISTRY_TOKEN` in CI and never was.
+
 ### Tool map and `See also`
 
 - **Related tools are declared once**, in `src/core/tool_graph.rs`: families, the chains usually run in order, and `SEE_ALSO` pairs for the places where a wrong pick is likely. Before this, 18 of 102 descriptions named another tool, by hand, and the instructions never mentioned `file_stats`, the `locate_*` family or `locate_sql` at all.

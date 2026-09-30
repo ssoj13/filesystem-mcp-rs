@@ -47,7 +47,7 @@ impl Indexer {
         let worker_stop = Arc::clone(&stop);
         let worker_db = db_path.clone();
         let worker = thread::Builder::new()
-            .name("filesystem-locate".into())
+            .name("locate-rs".into())
             .spawn(move || {
                 worker_loop(&worker_db, &lock_path, &state_root, &worker_stop, &config)
             })?;

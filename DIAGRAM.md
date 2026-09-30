@@ -65,13 +65,13 @@ graph TB
         mcp_setup["mcp_setup/ — Client Install Matrix"]
     end
 
-    subgraph Locate["Locate index — crates/filesystem-locate, feature locate-tools"]
+    subgraph Locate["Locate index — crates/locate-rs, feature locate-tools"]
         indexer["indexer.rs — Indexer API: search, dir_stats, query_each"]
         query["query.rs — read-only SQL: fs_entries, fs_roots"]
         worker["worker.rs — claim, scan, publish, backfill, recovery"]
         aggregate["aggregate.rs — per-directory subtree totals"]
         locdb["db.rs + roots.rs — schema v10, roots, coverage"]
-        fscan["fscan-rs — NTFS and portable walker (external crate)"]
+        fscan["fscan-rs — NTFS and portable walker (vendored: crates/vendor/fscan-rs)"]
     end
 
     main --> allowed
@@ -141,7 +141,7 @@ graph TD
     TOOLS --> NET["http_tools / s3_tools"]
     TOOLS --> SCREEN["screenshot.rs"]
     TOOLS --> FILESTATS["file_stats.rs"]
-    MAIN -.->|"feature: locate-tools"| LOCATE["filesystem-locate crate"]
+    MAIN -.->|"feature: locate-tools"| LOCATE["locate-rs crate"]
 
     HASH --> MURMUR["murmur3.rs"]
     HASH --> SPOOKY["spooky.rs"]

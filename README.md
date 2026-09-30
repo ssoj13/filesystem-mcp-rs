@@ -22,12 +22,13 @@ Crate version is still **0.2.1**; everything after that lives on `main` as Unrel
 - **`tools/list` is ~23% smaller** and a test guard keeps descriptions honest. Session-lock footer: first result, then every 7 calls (`FS_MCP_SESSION_FOOTER_EVERY`).
 - **`rmcp` 3.4.0.** `ServerHandler::get_info` returns `ServerConfig` (`ServerInfo` was a deprecated alias). `cargo install --path . --locked` keeps the binary on the lockfile.
 - **`computer-tools` is a default feature**; `--list-env` and `install` both come from `src/env_spec.rs`. Blank env values mean unset. `install` snapshots `PATH`.
-- **Locate name index:** `locate_search`, `locate_refresh`, and `locate_status` use the shared `filesystem-locate` crate and the private GitHub `fscan-rs` scanner. Multiple server processes share the SQLite index; one worker scans while other clients can search or queue requests.
+- **Locate name index:** `locate_search`, `locate_refresh`, and `locate_status` use the shared `locate-rs` crate and the `fscan-rs` scanner, vendored in-tree at `crates/vendor/fscan-rs` (no SSH access to a second private repo needed to build). Multiple server processes share the SQLite index; one worker scans while other clients can search or queue requests.
 - **The index knows directory sizes.** Every directory used to be stored with size 0. A scan now totals each one (bytes, files, directories beneath it, schema v10), `locate_search` and `list_directory_with_sizes` report it, and an index built earlier gets its totals from the entries it already holds, without a rescan. Verified on a real 11.9 M-entry index: the totals equal the sum of the entries exactly.
 - **`locate_sql`:** read-only SQL over the index (`fs_entries`, `fs_roots`) for the questions a name search cannot answer: the largest files under a folder, size per extension, folders holding two given entries. Fenced in by `query_only`, an authorizer and a time limit. Lookups by name answer at once; a sweep over millions of rows takes seconds to tens of seconds.
 - **A tool map for the model.** Which tools work together is now data (`src/core/tool_graph.rs`), not scattered prose: the server instructions open with one line per family (`Read`, `Find`, `Space`, `Index`, `Write`, `Files`, `Run`, `Memory`, `Network`, `Screen`, `LLM`) and the usual chains (`disk_usage > file_stats > locate_sql > delete_path`), and about thirty descriptions gain a `See also:` tail. The map comes first because Claude Code shows only the first ~2,000 characters of a server's instructions; the rest, including the memory workflow, used to sit after the cut. A tool no family lists fails the build.
 - **`file_stats` rewritten:** parallel walk that survives unreadable folders, a du-style `children` breakdown, `maxDepth`, `exclude`, `top`, `timeoutMs`, cloud-placeholder counts, and `fromIndex` for an instant answer from the index.
-- **`filesystem-locate` is eight files, not one:** the 2154-line `lib.rs` split into `types`/`db`/`roots`/`time_util`/`worker`/`indexer`/`tests`, same behavior — `cargo test -p filesystem-locate` and `clippy -D warnings` both pass unchanged.
+- **`filesystem-locate` is eight files, not one:** the 2154-line `lib.rs` split into `types`/`db`/`roots`/`time_util`/`worker`/`indexer`/`tests`, same behavior — `cargo test -p locate-rs` and `clippy -D warnings` both pass unchanged.
+- **`filesystem-locate` renamed to `locate-rs`, and `fscan-rs` is vendored, not a git dependency.** `cargo release`'s manifest verification refuses a crate with a git dependency outright (`fscan-rs` was fetched over SSH from a second private repo); it now lives at `crates/vendor/fscan-rs` as a pinned snapshot (see `VENDORED.md` there for the revision and how to update it). `[workspace.metadata.release] publish = false`: nothing here goes to crates.io — `release.yml` builds binaries for a pushed `v*.*.*` tag and attaches them to a GitHub Release, same as always.
 
 ### [0.2.1](CHANGELOG.md#021---2026-08-29) — 2026-08-29
 
@@ -1285,8 +1286,8 @@ Note: Use forward slashes (`C:/path`) or double backslashes (`C:\\path`) in TOML
 - `src/tools/http_tools.rs` — HTTP/HTTPS tools (feature)
 - `src/tools/s3_tools.rs` — S3 tools (feature)
 - `src/tools/file_stats.rs` — file/directory statistics (parallel walk, per-child sizes, index-backed summaries)
-- `crates/filesystem-locate/src/aggregate.rs` — per-directory subtree totals, independent of walk order
-- `crates/filesystem-locate/src/query.rs` — the read-only SQL behind `locate_sql` (views, authorizer, time limit)
+- `crates/locate-rs/src/aggregate.rs` — per-directory subtree totals, independent of walk order
+- `crates/locate-rs/src/query.rs` — the read-only SQL behind `locate_sql` (views, authorizer, time limit)
 - `src/tools/duplicates.rs` — duplicate file detection
 - `tests/integration.rs` — per-tool integration coverage
 

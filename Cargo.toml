@@ -11,9 +11,16 @@ categories = ["command-line-utilities", "filesystem"]
 readme = "README.md"
 
 [workspace]
-members = [".", "crates/filesystem-locate"]
-default-members = [".", "crates/filesystem-locate"]
+members = [".", "crates/locate-rs", "crates/vendor/fscan-rs"]
+default-members = [".", "crates/locate-rs", "crates/vendor/fscan-rs"]
 resolver = "3"
+
+# release.yml builds binaries for a pushed `v*.*.*` tag and attaches them to a GitHub
+# Release; nothing here is published to crates.io (locate-rs depends on the
+# private fscan-rs git repo, which crates.io's publish verification would refuse anyway).
+# `cargo release` should only bump versions, commit, tag and push.
+[workspace.metadata.release]
+publish = false
 
 [[bin]]
 name = "filesystem-mcp-rs"
@@ -106,7 +113,7 @@ rusqlite = { version = "0.40", features = ["bundled"] }
 # pinned us to rusqlite ^0.39).
 r2d2 = "0.8"
 dirs = "6.0"
-filesystem-locate = { version = "0.1.0", path = "crates/filesystem-locate", optional = true }
+locate-rs = { version = "0.1.0", path = "crates/locate-rs", optional = true }
 
 # Dependencies of the vendored `src/mcp_setup/` module (agent config files are JSONC / TOML and
 # must be rewritten through a CST to preserve comments and formatting). See src/mcp_setup/VENDOR.md.
@@ -123,7 +130,7 @@ rust_xlsxwriter = "0.98"
 
 [features]
 default = ["http-tools", "s3-tools", "screenshot-tools", "computer-tools", "locate-tools"]
-locate-tools = ["dep:filesystem-locate"]
+locate-tools = ["dep:locate-rs"]
 http-tools = []
 s3-tools = ["dep:aws-config", "dep:aws-sdk-s3", "dep:aws-credential-types", "dep:aws-types"]
 screenshot-tools = ["dep:image", "dep:xcap", "dep:arboard"]

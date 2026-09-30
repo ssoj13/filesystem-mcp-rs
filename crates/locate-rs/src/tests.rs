@@ -1823,7 +1823,7 @@ fn sql_is_stopped_at_its_time_limit_and_can_be_stopped_early() {
 }
 
 /// Timings of typical `locate_sql` questions on a COPY of a real index, run by hand:
-/// `LOCATE_DB_COPY=<dir> cargo test -p filesystem-locate --release real_index_sql -- --ignored --nocapture`.
+/// `LOCATE_DB_COPY=<dir> cargo test -p locate-rs --release real_index_sql -- --ignored --nocapture`.
 #[test]
 #[ignore]
 fn real_index_sql_answers_typical_questions_in_reasonable_time() {
@@ -1927,7 +1927,7 @@ fn real_index_sql_answers_typical_questions_in_reasonable_time() {
 }
 
 /// Real-data check, run by hand against a COPY of a real index:
-/// `LOCATE_DB_COPY=<dir holding everything.db> cargo test -p filesystem-locate --release
+/// `LOCATE_DB_COPY=<dir holding everything.db> cargo test -p locate-rs --release
 /// real_index_totals -- --ignored --nocapture`. The worker backfills the totals; each root's
 /// row must then equal what its entries add up to.
 #[test]

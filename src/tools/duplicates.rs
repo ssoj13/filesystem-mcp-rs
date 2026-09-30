@@ -288,7 +288,12 @@ mod tests {
 
     #[tokio::test]
     async fn test_nonexistent_path() {
-        let result = find_duplicates(Path::new("/nonexistent/path"), None, true).await;
+        // A literal like "/nonexistent/path" is not guaranteed to be absent on every
+        // machine (this one had a leftover directory by that exact name); a fresh
+        // tempdir with an unjoined child is.
+        let dir = tempdir().unwrap();
+        let missing = dir.path().join("does-not-exist");
+        let result = find_duplicates(&missing, None, true).await;
         assert!(result.is_err());
     }
 }
