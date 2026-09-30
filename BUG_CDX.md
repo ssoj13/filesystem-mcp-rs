@@ -600,8 +600,6 @@
 - **Observed impact:** The stale partial anchor is caller error; the internal stack trace is an MCP server defect. No file change resulted from the failed call.
 - **Safe fallback:** Read the exact current text and edit a unique smaller substring from that text, then verify the log.
 
-## 2026-09-29 — `edit_file` stale plan-tail anchor returns internal stack trace
-
 ## 2026-09-29 — `edit_file` unmatched Nova source anchors leak internal stack traces
 
 - **Reproduction:** In `nova-linux-rs/nova/src/main.rs`, call `mcp__filesystem_mcp_rs__edit_file` with a batch containing the literal anchors `mod linux {\\n    use std::collections::BTreeMap;` and `             nova runtime-import <rootfs> <lock> <store>\\n\\\\n`. Neither anchor matches the actual newline / Rust line-continuation characters in the file. The server reports “2 of 3 edits produced zero matches” and returns full internal Rust frames. A second no-match call against `.gitignore` used `Thumbs.db\\n.gitnexus/` and similarly returned a full stack trace. The failed calls left all target files unchanged.
@@ -613,3 +611,135 @@
 - **Reproduction:** Call `mcp__filesystem__edit_file` for `rez-rs/plan14.md` replacing its old compatibility statement containing “vendored Rez 3.3.0 evidence”. That statement had already been updated in an earlier successful edit. The server returns a no-match validation response and internal Rust frames; the failed request leaves the plan unchanged, as confirmed by reading its tail.
 - **Observed impact:** Reusing an obsolete anchor is caller error; leaking internal frames is an MCP server defect. No file change occurred.
 - **Safe fallback:** Re-read the relevant section immediately before editing and skip changes already present.
+
+## 2026-09-29 — `run_command` rejects shell variable token and leaks internal stack trace
+
+- **Reproduction:** Call `mcp__filesystem_mcp_rs__run_command` on Windows with `command: "wsl.exe"`, args `["-d","Ubuntu","-e","sh","-lc","for f in /usr/lib/x86_64-linux-gnu/Scrt1.o; do test -f \"$f\"; done"]`, and `shell: "none"`. The server correctly rejects the blocked `$f` token before spawning, but returns full internal Rust frames with the error.
+- **Observed impact:** The command safety guard is expected; emitting internal stack frames for its validation rejection is a filesystem MCP server defect. The WSL shell did not run and no files changed.
+- **Safe fallback:** Avoid shell variables in command arguments or pass a script through the documented stdin/file path; return a concise validation error without internal frames.
+
+## 2026-09-29 — WSL UNC paths outside allowed roots leak stack traces
+
+- **Reproduction:** Call `mcp__filesystem_mcp_rs__read_text_file` for `\\\\wsl.localhost\\Ubuntu\\tmp\\nova-mc-closure-20260929\\closure.lock` and `mcp__filesystem_mcp_rs__list_directory` for its `packages` subdirectory. The server correctly rejects both as outside configured allowed directories but emits a full internal Rust stack trace for each rejection.
+- **Observed impact:** The UNC location is outside this MCP server's configured roots, so access denial is expected; exposing internal frames for path validation is a server defect. Neither read nor listing occurred.
+- **Safe fallback:** Copy only the requested metadata into an allowed workspace path using `run_command`, then read it with the filesystem MCP; keep bulk archives in WSL's private `/tmp`. Return a concise access-denied response without internal frames.
+
+- **Additional reproduction:** A subsequent attempt to append this entry by guessing a log anchor returned another no-match error with full internal Rust frames. The stale anchor did not modify the log. Re-read the exact current line and use it as the edit anchor.
+
+## 2026-09-29 — `edit_file` batch mismatch leaks internal stack trace during Nova CLI update
+
+- **Reproduction:** Call `mcp__filesystem_mcp_rs__edit_file` for `nova-linux-rs/nova/src/main.rs` with two edits: insert a dispatcher arm before the exact `"runtime-import" => {\n                let rootfs` anchor, and replace a help block using an incorrectly escaped literal containing `\\n\\\\`. The server returns “1 of 2 edits produced zero matches” with full internal Rust stack frames. Re-reading confirms neither requested change was applied.
+- **Observed impact:** The incorrectly serialized help anchor is caller error; leaking native frames for expected no-match validation is a filesystem MCP server defect. The dispatcher remains unchanged.
+- **Safe fallback:** Re-read the source and make one unique exact edit per call; return a concise anchor mismatch without internal frames.
+
+## 2026-09-29 — `edit_file` stale PLAN2 block anchor leaks internal stack trace
+
+- **Reproduction:** Call `mcp__filesystem_mcp_rs__edit_file` on `nova-linux-rs/PLAN2.md` replacing the Section 18 verification bullets without including their actual source text and indentation. The server returns “1 of 1 edits produced zero matches” and a full internal Rust stack trace; rereading Section 18 confirms the plan was unchanged.
+- **Observed impact:** The stale literal block is caller error; exposing internal frames for normal no-match validation is a filesystem MCP server defect. No plan changes were applied by the rejected call.
+- **Safe fallback:** Read the exact current section immediately before editing and replace one exact bullet at a time; return a concise mismatch error without internal frames.
+
+
+## 2026-09-29 — `locate_sql` child-directory inventory timed out with internal stack trace
+
+- **Reproduction:** Run `mcp__filesystem_mcp_rs__locate_sql({under:"D:/_rez_install/bootstrap117",sql:"SELECT name,kind,files,dirs,size FROM fs_entries WHERE dir=under ORDER BY name",limit:100})`. The call exceeded its 120-second limit and returned a full internal stack trace. The locate index had already completed; no source files were changed by the query.
+- **Observed impact:** The broad immediate-child inventory could not be retrieved through this query. The timeout is a tool failure; returning internal frames is a server defect. Narrower extension and size queries against the same indexed root succeeded.
+- **Safe fallback:** Use selective, bounded queries (for example, filter by `name` or `ext`, group by extension/depth) and `directory_tree` for a small subtree; return a concise timeout response without internal frames.
+
+
+## 2026-09-29 — `edit_file` stale log anchor returns internal stack trace during timeout logging
+
+- **Reproduction:** Call `mcp__filesystem_mcp_rs__edit_file` on `C:/projects/projects.rust.cg/cglibs/filesystem-mcp-rs/BUG_CDX.md` using an anchor copied from a truncated or reformatted tool response rather than the exact file contents. The server returns a zero-match error with full internal Rust frames; no edit is applied.
+- **Observed impact:** The stale anchor is caller error; exposing internal frames for ordinary no-match validation is a filesystem MCP defect. Both failed append attempts left the log unchanged.
+- **Safe fallback:** Read the exact tail immediately before editing, use a unique exact anchor or append with an end-of-file regex, then reread and verify.
+
+
+## 2026-09-29 — `edit_file` zero-match batch response leaks stack trace while adding Nova audit command
+
+- **Reproduction:** Call `mcp__filesystem_mcp_rs__edit_file` on `nova/src/main.rs` with three edits: add `mod elf_audit;` after `mod deb_closure;`, add a `runtime-audit-elf` dispatch arm before `"runtime-import" => {`, and replace the help line using a literal string that does not match its escaped source text. The server reports “1 of 3 edits produced zero matches” and includes full Rust stack frames. The call applied no edits; rereading `main.rs` confirmed its original contents.
+- **Observed impact:** The stale help anchor was caller error; returning internal frames for ordinary no-match validation is a server defect. No project source was changed by the rejected batch.
+- **Safe fallback:** Re-read and copy the exact source anchor; issue one edit at a time and verify after each successful call. Return a concise no-match error without internal frames.
+
+## 2026-09-29 — `read_text_file` conflicting pagination modes leak stack trace
+
+- **Reproduction:** Call `mcp__filesystem_mcp_rs__read_text_file` with a path plus both `head: 40` and `tail: 40`. The server correctly rejects the incompatible modes but returns a full internal Rust stack trace.
+- **Observed impact:** The pagination argument combination is caller error; exposing internal frames for this validation failure is a server defect. No file was read or changed by the rejected call.
+- **Safe fallback:** Use only one of `head`, `tail`, or `offset`/`limit` per call; return a concise argument error without internal frames.
+
+## 2026-09-29 — `edit_file` zero-match batch leaks stack trace during Nova integration CLI update
+
+- **Reproduction:** Call `mcp__filesystem_mcp_rs__edit_file` on `nova-linux-rs/nova/src/main.rs` with three edits: add `mod integrations;`, replace the `runtime-compose-deb` dispatch block, and replace the help usage line using a literal whose Rust string escaping does not match the source. The server reports “1 of 3 edits produced zero matches” and includes a full internal Rust stack backtrace. Re-reading `main.rs` confirmed that none of the three edits were applied.
+- **Observed impact:** The mismatched help anchor was caller error; exposing internal frames for the expected no-match validation is a filesystem MCP server defect. The CLI source remained unchanged.
+- **Safe fallback:** Re-read exact source anchors, apply one edit per call, and verify after each success. Return a concise no-match error without internal frames.
+
+## 2026-09-29 — `edit_file` stale formatted anchor leaks stack trace in Nova CLI
+
+- **Reproduction:** Call `mcp__filesystem_mcp_rs__edit_file` on `nova-linux-rs/nova/src/main.rs` to replace the `--integrations` match arm using the pre-format two-line layout. `cargo fmt` had wrapped the assignment across lines. The server reports “1 of 1 edits produced zero matches” and returns internal Rust stack frames; rereading lines 173–176 shows the source unchanged.
+- **Observed impact:** The old layout was a stale caller anchor; leaking internal frames for a normal no-match error is a filesystem MCP server defect. No source edit occurred.
+- **Safe fallback:** Read the formatted block immediately before editing and replace its exact current text; return a concise no-match response without internal frames.
+
+## 2026-09-29 — `run_command` rejects WSL probe and leaks internal stack trace
+
+- **Reproduction:** Call `mcp__filesystem_mcp_rs__run_command({command:"wsl -d Ubuntu -- bash -lc 'printf \\"distro=\\"; . /etc/os-release; echo \\"$PRETTY_NAME\\"; ls -ld /tmp/nova-mcfar2l-closure /tmp/nova-mcfar2l-closure/packages 2>&1; ls -ld /home/joss/nova-store/.runtimes'",cwd:"C:\\projects\\projects.rust.cg\\cgprojs\\nova-linux-rs",shell:"pwsh",timeoutMs:30000})`. The host rejects `$PRETTY_NAME` before spawn and includes a full internal Rust stack trace.
+- **Observed impact:** The host token guard correctly prevents the command from running; this is not a command execution failure. Leaking internal frames for this validation response is a server defect. No WSL probe ran and no files changed.
+- **Safe fallback:** Avoid shell `$NAME` tokens in inline command strings or pass the script through stdin/a file as the server recommends; return a concise validation error without internal frames.
+
+## 2026-09-29 — `run_command` rejects shell variable and leaks internal stack trace
+
+- **Reproduction:** Call `mcp__filesystem_mcp_rs__run_command` with command `wsl -d Ubuntu -- bash -lc 'nova=/mnt/c/Users/joss1/AppData/Local/Temp/nova-integration; ...; "$nova" runtime-compose-deb ...'`, `cwd:"C:\\projects\\projects.rust.cg\\cgprojs\\nova-linux-rs"`, and `shell:"pwsh"`. The host rejects `$nova` before spawn and includes a full internal Rust stack trace.
+- **Observed impact:** The inline shell variable triggered the host's safety guard, so no compose or validation command ran and no files changed. Returning internal frames for this argument validation is a server defect. This reproduces the `$NAME` token-guard issue recorded above with another shell variable.
+- **Safe fallback:** Avoid `$NAME` tokens in inline command strings, repeat literal executable paths, or pass the script through stdin/a file; return a concise validation error without internal frames.
+
+## 2026-09-29 — `read_text_file` allowlist rejection leaks internal stack trace for WSL UNC path
+
+- **Reproduction:** Call `mcp__filesystem_mcp_rs__read_text_file({path:"\\\\wsl.localhost\\Ubuntu\\home\\joss\\nova-store\\mc\\runtime.ref"})` (the same call was made for `far2l/runtime.ref`). The server correctly rejects the UNC path as outside configured allowed directories and returns a full internal Rust stack trace.
+- **Observed impact:** The path was outside the filesystem MCP allowlist, so access denial is expected caller-facing behavior; no file was read. Exposing internal frames for this denial is a server defect.
+- **Safe fallback:** Use only paths under `list_allowed_directories`, or read WSL content through an authorized `run_command`; return a concise access-denied message without internal frames.
+
+## 2026-09-29 — `edit_file` batch no-match leaks stack trace during Nova maintainer analyzer wiring
+
+- **Reproduction:** Call `mcp__filesystem_mcp_rs__edit_file` on `nova-linux-rs/nova/src/main.rs` with three literal edits adding the `maintainer_analysis` module, its CLI arm, and the help line. The module and dispatcher anchors were valid, but the help source literal was incorrectly escaped. The server reports “1 of 3 edits produced zero matches” and returns a full internal Rust stack trace; rereading confirms the batch applied none of its edits.
+- **Observed impact:** The escaped help anchor was caller error; exposing internal frames for expected no-match validation is a filesystem MCP server defect. `main.rs` remains unchanged.
+- **Safe fallback:** Read and copy the exact source anchor, make independent edits one at a time, and verify after each. Return a concise no-match error without internal frames.
+
+## 2026-09-29 — `grep_files` invalid regular expression leaks stack trace
+
+- **Reproduction:** Call `mcp__filesystem_mcp_rs__grep_files` with `pattern:"Candidate {"`, `path:"C:/projects/projects.rust.cg/cgprojs/nova-linux-rs/nova/src/linux"`, and `filePattern:"maintainer_analysis.rs"`. The regex is invalid because `{` is unescaped; the server returns “Invalid regex pattern” followed by a full internal Rust stack trace.
+- **Observed impact:** The malformed regex was caller error and no search was performed. Returning internal frames for argument validation is a filesystem MCP server defect; no files changed.
+- **Safe fallback:** Use `fixedStrings:true` for literal searches or escape regex metacharacters; return a concise validation error without internal frames.
+
+
+## 2026-09-29 — Disk usage and stale-anchor responses expose internal stack traces
+
+- **Reproduction A:** Call `mcp__filesystem__disk_usage({path: "D:\\"})` in the Windows session. It returns `No disk found for path: D:\\` followed by a full internal stack trace, while `mcp__filesystem__list_directory_with_sizes({path: "D:\\_rez_install\\bootstrap117\\0010.prep"})` succeeds. A PowerShell `Get-PSDrive -Name D` query confirms the D: drive and reports free space.
+- **Observed impact A:** Disk capacity cannot be queried through this MCP call even though the path is accessible; the error also leaks native frames. No files were changed by the query.
+- **Safe fallback A:** Use `Get-PSDrive -Name D` or `Get-Volume` through `run_command`; return a concise no-volume diagnostic without stack frames.
+- **Reproduction B:** Call `mcp__filesystem__edit_file` on this log with an `oldText` copied from the final line returned by `read_text_file({path: "C:\\projects\\projects.rust.cg\\cglibs\\filesystem-mcp-rs\\BUG_CDX.md", tail: 18})`. The call reports one zero-match anchor and includes a full native stack trace; no edit is applied.
+- **Observed impact B:** A stale/normalized text anchor prevents the append; returning internal stack frames for a normal edit conflict is a server defect. The file remains unchanged by that failed edit.
+- **Safe fallback B:** Re-read the line range and append with `edit_lines` using a verified final line number; return a concise zero-match error without native frames.
+
+
+## 2026-09-29 — Long managed `run_command` call times out at tool gateway with stack trace
+
+- **Reproduction:** Call `mcp__filesystem__run_command` with `{command: "python bootstrap.py p", cwd: "C:\\projects\\projects.rust.cg\\cglibs\\rez-rs", shell: "powershell", mode: "managed", timeoutMs: 1200000, streamOutput: true}` while Cargo performs the first Windows Release build. After 300 seconds the caller receives `timed out awaiting tools/call after 300s` plus a full internal Rust stack trace, despite the requested command timeout being 1200000 ms.
+- **Observed impact:** The caller loses the command result and cannot tell whether packaging completed. In this reproduction `target/release/rez.exe` was subsequently found, so at least the build side effect completed despite the missing final response. The timeout response leaks internal frames.
+- **Safe fallback:** Run long builds detached with explicit stdout/stderr log paths and poll those logs/process state; report the gateway timeout separately from the child process exit code.
+
+
+## 2026-09-29 — `copy_file` directory destination conflict exposes internal stack trace
+
+- **Reproduction:** Create `D:\\_rez_install\\bootstrap117\\0010.prep\\1055.rez-rs\\payload\\0.1.0` with `create_directory`, then call `copy_file` with that directory as `destination` and `C:\\projects\\projects.rust.cg\\cglibs\\rez-rs\\dist\\rez-rs\\0.1.0` as `source`, leaving `overwrite:false`. The server returns `Destination exists; set overwrite to true` and a full internal Rust stack trace.
+- **Observed impact:** The operation was rejected and copied no payload. The conflict is expected from this API call, but exposing internal frames for it is a server defect.
+- **Safe fallback:** Copy the three verified package files individually into the already-created version directory; return a concise destination-conflict error without internal frames.
+
+## 2026-09-29 — `edit_file` batch with stale help anchor leaks stack trace during Nova app doctor wiring
+
+- **Reproduction:** Call `mcp__filesystem_mcp_rs__edit_file` on `nova-linux-rs/nova/src/main.rs` with three literal edits: add the `doctor` action to the `app` dispatcher, add `nova app doctor <store> [package]` to the help string, and insert the doctor functions before `fn rollback`. The dispatcher and rollback anchors match, but the help anchor is escaped incorrectly. The server reports “1 of 3 edits produced zero matches” and returns a full internal Rust stack trace; rereading confirms that none of the edits were applied.
+- **Observed impact:** The help anchor was caller error; the atomic batch left the source unchanged. Leaking internal frames for a routine no-match conflict is a filesystem MCP server defect.
+- **Safe fallback:** Read the exact formatted help source and retry each independent edit with verified anchors; return a concise no-match error without internal stack frames.
+
+
+## 2026-09-29 — `edit_file` no-match while correcting escaped Rust character literal leaks stack trace
+
+- **Reproduction:** After the doctor insertion, Rust reported that `line.split('\\\\t')` was an invalid multi-codepoint character literal. Call `mcp__filesystem_mcp_rs__edit_file` to replace `line.split('\\\\t')` with `line.split('\\t')`; the server reports “1 of 1 edits produced zero matches” and returns a full internal Rust stack trace. Re-reading `main.rs` showed the source line was unchanged.
+- **Observed impact:** The correction anchor had one more escaped backslash than the actual source; this was caller error and no edit occurred. Returning internal frames for this routine no-match is a filesystem MCP server defect.
+- **Safe fallback:** Read the numbered source line and use `edit_lines` with the verified line number; return a concise no-match error without internal stack frames.
