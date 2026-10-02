@@ -5,7 +5,7 @@ Living architecture overview. Tool names match the MCP surface in `src/main.rs`.
 ## Workspace Overview (ASCII)
 
 ```
-Cargo workspace (3 crates, resolver = 3)
+Cargo workspace (1 crate + 2 SSH dependencies, resolver = 3)
 ══════════════════════════════════════════════════════════════════════════
 
 ┌────────────────────────────────────────────────────────────────────────┐
@@ -15,14 +15,14 @@ Cargo workspace (3 crates, resolver = 3)
                                 │ optional dep, feature "locate-tools"
                                 ▼
 ┌────────────────────────────────────────────────────────────────────────┐
-│  locate-rs  (crates/locate-rs, v0.1.0)                                  │
+│  locate-rs  (GitHub SSH ref, v0.1.0)                                    │
 │  shared SQLite name index (WAL, FTS5 trigram, schema v10)               │
 └──────────────────────────────┬───────────────────────────────────────--┘
-                                │ path dep (vendored, was git+ssh)
+                                │ SSH git dep (pinned rev, Cargo patch)
                                 ▼
 ┌────────────────────────────────────────────────────────────────────────┐
-│  fscan-rs  (crates/vendor/fscan-rs, v0.1.0)                             │
-│  NTFS MFT reader + portable walkdir fallback (pinned snapshot, MIT)     │
+│  fscan-rs  (GitHub SSH ref, v0.1.0)                                     │
+│  NTFS MFT reader + portable walkdir fallback (pinned rev, MIT)           │
 └────────────────────────────────────────────────────────────────────────┘
 
   every crate also pulls windows 0.62 (feature-unioned into ONE compile)
@@ -157,13 +157,13 @@ graph TB
         mcp_setup["mcp_setup/ — Client Install Matrix"]
     end
 
-    subgraph Locate["Locate index — crates/locate-rs, feature locate-tools"]
+    subgraph Locate["Locate index — GitHub SSH ref, feature locate-tools"]
         indexer["indexer.rs — Indexer API: search, dir_stats, query_each"]
         query["query.rs — read-only SQL: fs_entries, fs_roots"]
         worker["worker.rs — claim, scan, publish, backfill, recovery"]
         aggregate["aggregate.rs — per-directory subtree totals"]
         locdb["db.rs + roots.rs — schema v10, roots, coverage"]
-        fscan["fscan-rs — NTFS and portable walker (vendored: crates/vendor/fscan-rs)"]
+        fscan["fscan-rs — NTFS and portable walker (GitHub SSH ref)"]
     end
 
     main --> allowed

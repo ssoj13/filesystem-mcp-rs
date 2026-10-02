@@ -1896,6 +1896,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "filesystem-locate"
+version = "0.1.0"
+source = "git+ssh://git@github.com/ssoj13/locate-rs.git?rev=465c85756388641b9469e4639f2f013bdc0d0b53#465c85756388641b9469e4639f2f013bdc0d0b53"
+dependencies = [
+ "anyhow",
+ "fscan-rs",
+ "globset",
+ "regex",
+ "rusqlite",
+ "tracing",
+ "windows 0.62.2",
+]
+
+[[package]]
 name = "filesystem-mcp-rs"
 version = "0.2.1"
 dependencies = [
@@ -1917,6 +1931,7 @@ dependencies = [
  "dotenvy",
  "encoding_rs",
  "fancy-regex",
+ "filesystem-locate",
  "flate2",
  "font8x8",
  "futures",
@@ -1929,7 +1944,6 @@ dependencies = [
  "image",
  "jsonc-parser",
  "libc",
- "locate-rs",
  "md-5 0.11.0",
  "notify",
  "ocrs",
@@ -2043,11 +2057,11 @@ checksum = "42703706b716c37f96a77aea830392ad231f44c9e9a67872fa5548707e11b11c"
 [[package]]
 name = "fscan-rs"
 version = "0.1.0"
+source = "git+ssh://git@github.com/ssoj13/fscan-rs.git?rev=c33d4474b5004ec047ecd065f96f6a53addbc97e#c33d4474b5004ec047ecd065f96f6a53addbc97e"
 dependencies = [
  "anyhow",
  "crossbeam-channel",
  "log",
- "tempfile",
  "walkdir",
  "windows 0.62.2",
 ]
@@ -3117,20 +3131,6 @@ name = "litemap"
 version = "0.8.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "47d9d19d1d6efa0109d2f65ff4c85cddd50bd572e5a00127ab10987290bcefae"
-
-[[package]]
-name = "locate-rs"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "fscan-rs",
- "globset",
- "regex",
- "rusqlite",
- "tempfile",
- "tracing",
- "windows 0.62.2",
-]
 
 [[package]]
 name = "lock_api"

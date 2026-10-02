@@ -11,16 +11,20 @@ categories = ["command-line-utilities", "filesystem"]
 readme = "README.md"
 
 [workspace]
-members = [".", "crates/locate-rs", "crates/vendor/fscan-rs"]
-default-members = [".", "crates/locate-rs", "crates/vendor/fscan-rs"]
+members = ["."]
+default-members = ["."]
 resolver = "3"
 
 # release.yml builds binaries for a pushed `v*.*.*` tag and attaches them to a GitHub
-# Release; nothing here is published to crates.io (locate-rs depends on the
-# private fscan-rs git repo, which crates.io's publish verification would refuse anyway).
+# Release; nothing here is published to crates.io (the private SSH git dependencies
+# cannot pass crates.io's publish verification).
 # `cargo release` should only bump versions, commit, tag and push.
 [workspace.metadata.release]
 publish = false
+
+# The upstream locate repository includes a scanner snapshot; use its own SSH source.
+[patch."ssh://git@github.com/ssoj13/locate-rs.git"]
+fscan-rs = { git = "ssh://git@github.com/ssoj13/fscan-rs.git", rev = "c33d4474b5004ec047ecd065f96f6a53addbc97e" }
 
 [[bin]]
 name = "filesystem-mcp-rs"
@@ -113,7 +117,7 @@ rusqlite = { version = "0.40", features = ["bundled"] }
 # pinned us to rusqlite ^0.39).
 r2d2 = "0.8"
 dirs = "6.0"
-locate-rs = { version = "0.1.0", path = "crates/locate-rs", optional = true }
+locate-rs = { package = "filesystem-locate", git = "ssh://git@github.com/ssoj13/locate-rs.git", rev = "465c85756388641b9469e4639f2f013bdc0d0b53", optional = true }
 
 # Dependencies of the vendored `src/mcp_setup/` module (agent config files are JSONC / TOML and
 # must be rewritten through a CST to preserve comments and formatting). See src/mcp_setup/VENDOR.md.

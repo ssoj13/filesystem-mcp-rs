@@ -7,6 +7,7 @@ on:
 
 env:
   CARGO_TERM_COLOR: always
+  CARGO_NET_GIT_FETCH_WITH_CLI: "true"
   BINARY_NAME: filesystem-mcp-rs
 
 jobs:
@@ -29,6 +30,12 @@ jobs:
 
     steps:
       - uses: actions/checkout@v5
+
+      - name: SSH access to dependency repositories
+        uses: webfactory/ssh-agent@v0.9.0
+        with:
+          ssh-private-key: ${{ secrets.DEPENDENCIES_SSH_KEY }}
+          log-public-key: false
 
       - uses: dtolnay/rust-toolchain@stable
         with:
