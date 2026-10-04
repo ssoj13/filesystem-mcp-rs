@@ -4,6 +4,15 @@
 
 Post-0.2.1 work on `main`. The crate version is still 0.2.1 until the next tag.
 
+### Dependencies on their latest releases (2026-10-04)
+
+- rmcp 3.5, aws-sdk-s3 1.152 / aws-config 1.12, dirs 7, jsonc-parser 0.34, rust_xlsxwriter 0.99,
+  tauri-winrt-notification 0.8, uuid 1.27, full lock refresh. rten stays 0.26 (ocrs 0.13's).
+- `aws-sdk-s3` drops its default `rustls` feature: that is the legacy hyper-0.14 client, which pulled
+  socket2 0.5 and windows-sys 0.52. `default-https-client` (hyper 1 + rustls) is kept, so S3 tools
+  behave the same; windows-sys is now 0.61 plus arboard's 0.60.
+- rmcp tripwire moved to 3.5.0 after re-reading: `CallToolResponse` and `ErrorCode` are unchanged.
+
 ### `filesystem-locate` renamed to `locate-rs`; `fscan-rs` vendored, not a git dependency
 
 - `crates/filesystem-locate` is now `crates/locate-rs` (package name, directory, `use locate_rs::...`).

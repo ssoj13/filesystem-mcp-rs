@@ -35,7 +35,8 @@ use rmcp::model::{CallToolResponse, ErrorCode};
     not(test),
     expect(dead_code, reason = "read by the version tripwire test below")
 )]
-const AUDITED_RMCP_VERSION: &str = "3.4.0";
+// 3.5.0 (2026-10-04): `CallToolResponse` (model/mrtr.rs) and `ErrorCode` are unchanged from 3.4.0.
+const AUDITED_RMCP_VERSION: &str = "3.5.0";
 
 /// Which counter a finished tool call increments.
 ///
