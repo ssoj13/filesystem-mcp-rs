@@ -4,6 +4,34 @@
 
 Post-0.2.1 work on `main`. The crate version is still 0.2.1 until the next tag.
 
+### Systemic audit, PowerShell `$` fix, and 27-client `mcp-setup` installer (2026-10-22)
+
+- **`run_command` & PowerShell (`pwsh` / `powershell`):**
+  - Removed the pre-execution `dollar_guard` rejection so `$var`, `$env:FOO`, `$_`, `$LASTEXITCODE`, and `$(...)` work directly in `command` and `args`.
+  - `shell: "pwsh"` and `shell: "powershell"` now pass scripts via `-NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -EncodedCommand <UTF-16LE Base64>`, avoiding Windows `CommandLineToArgvW` quote/dollar mangling and nested shell interpretation.
+  - Fixed `ps_fail_fast` so multiline pipelines (`|`), control blocks (`{ ... }`), line continuations (`` ` ``), and comments are not broken by per-line `; if (-not $?) { exit 1 }` injection.
+  - Added Unix (`macOS` / `Linux`) `pwsh` path discovery (`/opt/homebrew/bin/pwsh`, `/usr/local/bin/pwsh`, `/usr/bin/pwsh`, `/snap/bin/pwsh`) before falling back to `PATH`.
+  - Moved child `stdin` writing onto a background `tokio::spawn` task and dropped the handle on completion so large `stdin` payloads (>64 KiB) cannot deadlock when the child fills its stdout/stderr pipe before draining stdin.
+- **Installer (`mcp-setup` synced to 27 clients):**
+  - Added 9 new CLI/GUI agents (**27 total**): **Google Antigravity** (`antigravity`, `~/.gemini/config/mcp_config.json` + `~/.gemini/GEMINI.md` + automatic `mcp(<server>/*)` permission grant in `~/.gemini/config/config.json`), **GitHub Copilot CLI** (`copilot`), **Mistral Vibe CLI** (`vibe`), **Kilo CLI** (`kilo`), **Augment Code (`auggie`)** (`augment`), **Amazon Q Developer CLI** (`amazonq`), **Trae IDE** (`trae`), **Kilo Code VS Code** (`kilocode`), and **Continue** (`continue`).
+  - Default `filesystem-mcp-rs install` arguments now include `--allow-symlink-escape` alongside all mounted drive roots (`/` on Unix, `A:\..Z:\` on Windows).
+  - Fixed `marked_md` context block matching across version bumps (legacy `<!-- mcp-setup:<server>__<plugin>_<old_ver>:begin -->` markers are replaced in-place instead of duplicated), deterministic FNV-1a slug hashing across Rust toolchains, `codex mcp add` stripping `[mcp_servers.<key>.env]`, and Mistral Vibe `mcp_servers = []` to `[[mcp_servers]]` conversion.
+- **Filesystem, search, edit, memory, LLM, and computer-control fixes:**
+  - `move_file` and `copy_file` now reject moving/copying a directory onto itself or into its own descendant (`destination is inside source`) before touching disk.
+  - `extract_archive` validates tar and zip member paths against `..` and root/prefix components (Zip-Slip traversal protection).
+  - `fs_ops::head`, `fs_ops::tail`, and `watch::tail_file` now use bounded streaming/reverse-window reads for files `> 2 MiB` instead of reading entire multi-gigabyte logs into memory, while preserving exact legacy whitespace trimming on small files.
+  - `grep_context` joins output lines with a real newline (`"\n"`) instead of a literal two-character `"\\n"` sequence.
+  - `fast_grep` and `grep` advance by a full UTF-8 scalar (`char::len_utf8()`) on zero-width regex matches instead of `m.end() + 1` (preventing panics on multi-byte codepoints) and compute `char_window` in $O(\text{window\_chars})$ instead of scanning from byte 0 on minified lines.
+  - `edit_file`'s whitespace-tolerant fallback now normalizes CRLF (`\r\n`) on the replacement text to match the file's line ending style and preserves trailing newlines when `old_text` did not end with one.
+  - `compare_files` loops until each chunk buffer is filled or EOF is reached (`read_chunk_full`), avoiding false diffs on short partial reads.
+  - `file_diff` uses `similar::TextDiff::grouped_ops(context_lines)` so unified diff hunks include leading and trailing context lines.
+  - `disk_usage` picks the mount point with the longest matching prefix (`mount_point().as_os_str().len()`) so nested mounts report the inner filesystem instead of `/`.
+  - `format_size` clamps the unit index to `UNITS.len() - 1`.
+  - `http_tools` domain allowlist matching is now ASCII case-insensitive (`eq_ignore_ascii_case`).
+  - `memory_v2`: `load_relations_for_items` now queries relations even when a single item is returned (`items.is_empty()` check instead of `items.len() <= 1`), and `mem_get` / `mem_search` / `mem_get_summary` filter out expired items (`expires_at <= now`).
+  - `llm`: `count_tokens_via_completion` sets `max_tokens: Some(1)` so fallback token counting does not generate a full completion, and `load_config` applies environment variable overrides after creating a default config file so secrets in env vars are never written to disk.
+  - `computer`: `ocr` adds the capture region's `(origin_x, origin_y)` to word/line bounding boxes so `find` returns true virtual-screen coordinates on multi-monitor/window/region captures; `wait` (`screen_stable` / `screen_change`) hashes frames in memory (`capture_hash`) without writing temporary PNGs; `capture` uses a monotonic atomic counter to prevent same-millisecond filename collisions and clamps monitor bounds with `.max(0)`; `steps` resolves multiple `${N.path}` references within a single string and honors `FS_MCP_CTL_TYPE_MODE` / `FS_MCP_CTL_TYPE_INTERVAL_MS`; `uia` fixes `Err(err(code, msg))` argument order and toggles already-expanded `ExpandCollapsePattern` nodes; `clipboard` and `clip_files` share a single process-wide `CLIP_MTX`.
+
 ### Dependencies on their latest releases (2026-10-04)
 
 - rmcp 3.5, aws-sdk-s3 1.152 / aws-config 1.12, dirs 7, jsonc-parser 0.34, rust_xlsxwriter 0.99,
