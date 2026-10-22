@@ -3515,12 +3515,18 @@ impl FileSystemServer {
         // Documented contract is "fails if destination exists", but fs::rename
         // silently overwrites. Enforce the contract. symlink_metadata so a
         // symlink (even a broken one) at the destination also counts as present.
-        if src != dest && fs::symlink_metadata(&dest).await.is_ok() {
+        if fs::symlink_metadata(&dest).await.is_ok() {
             return Err(McpError::invalid_params(
                 format!(
                     "Destination already exists: {} (move_file will not overwrite)",
                     dest.display()
                 ),
+                None,
+            ));
+        }
+        if dest.starts_with(&src) {
+            return Err(McpError::invalid_params(
+                "Cannot move a directory into a subdirectory of itself",
                 None,
             ));
         }
@@ -3554,6 +3560,12 @@ impl FileSystemServer {
         if source == destination {
             return Err(McpError::invalid_params(
                 "Source and destination are the same path",
+                None,
+            ));
+        }
+        if destination.starts_with(&source) || source.starts_with(&destination) {
+            return Err(McpError::invalid_params(
+                "Source and destination overlap (cannot copy a directory into itself or overwrite an ancestor of source)",
                 None,
             ));
         }
@@ -4059,9 +4071,9 @@ impl FileSystemServer {
                     format!("No matches for: {}", args.pattern)
                 } else {
                     format!(
-                        "Found {} matches:\\n\\n{}",
+                        "Found {} matches:\n\n{}",
                         matches.len(),
-                        lines.join("\\n")
+                        lines.join("\n")
                     )
                 };
                 let s = json!({
@@ -4079,7 +4091,7 @@ impl FileSystemServer {
                     .iter()
                     .map(|c| format!("{}: {}", c.path.display(), c.count))
                     .collect::<Vec<_>>()
-                    .join("\\n");
+                    .join("\n");
                 let s = json!({
                     "counts": counts.iter().map(|c| json!({
                         "path": c.path.to_string_lossy(),
@@ -4093,7 +4105,7 @@ impl FileSystemServer {
                     .iter()
                     .map(|f| f.display().to_string())
                     .collect::<Vec<_>>()
-                    .join("\\n");
+                    .join("\n");
                 let s = json!({
                     "files": files.iter().map(|f| f.to_string_lossy()).collect::<Vec<_>>(),
                 });
@@ -5503,7 +5515,7 @@ USE CASES: Patch executables, fix binary data, search-replace in non-text files.
             Output always goes to the log files; the inline copy is the last ~200 lines / 16 KB unless stdoutHead/stdoutTail/outputFilter narrow it (they combine: head + matches + tail). stdoutTotalLines is the true length; captureTruncated=true means a surviving child held the pipe: read the log file.\n\
             A timeout, an MCP cancellation or kill_process kills the whole process tree, not just the child.\n\
             Windows: cmd.exe understands neither ';' nor tail/grep/sed: pass shell:'bash' for a unix pipeline. A multi-line command under cmd is a temp .bat, i.e. BATCH semantics: %%i (not %i) in for, the exit code is the LAST line's, only failFast stops a failing middle line.\n\
-            A leftover $NAME token in command/args is REJECTED (the host may delete such tokens, silently changing the command): pass the script via stdin or a file."
+            PowerShell (shell:'pwsh'|'powershell') runs via UTF-16LE -EncodedCommand so $ variables, quotes, and pipelines pass intact across Windows/macOS/Linux; for large scripts pass stdin or a file."
     )]
     async fn run_command(
         &self,
@@ -5537,16 +5549,21 @@ USE CASES: Patch executables, fix binary data, search-replace in non-text files.
             };
         let args_refs: Vec<&str> = run_args.iter().map(|s| s.as_str()).collect();
 
-        if let Some(tok) = dollar_guard::first_in_command_and_args(&command, &run_args) {
-            return Err(McpError::invalid_params(
+        // Non-fatal advisory when `$VAR` is passed to Windows `cmd.exe` (which uses `%VAR%`).
+        // PowerShell (`pwsh`/`powershell`) and POSIX shells (`bash`/`sh`) natively use `$`
+        // variables, automatic variables (`$_`, `$true`, `$null`, `$env:PATH`), and pipelines.
+        let is_windows_cmd = matches!(*args.shell, ShellKind::Cmd)
+            || (cfg!(windows) && matches!(*args.shell, ShellKind::Default));
+        let dollar_hint: Option<String> = if is_windows_cmd {
+            dollar_guard::first_in_command_and_args(&command, &run_args).map(|tok| {
                 format!(
-                    "command/args contain `{tok}` — the MCP host may delete NAME tokens before spawn \
-                     (empty expansion, no error). Pass the script via stdin ContentRef or a file \
-                     (powershell -NoProfile -File x.ps1)."
-                ),
-                None,
-            ));
-        }
+                    "command/args contain `{tok}` under cmd.exe (which uses %VAR%, not $VAR). \
+                     Pass shell:\"pwsh\" or shell:\"bash\" if `$` variable expansion was intended."
+                )
+            })
+        } else {
+            None
+        };
 
         // Non-fatal hint for the silent-pipe footgun.
         //
@@ -5566,7 +5583,7 @@ USE CASES: Patch executables, fix binary data, search-replace in non-text files.
                 )
             })
         } else {
-            None
+            dollar_hint
         };
 
         // `background` is gone from the schema; refuse it by name rather than

@@ -195,7 +195,7 @@ pub fn click(
     let matches = find_el(automation, hwnd, name, 8)?;
     let el = matches
         .get(idx)
-        .ok_or_else(|| anyhow::anyhow!("{}/{} matches for {name:?}", matches.len(), idx))?;
+        .ok_or_else(|| anyhow::anyhow!("{}/{} matches for {name:?}", idx, matches.len()))?;
     use uiautomation::patterns::*;
     gate.reserve()?;
     // Scroll offscreen elements into view first (pattern-free, always safe).
@@ -223,9 +223,19 @@ pub fn click(
         return Ok(serde_json::json!({ "via": "toggle", "focus": input::focus() }));
     }
     if let Ok(expand) = el.get_pattern::<UIExpandCollapsePattern>() {
-        expand
-            .expand()
-            .map_err(|e| anyhow::anyhow!("expand: {e}"))?;
+        let is_expanded = matches!(
+            expand.get_state(),
+            Ok(uiautomation::types::ExpandCollapseState::Expanded)
+        );
+        if is_expanded {
+            expand
+                .collapse()
+                .map_err(|e| anyhow::anyhow!("collapse: {e}"))?;
+        } else {
+            expand
+                .expand()
+                .map_err(|e| anyhow::anyhow!("expand: {e}"))?;
+        }
         gate.record(
             "ui_click",
             serde_json::json!({ "via": "expand", "name": name, "idx": idx }),
@@ -300,7 +310,7 @@ pub fn get(
     let matches = find_el(automation, hwnd, name, 8)?;
     let el = matches
         .get(idx)
-        .ok_or_else(|| anyhow::anyhow!("{}/{} matches for {name:?}", matches.len(), idx))?;
+        .ok_or_else(|| anyhow::anyhow!("{}/{} matches for {name:?}", idx, matches.len()))?;
     let (x, y, w, h) = rect_of(el);
     Ok(serde_json::json!({
         "name": el.get_name().unwrap_or_default(),
@@ -329,7 +339,7 @@ pub fn set_value(
     let matches = find_el(automation, hwnd, name, 8)?;
     let el = matches
         .get(idx)
-        .ok_or_else(|| anyhow::anyhow!("{}/{} matches for {name:?}", matches.len(), idx))?;
+        .ok_or_else(|| anyhow::anyhow!("{}/{} matches for {name:?}", idx, matches.len()))?;
     let value_pattern = el
         .get_pattern::<uiautomation::patterns::UIValuePattern>()
         .map_err(|_| anyhow::anyhow!("element {name:?} has no Value pattern"))?;

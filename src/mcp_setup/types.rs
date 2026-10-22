@@ -1,7 +1,6 @@
 //! Shared vocabulary: scope, context, the install plan, and the three report shapes.
 
 use std::collections::BTreeMap;
-use std::hash::{DefaultHasher, Hash, Hasher};
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
@@ -39,16 +38,19 @@ impl Scope {
     }
 
     /// Stable per-scope id used in manifest file names. Hashing the canonical project path
-    /// keeps the name short and filesystem-safe while staying stable across runs.
+    /// with deterministic 64-bit FNV-1a keeps the name short and stable across runs and Rust toolchains.
     pub fn slug(&self) -> Result<String> {
         match self {
             Self::User => Ok(SCOPE_USER.to_string()),
             Self::Project(root) => {
                 ensure_project_root(root)?;
                 let canon = std::fs::canonicalize(root).unwrap_or_else(|_| root.clone());
-                let mut h = DefaultHasher::new();
-                canon.to_string_lossy().hash(&mut h);
-                Ok(format!("project_{:x}", h.finish()))
+                let mut hash: u64 = 0xcbf29ce484222325;
+                for &b in canon.to_string_lossy().as_bytes() {
+                    hash ^= u64::from(b);
+                    hash = hash.wrapping_mul(0x100000001b3);
+                }
+                Ok(format!("project_{hash:016x}"))
             }
         }
     }
@@ -151,8 +153,26 @@ pub struct InstallPlan {
     pub force: bool,
 }
 
+/// Which channel a report is about.
+///
+/// A row saying "ok" means something different for each: an MCP entry was
+/// written into a config file, or a whole plugin was handed to the host's own
+/// plugin manager. Without this the table would claim a config file was edited
+/// when none was touched.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Channel {
+    /// One entry in the agent's MCP config file.
+    #[default]
+    Mcp,
+    /// A whole plugin, installed by the host's plugin manager.
+    Plugin,
+}
+
 #[derive(Debug, Clone, Default, Serialize)]
 pub struct ApplyReport {
+    #[serde(default)]
+    pub channel: Channel,
     pub client: &'static str,
     pub settings_path: PathBuf,
     pub backup_path: Option<PathBuf>,
@@ -169,6 +189,8 @@ pub struct ApplyReport {
 
 #[derive(Debug, Clone, Default, Serialize)]
 pub struct RemoveReport {
+    #[serde(default)]
+    pub channel: Channel,
     pub client: &'static str,
     pub settings_path: PathBuf,
     pub manifest_path: PathBuf,
@@ -181,6 +203,8 @@ pub struct RemoveReport {
 /// Read-only view of one client/scope registration.
 #[derive(Debug, Clone, Default, Serialize)]
 pub struct StatusReport {
+    #[serde(default)]
+    pub channel: Channel,
     pub client: &'static str,
     pub scope: String,
     pub settings_path: PathBuf,

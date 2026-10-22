@@ -351,7 +351,7 @@ impl LlmMcpServer {
 
         let messages_request = MessagesRequest {
             model: request.model.clone(),
-            max_tokens: self.state.config.max_tokens_limit,
+            max_tokens: 1,
             messages: request.messages.clone(),
             system: request.system.clone(),
             stop_sequences: None,

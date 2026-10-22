@@ -56,19 +56,29 @@ fn root_of(path: &Path, raw: &str) -> Result<CstRootNode> {
 }
 
 /// Walk (creating as needed) to the object holding the servers, e.g. `mcp` → `servers`.
-fn servers_object(root: &CstRootNode, parent_path: &[&str]) -> CstObject {
+/// Fails if an intermediate key exists and is not an object, rather than silently clobbering it.
+fn servers_object(path: &Path, root: &CstRootNode, parent_path: &[&str]) -> Result<CstObject> {
     let mut obj = root.object_value_or_set();
     for key in parent_path {
+        if let Some(prop) = obj.get(key)
+            && let Some(val) = prop.value()
+            && val.as_object().is_none()
+        {
+            return Err(SetupError::InvalidBundle(format!(
+                "{}: key `{key}` exists but is not a JSON object",
+                path.display()
+            )));
+        }
         obj = obj.object_value_or_set(key);
     }
-    obj
+    Ok(obj)
 }
 
 /// Insert or replace `parent_path.<key>`, preserving everything else in the file verbatim.
 pub fn upsert_in_file(path: &Path, parent_path: &[&str], key: &str, entry: &Value) -> Result<()> {
     let raw = read_if_present(path)?.unwrap_or_default();
     let root = root_of(path, &raw)?;
-    let servers = servers_object(&root, parent_path);
+    let servers = servers_object(path, &root, parent_path)?;
 
     let input = to_cst(entry);
     match servers.get(key) {
@@ -103,6 +113,104 @@ pub fn remove_in_file(path: &Path, parent_path: &[&str], key: &str) -> Result<bo
     prop.remove();
     write(path, &root.to_string())?;
     Ok(true)
+}
+
+/// Ensure all `grants` strings exist in the JSON array at `parent_path.<array_key>` (e.g.
+/// `userSettings.globalPermissionGrants.allow` in Antigravity's `~/.gemini/config/config.json`).
+pub fn upsert_string_array_items(
+    path: &Path,
+    parent_path: &[&str],
+    array_key: &str,
+    items: &[String],
+) -> Result<bool> {
+    let raw = read_if_present(path)?.unwrap_or_default();
+    let root_map = read_root_object(path)?;
+    let mut cur = &root_map;
+    let mut existing_vec: Vec<Value> = Vec::new();
+    let mut found_path = true;
+    for k in parent_path {
+        if let Some(next) = cur.get(*k).and_then(Value::as_object) {
+            cur = next;
+        } else {
+            found_path = false;
+            break;
+        }
+    }
+    if found_path
+        && let Some(arr) = cur.get(array_key).and_then(Value::as_array)
+    {
+        existing_vec = arr.clone();
+    }
+
+    let mut changed = false;
+    for item in items {
+        if !existing_vec.iter().any(|v| v.as_str() == Some(item.as_str())) {
+            existing_vec.push(Value::String(item.clone()));
+            changed = true;
+        }
+    }
+    if !changed {
+        return Ok(false);
+    }
+
+    let root = root_of(path, &raw)?;
+    let parent_obj = servers_object(path, &root, parent_path)?;
+    let new_arr = Value::Array(existing_vec);
+    let input = to_cst(&new_arr);
+    match parent_obj.get(array_key) {
+        Some(prop) => prop.set_value(input),
+        None => {
+            parent_obj.append(array_key, input);
+        }
+    }
+    write(path, &root.to_string())?;
+    Ok(true)
+}
+
+/// Remove `items` from the JSON array at `parent_path.<array_key>` if present.
+pub fn remove_string_array_items(
+    path: &Path,
+    parent_path: &[&str],
+    array_key: &str,
+    items: &[String],
+) -> Result<bool> {
+    if !path.exists() {
+        return Ok(false);
+    }
+    let root_map = read_root_object(path)?;
+    let mut cur = &root_map;
+    for k in parent_path {
+        let Some(next) = cur.get(*k).and_then(Value::as_object) else {
+            return Ok(false);
+        };
+        cur = next;
+    }
+    let Some(arr) = cur.get(array_key).and_then(Value::as_array) else {
+        return Ok(false);
+    };
+    let filtered: Vec<Value> = arr
+        .iter()
+        .filter(|v| {
+            v.as_str()
+                .map(|s| !items.iter().any(|rem| rem == s))
+                .unwrap_or(true)
+        })
+        .cloned()
+        .collect();
+    if filtered.len() == arr.len() {
+        return Ok(false);
+    }
+
+    let raw = read_if_present(path)?.unwrap_or_default();
+    let root = root_of(path, &raw)?;
+    let parent_obj = servers_object(path, &root, parent_path)?;
+    let input = to_cst(&Value::Array(filtered));
+    if let Some(prop) = parent_obj.get(array_key) {
+        prop.set_value(input);
+        write(path, &root.to_string())?;
+        return Ok(true);
+    }
+    Ok(false)
 }
 
 fn write(path: &Path, text: &str) -> Result<()> {

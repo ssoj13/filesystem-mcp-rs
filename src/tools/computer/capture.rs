@@ -102,8 +102,8 @@ pub fn monitors() -> anyhow::Result<Vec<MonInfo>> {
     Ok(out)
 }
 
-/// Capture `target` to a PNG; returns path + dhash + rect.
-pub fn capture(target: CapTarget) -> anyhow::Result<CapResult> {
+/// Capture `target` into memory without writing a PNG file to disk.
+pub fn capture_in_memory(target: CapTarget) -> anyhow::Result<(RgbaImage, Rect)> {
     if let CapTarget::Win { win: id } = target {
         let wins = xcap::Window::all().map_err(|e| anyhow::anyhow!("enum windows: {e}"))?;
         let w = wins
@@ -119,7 +119,7 @@ pub fn capture(target: CapTarget) -> anyhow::Result<CapResult> {
             w.width().unwrap_or(0),
             w.height().unwrap_or(0),
         );
-        return save(img, rect);
+        return Ok((img, rect));
     }
     // Monitor / Rect / Cursor: resolve a rect, then monitor-crop.
     let (vx, vy, vw, vh) = super::driver::virtual_screen()?;
@@ -153,15 +153,26 @@ pub fn capture(target: CapTarget) -> anyhow::Result<CapResult> {
     let my = mon.y().unwrap_or(0);
     let mw = mon.width().unwrap_or(0);
     let mh = mon.height().unwrap_or(0);
+    let mon_bounds = Rect::new(mx, my, mw, mh);
+    let rect = rect
+        .clamp_into(&mon_bounds)
+        .ok_or_else(|| anyhow::anyhow!("rect {rect:?} outside monitor {mw}x{mh} at {mx},{my}"))?;
     let ox = (rect.x - mx).max(0) as u32;
     let oy = (rect.y - my).max(0) as u32;
-    if ox + rect.w > mw || oy + rect.h > mh {
-        return Err(anyhow::anyhow!(
-            "rect {rect:?} exceeds monitor {mw}x{mh} at {mx},{my}"
-        ));
-    }
     let crop = image::imageops::crop_imm(&img, ox, oy, rect.w, rect.h).to_image();
-    save(crop, rect)
+    Ok((crop, rect))
+}
+
+/// Capture `target` and return only its 64-bit dhash (zero disk I/O).
+pub fn capture_hash(target: CapTarget) -> anyhow::Result<u64> {
+    let (img, _) = capture_in_memory(target)?;
+    Ok(dhash64(&img))
+}
+
+/// Capture `target` to a PNG; returns path + dhash + rect.
+pub fn capture(target: CapTarget) -> anyhow::Result<CapResult> {
+    let (img, rect) = capture_in_memory(target)?;
+    save(img, rect)
 }
 
 /// Monitor containing the rect's center (primary fallback with explicit error).
@@ -199,8 +210,11 @@ fn cursor_rect(size: u32) -> anyhow::Result<Rect> {
 /// rather than falling back to the OS temp directory, so a capture never lands somewhere the
 /// operator cannot find and the retention sweep does not reach.
 fn save(img: RgbaImage, rect: Rect) -> anyhow::Result<CapResult> {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static CAPTURE_SEQ: AtomicU64 = AtomicU64::new(0);
+    let seq = CAPTURE_SEQ.fetch_add(1, Ordering::Relaxed);
     let dir = crate::core::paths::sub_dir(crate::core::paths::SubDir::Tmp)?;
-    let path = dir.join(format!("capture-{}-{}.png", now_ms(), std::process::id()));
+    let path = dir.join(format!("capture-{}-{}-{}.png", now_ms(), std::process::id(), seq));
     img.save_with_format(&path, image::ImageFormat::Png)?;
     Ok(CapResult {
         path: path.display().to_string(),

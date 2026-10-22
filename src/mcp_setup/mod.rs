@@ -55,6 +55,7 @@
 //! because the vendored files address what was their own crate root and is now this module. The
 //! upstream `cli` cargo feature is dropped — this host always builds the CLI.
 
+mod agent_cli;
 mod backup;
 mod json_client;
 mod json_merge;
@@ -69,6 +70,7 @@ pub mod error;
 pub mod hints;
 pub mod host;
 pub mod marked_md;
+pub mod plugin;
 pub mod types;
 
 pub mod cli;
@@ -82,7 +84,8 @@ pub use error::{Result, SetupError};
 pub use host::{HostSpec, install, status, uninstall};
 pub use json_client::JsonClient;
 pub use json_merge::EntryStyle;
-pub use toml_client::TomlClient;
+pub use plugin::{PluginCli, PluginSpec};
+pub use toml_client::{TomlClient, TomlStyle};
 pub use types::{
     ApplyReport, HintsConfig, INSTALL_ID_ENV_KEY, InstallPlan, RemoveReport, Scope, SetupContext,
     StatusReport, StdioMcpEntry,

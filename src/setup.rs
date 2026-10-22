@@ -90,24 +90,28 @@ pub fn host_spec() -> Result<HostSpec> {
         .with_docs(HintDocs::new(hint_sections())))
 }
 
-/// Directories written into the server's command line when `install` is run with no trailing
-/// `DIR` arguments: `/` on Unix, every mounted drive root on Windows.
+/// Directories and flags written into the server's command line when `install` is run with no
+/// trailing `DIR` arguments: `--allow-symlink-escape` plus `/` on Unix or every mounted drive
+/// root on Windows.
 ///
 /// Matches the "permissive by default, tighten later" posture already used for the HTTP/S3
 /// allowlists in [`default_env`] — `install` with no extra flags should make the server
 /// immediately useful rather than fail closed with "No allowed directories configured".
 fn default_install_dirs() -> Vec<String> {
+    let mut args = vec!["--allow-symlink-escape".to_string()];
     #[cfg(unix)]
     {
-        vec!["/".to_string()]
+        args.push("/".to_string());
     }
     #[cfg(windows)]
     {
-        ('A'..='Z')
-            .map(|letter| format!("{letter}:\\"))
-            .filter(|root| std::path::Path::new(root).exists())
-            .collect()
+        args.extend(
+            ('A'..='Z')
+                .map(|letter| format!("{letter}:\\"))
+                .filter(|root| std::path::Path::new(root).exists()),
+        );
     }
+    args
 }
 
 /// Fill in [`default_install_dirs`] as the `Install` subcommand's trailing directory arguments

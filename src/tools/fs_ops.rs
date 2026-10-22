@@ -186,29 +186,96 @@ impl TextFile {
     }
 }
 
-/// Return first N lines (encoding-safe).
+/// Return first N lines (encoding-safe, bounded memory on huge files).
 pub async fn head(path: &Path, lines: usize) -> Result<String> {
+    use tokio::io::AsyncReadExt;
+
+    let mut file = fs::File::open(path).await?;
     if lines == 0 {
-        fs::File::open(path).await?;
         return Ok(String::new());
     }
-    let bytes = fs::read(path).await?;
-    let content = decode_bytes(&bytes);
+    let file_len = file.metadata().await.map(|m| m.len()).unwrap_or(0);
+    const STREAM_THRESHOLD: u64 = 2 * 1024 * 1024;
+    if file_len <= STREAM_THRESHOLD {
+        let mut bytes = Vec::with_capacity(file_len as usize);
+        file.read_to_end(&mut bytes).await?;
+        let content = decode_bytes(&bytes);
+        let result: Vec<&str> = content.lines().take(lines).collect();
+        return Ok(result.join("\n"));
+    }
+
+    let mut buf = Vec::with_capacity(64 * 1024);
+    let mut chunk = vec![0u8; 64 * 1024];
+    let mut newline_count = 0usize;
+    loop {
+        let n = file.read(&mut chunk).await?;
+        if n == 0 {
+            break;
+        }
+        newline_count += chunk[..n].iter().filter(|&&b| b == b'\n').count();
+        buf.extend_from_slice(&chunk[..n]);
+        // UTF-16 files need 2-byte alignment / full decode if small, or enough newlines
+        let is_utf16 = buf.starts_with(&[0xFF, 0xFE]) || buf.starts_with(&[0xFE, 0xFF]);
+        if !is_utf16 && newline_count > lines {
+            break;
+        }
+        if is_utf16 && newline_count > lines * 2 {
+            break;
+        }
+    }
+    // Trim trailing incomplete UTF-8 sequence if we stopped mid-file
+    while !buf.is_empty() && (buf[buf.len() - 1] & 0xC0) == 0x80 {
+        buf.pop();
+    }
+    if let Some(&last) = buf.last()
+        && last >= 0xC0
+    {
+        buf.pop();
+    }
+    let content = decode_bytes(&buf);
     let result: Vec<&str> = content.lines().take(lines).collect();
     Ok(result.join("\n"))
 }
 
-/// Return last N lines (encoding-safe).
+/// Return last N lines (encoding-safe, bounded memory on huge files).
 pub async fn tail(path: &Path, lines: usize) -> Result<String> {
+    use tokio::io::{AsyncReadExt, AsyncSeekExt};
+
+    let mut file = fs::File::open(path).await?;
     if lines == 0 {
-        fs::File::open(path).await?;
         return Ok(String::new());
     }
-    let bytes = fs::read(path).await?;
-    let content = decode_bytes(&bytes);
-    let all_lines: Vec<&str> = content.lines().collect();
-    let start = all_lines.len().saturating_sub(lines);
-    Ok(all_lines[start..].join("\n"))
+    let file_len = file.metadata().await.map(|m| m.len()).unwrap_or(0);
+    const STREAM_THRESHOLD: u64 = 2 * 1024 * 1024;
+    if file_len <= STREAM_THRESHOLD {
+        let mut bytes = Vec::with_capacity(file_len as usize);
+        file.read_to_end(&mut bytes).await?;
+        let content = decode_bytes(&bytes);
+        let all_lines: Vec<&str> = content.lines().collect();
+        let start = all_lines.len().saturating_sub(lines);
+        return Ok(all_lines[start..].join("\n"));
+    }
+
+    let mut window = ((lines.saturating_mul(256)) as u64).max(64 * 1024);
+    loop {
+        let start_pos = file_len.saturating_sub(window);
+        file.seek(std::io::SeekFrom::Start(start_pos)).await?;
+        let mut buf = Vec::with_capacity((file_len - start_pos) as usize);
+        file.read_to_end(&mut buf).await?;
+
+        let skip = if start_pos > 0 {
+            buf.iter().take_while(|&&b| (b & 0xC0) == 0x80).count()
+        } else {
+            0
+        };
+        let content = decode_bytes(&buf[skip..]);
+        let all_lines: Vec<&str> = content.lines().collect();
+        if start_pos == 0 || all_lines.len() > lines {
+            let start = all_lines.len().saturating_sub(lines);
+            return Ok(all_lines[start..].join("\n"));
+        }
+        window = window.saturating_mul(2);
+    }
 }
 
 #[cfg(test)]

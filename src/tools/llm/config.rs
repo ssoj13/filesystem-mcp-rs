@@ -612,7 +612,6 @@ fn write_config_file(path: &Path, config: &Config, keys: Option<&HashSet<String>
 
 pub fn load_config() -> Result<Config> {
     let mut config = Config::defaults();
-    config.apply_env_overrides();
 
     let path = config_path()?;
     if path.exists() {
@@ -639,6 +638,11 @@ pub fn load_config() -> Result<Config> {
             info!("config: invalid TOML, keeping existing file and using defaults");
         }
     }
+
+    // Apply environment overrides AFTER reading/writing the TOML file so:
+    // 1. Environment variables take precedence over TOML values.
+    // 2. Secret API keys from the environment are never persisted to disk.
+    config.apply_env_overrides();
 
     if config.provider.eq_ignore_ascii_case("openai")
         && config.big_model == "gemini-3-pro-preview"

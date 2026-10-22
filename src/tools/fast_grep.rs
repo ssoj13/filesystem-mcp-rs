@@ -763,7 +763,11 @@ fn fancy_grep_blocking(
                         let line_idx = line_index_for_offset(&line_starts, m.start());
                         hits.push(line_idx);
                         cursor = if m.end() == m.start() {
-                            m.end() + 1
+                            m.end()
+                                + text
+                                    .get(m.end()..)
+                                    .and_then(|s| s.chars().next())
+                                    .map_or(1, char::len_utf8)
                         } else {
                             m.end()
                         };

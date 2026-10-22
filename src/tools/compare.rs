@@ -174,11 +174,23 @@ pub async fn compare_files(
     let mut diff_bytes1: Vec<u8> = Vec::new();
     let mut diff_bytes2: Vec<u8> = Vec::new();
 
+    async fn read_chunk_full(file: &mut File, buf: &mut [u8]) -> Result<usize> {
+        let mut total = 0;
+        while total < buf.len() {
+            let n = file.read(&mut buf[total..]).await?;
+            if n == 0 {
+                break;
+            }
+            total += n;
+        }
+        Ok(total)
+    }
+
     while bytes_compared < compare_len {
         let to_read = ((compare_len - bytes_compared) as usize).min(CHUNK_SIZE);
 
-        let n1 = file1.read(&mut buf1[..to_read]).await?;
-        let n2 = file2.read(&mut buf2[..to_read]).await?;
+        let n1 = read_chunk_full(&mut file1, &mut buf1[..to_read]).await?;
+        let n2 = read_chunk_full(&mut file2, &mut buf2[..to_read]).await?;
 
         if n1 == 0 && n2 == 0 {
             break;

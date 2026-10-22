@@ -510,6 +510,7 @@ pub fn type_text(
             return Err(anyhow::Error::new(CtlError::FocusFailed { hwnd: cur.hwnd })
                 .context("paste refused: focus changed before typing"));
         }
+        let _clip_guard = super::CLIP_MTX.lock().expect("clipboard mutex poisoned");
         let mut cb = arboard::Clipboard::new().context("open clipboard")?;
         // Juggling: snapshot the old content in full (text OR image) so the
         // paste can be undone. Non-text-only snapshots keep the clipboard

@@ -1,14 +1,15 @@
-//! The engine behind TOML-config agents (Codex, Grok Build).
+//! The engine behind TOML-config agents (Codex, Grok Build, Mistral Vibe).
 //!
-//! Both keep servers in `[mcp_servers.<key>]` with `command` / `args` / `env`. The only real
-//! difference is the file path and whether the agent ships a CLI that owns its own registry —
-//! Codex does (`codex mcp add`), Grok does not. So the agent is data; this file is the logic.
+//! Codex and Grok keep servers in `[mcp_servers.<key>]` with `command` / `args` / `env`.
+//! Mistral Vibe keeps servers in `[[mcp_servers]]` array of tables with `name` / `transport` /
+//! `command` / `args` / `env`.
 
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::Stdio;
 
-use toml_edit::{Array, DocumentMut, Item, Table, Value as TomlVal};
+use toml_edit::{Array, ArrayOfTables, DocumentMut, Item, Table, Value as TomlVal};
 
+use crate::mcp_setup::agent_cli::agent_command;
 use crate::mcp_setup::backup::backup_file_if_exists;
 use crate::mcp_setup::client::{ContextFile, McpClient};
 use crate::mcp_setup::error::{Result, SetupError};
@@ -24,12 +25,22 @@ use crate::mcp_setup::types::{
 /// written deterministically).
 pub const FORCE_TOML_ENV: &str = "MCP_SETUP_FORCE_TOML";
 
+/// How a TOML client structures its MCP server entries.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum TomlStyle {
+    /// `[mcp_servers.<key>]` table map (Codex, Grok Build).
+    #[default]
+    TableMap,
+    /// `[[mcp_servers]]` array of tables with `name = "<key>"` and `transport = "stdio"` (Mistral Vibe).
+    ArrayOfTables,
+}
+
 /// A TOML-config agent, described declaratively.
 pub struct TomlClient {
     pub id: &'static str,
     pub label: &'static str,
     pub config_hint: &'static str,
-    /// Table holding the servers, e.g. `mcp_servers`.
+    /// Table or array-of-tables key holding the servers, e.g. `mcp_servers`.
     pub parent_key: &'static str,
     pub user_config: fn(&Path) -> PathBuf,
     pub project_config: fn(&Path) -> PathBuf,
@@ -39,6 +50,7 @@ pub struct TomlClient {
     /// The agent's own MCP CLI (`codex mcp add …`), preferred in user scope so the agent's
     /// internal registry stays in sync. `None` => always write the file ourselves.
     pub cli: Option<&'static str>,
+    pub style: TomlStyle,
 }
 
 // --- the agent's own CLI --------------------------------------------------------------------
@@ -50,17 +62,6 @@ enum CliOutcome {
     Succeeded,
     FailedOutput(std::process::Output),
     FailedSpawn(std::io::Error),
-}
-
-fn agent_command(program: &str) -> Command {
-    // On Windows these agents ship as `.cmd` shims, which CreateProcess cannot exec directly.
-    if cfg!(windows) {
-        let mut c = Command::new("cmd");
-        c.arg("/C").arg(program);
-        c
-    } else {
-        Command::new(program)
-    }
 }
 
 fn run_cli_add(program: Option<&str>, plan: &InstallPlan) -> CliOutcome {
@@ -173,18 +174,37 @@ fn parse_doc(client: &TomlClient, path: &Path, raw: &str) -> Result<DocumentMut>
     })
 }
 
-fn ensure_key_available(client: &TomlClient, doc: &DocumentMut, plan: &InstallPlan) -> Result<()> {
-    let existing = doc
-        .get(client.parent_key)
-        .and_then(Item::as_table)
-        .and_then(|t| t.get(&plan.mcp_server_key))
-        .and_then(Item::as_table);
-    let Some(entry) = existing else {
+fn find_entry<'a>(client: &TomlClient, doc: &'a DocumentMut, key: &str) -> Option<&'a Table> {
+    match client.style {
+        TomlStyle::TableMap => doc
+            .get(client.parent_key)
+            .and_then(Item::as_table)
+            .and_then(|t| t.get(key))
+            .and_then(Item::as_table),
+        TomlStyle::ArrayOfTables => doc
+            .get(client.parent_key)
+            .and_then(Item::as_array_of_tables)
+            .and_then(|aot| {
+                aot.iter()
+                    .find(|t| t.get("name").and_then(Item::as_str) == Some(key))
+            }),
+    }
+}
+
+fn ensure_key_available(
+    client: &TomlClient,
+    doc: &DocumentMut,
+    plan: &InstallPlan,
+    cli_succeeded: bool,
+) -> Result<()> {
+    let Some(entry) = find_entry(client, doc, &plan.mcp_server_key) else {
         return Ok(());
     };
     match read_install_id(entry) {
         Some(id) if is_ours(&id, &plan.mcp_server_key) => Ok(()),
-        // Explicit "this key is mine now"; `upsert_toml` still backs the file up first.
+        // If `codex mcp add` just created/updated this key, it stripped env/MCP_SETUP_INSTALL_ID,
+        // so allow `upsert_toml` to enrich the entry with our `env` and `MCP_SETUP_INSTALL_ID`.
+        None if cli_succeeded => Ok(()),
         _ if plan.force => Ok(()),
         found => Err(SetupError::McpKeyConflict {
             key: plan.mcp_server_key.clone(),
@@ -194,20 +214,22 @@ fn ensure_key_available(client: &TomlClient, doc: &DocumentMut, plan: &InstallPl
     }
 }
 
-fn upsert_toml(client: &TomlClient, path: &Path, plan: &InstallPlan) -> Result<bool> {
-    let raw = if path.exists() {
-        std::fs::read_to_string(path).map_err(|e| SetupError::io(path.to_path_buf(), e))?
-    } else {
-        String::new()
-    };
-    let mut doc = if raw.trim().is_empty() {
-        DocumentMut::new()
-    } else {
-        parse_doc(client, path, &raw)?
-    };
-    ensure_key_available(client, &doc, plan)?;
-
+fn build_entry_table(client: &TomlClient, plan: &InstallPlan) -> Table {
     let mut entry = Table::new();
+    if matches!(client.style, TomlStyle::ArrayOfTables) {
+        entry.insert(
+            "name",
+            Item::Value(TomlVal::String(toml_edit::Formatted::new(
+                plan.mcp_server_key.clone(),
+            ))),
+        );
+        entry.insert(
+            "transport",
+            Item::Value(TomlVal::String(toml_edit::Formatted::new(
+                "stdio".to_string(),
+            ))),
+        );
+    }
     entry.insert(
         "command",
         Item::Value(TomlVal::String(toml_edit::Formatted::new(
@@ -234,29 +256,93 @@ fn upsert_toml(client: &TomlClient, path: &Path, plan: &InstallPlan) -> Result<b
         );
     }
     entry.insert("env", Item::Table(env));
+    entry
+}
 
-    let servers = doc
-        .entry(client.parent_key)
-        .or_insert(Item::Table(Table::new()))
-        .as_table_mut()
-        .ok_or_else(|| {
-            SetupError::InvalidBundle(format!(
-                "{}: `{}` is not a table",
-                client.label, client.parent_key
-            ))
-        })?;
-
-    let changed = match servers.get(&plan.mcp_server_key) {
-        Some(prev) => prev.to_string() != Item::Table(entry.clone()).to_string(),
-        None => true,
+fn upsert_toml(
+    client: &TomlClient,
+    path: &Path,
+    plan: &InstallPlan,
+    cli_succeeded: bool,
+    pre_cli_backup: Option<PathBuf>,
+) -> Result<Written> {
+    let raw = if path.exists() {
+        std::fs::read_to_string(path).map_err(|e| SetupError::io(path.to_path_buf(), e))?
+    } else {
+        String::new()
     };
-    servers.insert(&plan.mcp_server_key, Item::Table(entry));
+    let mut doc = if raw.trim().is_empty() {
+        DocumentMut::new()
+    } else {
+        parse_doc(client, path, &raw)?
+    };
+    ensure_key_available(client, &doc, plan, cli_succeeded)?;
+
+    let entry = build_entry_table(client, plan);
+
+    match client.style {
+        TomlStyle::TableMap => {
+            let servers = doc
+                .entry(client.parent_key)
+                .or_insert(Item::Table(Table::new()))
+                .as_table_mut()
+                .ok_or_else(|| {
+                    SetupError::InvalidBundle(format!(
+                        "{}: `{}` is not a table",
+                        client.label, client.parent_key
+                    ))
+                })?;
+            servers.insert(&plan.mcp_server_key, Item::Table(entry));
+        }
+        TomlStyle::ArrayOfTables => {
+            if doc
+                .get(client.parent_key)
+                .and_then(Item::as_array)
+                .is_some_and(Array::is_empty)
+            {
+                doc.insert(client.parent_key, Item::ArrayOfTables(ArrayOfTables::new()));
+            }
+            let aot = doc
+                .entry(client.parent_key)
+                .or_insert(Item::ArrayOfTables(ArrayOfTables::new()))
+                .as_array_of_tables_mut()
+                .ok_or_else(|| {
+                    SetupError::InvalidBundle(format!(
+                        "{}: `{}` is not an array of tables",
+                        client.label, client.parent_key
+                    ))
+                })?;
+            if let Some(existing) = aot
+                .iter_mut()
+                .find(|t| t.get("name").and_then(Item::as_str) == Some(plan.mcp_server_key.as_str()))
+            {
+                *existing = entry;
+            } else {
+                aot.push(entry);
+            }
+        }
+    }
+
+    let rendered = doc.to_string();
+    if rendered == raw && !cli_succeeded {
+        return Ok(Written::Unchanged);
+    }
 
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent).map_err(|e| SetupError::io(parent.to_path_buf(), e))?;
     }
-    std::fs::write(path, doc.to_string()).map_err(|e| SetupError::io(path.to_path_buf(), e))?;
-    Ok(changed)
+    let backup = match pre_cli_backup {
+        Some(b) => Some(b),
+        None => backup_file_if_exists(path)?,
+    };
+    std::fs::write(path, rendered).map_err(|e| SetupError::io(path.to_path_buf(), e))?;
+    Ok(Written::Changed(backup))
+}
+
+/// What `upsert_toml` did, and the backup it took if it wrote.
+enum Written {
+    Unchanged,
+    Changed(Option<PathBuf>),
 }
 
 /// `trust_manifest` allows removing an entry written by the agent's own CLI (which strips our env
@@ -273,10 +359,7 @@ fn remove_toml(
     let raw = std::fs::read_to_string(path).map_err(|e| SetupError::io(path.to_path_buf(), e))?;
     let mut doc = parse_doc(client, path, &raw)?;
 
-    let Some(servers) = doc.get_mut(client.parent_key).and_then(Item::as_table_mut) else {
-        return Ok(false);
-    };
-    let Some(entry) = servers.get(&plan.mcp_server_key).and_then(Item::as_table) else {
+    let Some(entry) = find_entry(client, &doc, &plan.mcp_server_key) else {
         return Ok(false);
     };
 
@@ -297,7 +380,30 @@ fn remove_toml(
         }
     }
 
-    servers.remove(&plan.mcp_server_key);
+    match client.style {
+        TomlStyle::TableMap => {
+            if let Some(servers) = doc.get_mut(client.parent_key).and_then(Item::as_table_mut) {
+                servers.remove(&plan.mcp_server_key);
+            }
+        }
+        TomlStyle::ArrayOfTables => {
+            if let Some(aot) = doc
+                .get_mut(client.parent_key)
+                .and_then(Item::as_array_of_tables_mut)
+            {
+                let mut idx_to_remove = None;
+                for (i, t) in aot.iter().enumerate() {
+                    if t.get("name").and_then(Item::as_str) == Some(plan.mcp_server_key.as_str()) {
+                        idx_to_remove = Some(i);
+                        break;
+                    }
+                }
+                if let Some(idx) = idx_to_remove {
+                    aot.remove(idx);
+                }
+            }
+        }
+    }
     std::fs::write(path, doc.to_string()).map_err(|e| SetupError::io(path.to_path_buf(), e))?;
     Ok(true)
 }
@@ -317,11 +423,7 @@ fn read_toml_status(
         return Ok((false, None, None));
     }
     let doc = parse_doc(client, path, &raw)?;
-    let entry = doc
-        .get(client.parent_key)
-        .and_then(Item::as_table)
-        .and_then(|t| t.get(key))
-        .and_then(Item::as_table);
+    let entry = find_entry(client, &doc, key);
     let command = entry
         .and_then(|t| t.get("command"))
         .and_then(Item::as_str)
@@ -394,22 +496,38 @@ impl McpClient for TomlClient {
         let manifest_path =
             InstallManifest::manifest_path_for(home, self.id, &scope_slug, &plan.mcp_server_key);
 
+        // Pre-validate key availability before running `codex mcp add` so we never clobber a
+        // foreign entry through the CLI when `--force` is false.
+        if settings_path.exists() {
+            let raw = std::fs::read_to_string(&settings_path)
+                .map_err(|e| SetupError::io(settings_path.clone(), e))?;
+            if !raw.trim().is_empty() {
+                let doc = parse_doc(self, &settings_path, &raw)?;
+                ensure_key_available(self, &doc, plan, false)?;
+            }
+        }
+
+        let pre_cli_backup = if matches!(scope, Scope::User) && self.cli.is_some() && std::env::var_os(FORCE_TOML_ENV).is_none() {
+            backup_file_if_exists(&settings_path)?
+        } else {
+            None
+        };
+
         // The agent's own CLI only owns the user-scope registry; project configs we always write.
         let cli_outcome = match scope {
             Scope::User => run_cli_add(self.cli, plan),
             Scope::Project(_) => CliOutcome::NoCli,
         };
-        let (changed, backup_path, note) = match cli_outcome {
-            CliOutcome::Succeeded => (true, None, None),
-            other => {
-                let backup_path = backup_file_if_exists(&settings_path)?;
-                let note = fallback_note(self, &other, &settings_path);
-                match upsert_toml(self, &settings_path, plan) {
-                    Ok(changed) => (changed, backup_path, note),
-                    Err(e) => return Err(apply_error(self, e, &other)),
-                }
-            }
-        };
+        let cli_succeeded = matches!(cli_outcome, CliOutcome::Succeeded);
+        let note = fallback_note(self, &cli_outcome, &settings_path);
+        // Always run `upsert_toml` even after `codex mcp add` succeeds so that `env` variables
+        // and `MCP_SETUP_INSTALL_ID` are preserved in `config.toml`!
+        let (changed, backup_path) =
+            match upsert_toml(self, &settings_path, plan, cli_succeeded, pre_cli_backup) {
+                Ok(Written::Unchanged) => (false, None),
+                Ok(Written::Changed(backup)) => (true, backup),
+                Err(e) => return Err(apply_error(self, e, &cli_outcome)),
+            };
 
         let mut manifest = InstallManifest {
             schema: MANIFEST_SCHEMA,
@@ -463,18 +581,24 @@ impl McpClient for TomlClient {
             m.ensure_matches(&settings_path, plan)?;
         }
 
+        // Take the backup BEFORE `run_cli_remove` mutates `settings_path`.
+        let backup_path = backup_file_if_exists(&settings_path)?;
+        let had_entry_before_cli = read_toml_status(self, &settings_path, &plan.mcp_server_key)
+            .map(|(present, _, _)| present)
+            .unwrap_or(false);
+
         if matches!(scope, Scope::User) {
             run_cli_remove(self.cli, &plan.mcp_server_key);
         }
 
-        let backup_path = backup_file_if_exists(&settings_path)?;
-        let removed = remove_toml(self, &settings_path, plan, manifest.is_some())?;
+        let removed_by_toml = remove_toml(self, &settings_path, plan, manifest.is_some())?;
+        let removed = removed_by_toml || had_entry_before_cli;
 
         let mut report = RemoveReport {
             client: self.id,
             settings_path,
             manifest_path,
-            backup_path,
+            backup_path: if removed { backup_path } else { None },
             removed,
             ..RemoveReport::default()
         };

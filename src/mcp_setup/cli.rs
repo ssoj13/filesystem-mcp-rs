@@ -13,7 +13,7 @@ use crate::mcp_setup::client::McpClient;
 use crate::mcp_setup::clients;
 use crate::mcp_setup::error::SetupError;
 use crate::mcp_setup::host::{self, HostSpec};
-use crate::mcp_setup::types::{ApplyReport, RemoveReport, Scope, SetupContext, StatusReport};
+use crate::mcp_setup::types::{ApplyReport, Channel, RemoveReport, Scope, SetupContext, StatusReport};
 
 type CliResult<T> = std::result::Result<T, Box<dyn std::error::Error>>;
 
@@ -248,6 +248,12 @@ fn skip_or_fail(label: &str, e: SetupError) -> Row {
 
 fn apply_row(label: &str, res: crate::mcp_setup::error::Result<ApplyReport>) -> Row {
     match res {
+        Ok(r) if r.channel == Channel::Plugin => Row {
+            target: label.to_string(),
+            status: "ok".to_string(),
+            ok: true,
+            detail: r.note.unwrap_or_else(|| "plugin installed".to_string()),
+        },
         Ok(r) => Row {
             target: label.to_string(),
             status: if r.changed { "ok" } else { "unchanged" }.to_string(),
@@ -272,6 +278,12 @@ fn apply_row(label: &str, res: crate::mcp_setup::error::Result<ApplyReport>) -> 
 
 fn remove_row(label: &str, res: crate::mcp_setup::error::Result<RemoveReport>) -> Row {
     match res {
+        Ok(r) if r.channel == Channel::Plugin => Row {
+            target: label.to_string(),
+            status: if r.removed { "removed" } else { "not installed" }.to_string(),
+            ok: true,
+            detail: "plugin, via the host's own plugin manager".to_string(),
+        },
         Ok(r) => Row {
             target: label.to_string(),
             status: if r.removed || r.hints_changed {
@@ -297,6 +309,20 @@ fn remove_row(label: &str, res: crate::mcp_setup::error::Result<RemoveReport>) -
 
 fn status_row(label: &str, res: crate::mcp_setup::error::Result<StatusReport>) -> Row {
     match res {
+        Ok(r) if r.channel == Channel::Plugin => Row {
+            target: label.to_string(),
+            // A plugin manager that could not be run says nothing about whether
+            // the plugin is there, so the host reads as undetected rather than
+            // as a confident "not installed".
+            status: match (r.host_detected, r.installed) {
+                (false, _) => "not detected",
+                (true, true) => "installed",
+                (true, false) => "not installed",
+            }
+            .to_string(),
+            ok: true,
+            detail: r.note.unwrap_or_else(|| "plugin".to_string()),
+        },
         Ok(r) => {
             // An entry we own whose command no longer resolves is *broken*, not installed:
             // the agent will fail to spawn it. Reported as not-ok so a sweep's exit code and a

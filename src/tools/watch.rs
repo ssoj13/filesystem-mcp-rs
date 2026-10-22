@@ -117,22 +117,47 @@ pub async fn tail_file(path: &Path, params: TailParams) -> Result<TailResult> {
         return Ok(result);
     }
 
-    // Lines mode: read file and take last N lines
-    let mut buf = Vec::new();
-    file.read_to_end(&mut buf).await?;
-    let full_content = decode_bytes(&buf);
-
-    let all_lines: Vec<&str> = full_content.lines().collect();
-    let total_lines = all_lines.len();
-    let start_line = total_lines.saturating_sub(params.lines);
-    let content = all_lines[start_line..].join("\n");
-    let lines_returned = all_lines.len() - start_line;
+    // Lines mode: read from end in growing windows for large files to avoid OOM
+    const STREAM_THRESHOLD: u64 = 2 * 1024 * 1024;
+    let (content, lines_returned, truncated) = if file_size <= STREAM_THRESHOLD {
+        let mut buf = Vec::with_capacity(file_size as usize);
+        file.read_to_end(&mut buf).await?;
+        let full_content = decode_bytes(&buf);
+        let all_lines: Vec<&str> = full_content.lines().collect();
+        let total_lines = all_lines.len();
+        let start_line = total_lines.saturating_sub(params.lines);
+        let content = all_lines[start_line..].join("\n");
+        let lines_returned = all_lines.len() - start_line;
+        (content, lines_returned, start_line > 0)
+    } else {
+        let mut window = ((params.lines.saturating_mul(256)) as u64).max(64 * 1024);
+        loop {
+            let start_pos = file_size.saturating_sub(window);
+            file.seek(std::io::SeekFrom::Start(start_pos)).await?;
+            let mut buf = Vec::with_capacity((file_size - start_pos) as usize);
+            file.read_to_end(&mut buf).await?;
+            let skip = if start_pos > 0 {
+                buf.iter().take_while(|&&b| (b & 0xC0) == 0x80).count()
+            } else {
+                0
+            };
+            let chunk_content = decode_bytes(&buf[skip..]);
+            let all_lines: Vec<&str> = chunk_content.lines().collect();
+            if start_pos == 0 || all_lines.len() > params.lines {
+                let start_line = all_lines.len().saturating_sub(params.lines);
+                let content = all_lines[start_line..].join("\n");
+                let lines_returned = all_lines.len() - start_line;
+                break (content, lines_returned, start_pos > 0 || start_line > 0);
+            }
+            window = window.saturating_mul(2);
+        }
+    };
 
     let result = TailResult {
         content,
         lines_returned,
         file_size,
-        truncated: start_line > 0,
+        truncated,
         follow_content: None,
         follow_lines: None,
     };

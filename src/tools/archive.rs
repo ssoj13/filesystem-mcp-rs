@@ -133,7 +133,10 @@ fn extract_zip(
             continue;
         }
 
-        let out_path = destination.join(&name);
+        let Some(rel_path) = entry.enclosed_name().map(|p| p.to_path_buf()) else {
+            continue;
+        };
+        let out_path = destination.join(&rel_path);
 
         // Prevent path traversal
         if !out_path.starts_with(destination) {
@@ -208,6 +211,18 @@ fn extract_tar_from_reader<R: Read>(
         if let Some(filter) = files_filter
             && !filter.iter().any(|f| name.starts_with(f) || name == *f)
         {
+            continue;
+        }
+
+        // Reject any path containing `..`, root `/`, or drive prefixes (Zip-Slip defense)
+        if path.components().any(|c| {
+            matches!(
+                c,
+                std::path::Component::ParentDir
+                    | std::path::Component::RootDir
+                    | std::path::Component::Prefix(_)
+            )
+        }) {
             continue;
         }
 

@@ -47,8 +47,22 @@ impl HintDocs {
             }
             out.push_str(section.trim());
         }
+        // The footer names the server, not the client, and that is deliberate.
+        //
+        // Several agents share one context file - `AGENTS.md` serves Codex,
+        // Grok, Cursor, OpenCode, Amp, Kiro and Roo - while the managed block
+        // is keyed by (server, install id) alone. A footer that named the
+        // client therefore made every one of them rewrite the block the
+        // previous one had just written: an install touching three such
+        // agents left three backups behind and reported "changed" forever,
+        // with the footer naming whichever client ran last.
+        //
+        // Where the server is configured is a question `status` answers
+        // exactly, per client. A host that still wants client-specific text
+        // can put {{CLIENT_LABEL}} or {{CLIENT_CONFIG}} in its own sections,
+        // and is then opting into that churn knowingly.
         out.push_str(&format!(
-            "\n\n---\n\nManaged MCP server key: `{server_key}` ({client_config})."
+            "\n\n---\n\nManaged MCP server key: `{server_key}`."
         ));
         subst(&out, server_key, client_label, client_config)
     }
@@ -78,5 +92,24 @@ mod tests {
         assert!(out.contains("B: Claude Code"));
         assert!(out.contains("---"));
         assert!(out.contains("Managed MCP server key: `srv`"));
+    }
+
+    /// Two clients sharing a context file must render the same bytes, or they
+    /// overwrite each other's block on every install.
+    #[test]
+    fn the_body_does_not_depend_on_which_client_is_installing() {
+        let docs = HintDocs::new(["Use `note_append` to record something durable."]);
+        let codex = docs.render("srv", "Codex", "`mcp_servers` in `~/.codex/config.toml`");
+        let zed = docs.render("srv", "Zed", "`context_servers` in Zed's `settings.json`");
+        assert_eq!(codex, zed);
+    }
+
+    /// Unless the host asks for it, which is a deliberate opt-in.
+    #[test]
+    fn a_host_can_still_ask_for_client_specific_text() {
+        let docs = HintDocs::new(["Configured in {{CLIENT_CONFIG}} for {{CLIENT_LABEL}}."]);
+        let out = docs.render("srv", "Zed", "`context_servers`");
+        assert!(out.contains("for Zed"));
+        assert!(out.contains("`context_servers`"));
     }
 }

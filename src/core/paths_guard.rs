@@ -255,8 +255,8 @@ mod tests {
                 .iter()
                 .find(|(file, _)| *file == rel)
                 .map_or(&[], |(_, spellings)| *spellings);
-            let text = match std::fs::read_to_string(&path) {
-                Ok(text) => text,
+            let text = match std::fs::read(&path) {
+                Ok(bytes) => crate::tools::fs_ops::decode_bytes(&bytes),
                 Err(e) => {
                     offenders.push(format!("{rel}: cannot read, so cannot be cleared: {e}"));
                     continue;
@@ -420,8 +420,8 @@ mod tests {
                 .iter()
                 .find(|(file, _)| *file == rel)
                 .map_or(&[], |(_, spellings)| *spellings);
-            let text = match std::fs::read_to_string(&path) {
-                Ok(text) => text,
+            let text = match std::fs::read(&path) {
+                Ok(bytes) => crate::tools::fs_ops::decode_bytes(&bytes),
                 Err(e) => {
                     offenders.push(format!("{rel}: cannot read, so cannot be cleared: {e}"));
                     continue;

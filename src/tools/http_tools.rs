@@ -60,17 +60,18 @@ pub fn is_domain_allowed(host: &str, allowlist: &[String]) -> bool {
     if allowlist.is_empty() {
         return false;
     }
-    for entry in allowlist {
+    let host = host.trim().to_ascii_lowercase();
+    for raw_entry in allowlist {
+        let entry = raw_entry.trim().to_ascii_lowercase();
         if entry == "*" {
             return true;
         }
-        if entry.starts_with("*.") {
-            let suffix = &entry[1..];
-            if host.ends_with(suffix) {
+        if let Some(suffix) = entry.strip_prefix("*.") {
+            if host.ends_with(&format!(".{suffix}")) {
                 return true;
             }
         } else if entry.starts_with('.') {
-            if host.ends_with(entry) {
+            if host.ends_with(&entry) {
                 return true;
             }
         } else if host == entry {

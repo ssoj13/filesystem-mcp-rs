@@ -1,6 +1,6 @@
 //! The client registry.
 //!
-//! Every agent here is **data**: a `JsonClient` (JSON config) or a `TomlClient` (Codex, Grok).
+//! Every agent here is **data**: a `JsonClient` (JSON config) or a `TomlClient` (Codex, Grok, Vibe).
 //! Supporting a new agent means adding one const and listing it in [`all`] — no new logic.
 //!
 //! Config locations are derived from the user's home directory rather than looked up through the
@@ -11,18 +11,24 @@ use std::path::{Path, PathBuf};
 use crate::mcp_setup::client::{ContextFile, McpClient};
 use crate::mcp_setup::json_client::JsonClient;
 use crate::mcp_setup::json_merge::EntryStyle;
-use crate::mcp_setup::toml_client::TomlClient;
+use crate::mcp_setup::toml_client::{TomlClient, TomlStyle};
 
 /// Every built-in client, in the order they are shown and installed.
 pub fn all() -> Vec<&'static dyn McpClient> {
     vec![
-        // Agent CLIs
+        // Agent CLIs & IDEs
+        &ANTIGRAVITY,
         &CLAUDE_CODE,
         &CODEX,
         &GROK,
         &GEMINI,
         &QWEN,
+        &COPILOT,
+        &VIBE,
         &OPENCODE,
+        &KILO_CLI,
+        &AUGMENT,
+        &AMAZONQ,
         &AMP,
         &CRUSH,
         // Editors / IDEs
@@ -30,11 +36,14 @@ pub fn all() -> Vec<&'static dyn McpClient> {
         &VSCODE,
         &ZED,
         &WINDSURF,
+        &TRAE,
         &KIRO,
         &JUNIE,
-        // VS Code extensions
+        // VS Code / JetBrains extensions
         &CLINE,
         &ROO,
+        &KILOCODE,
+        &CONTINUE,
         // Desktop / terminal
         &CLAUDE_DESKTOP,
         &WARP,
@@ -53,7 +62,7 @@ pub fn ids() -> Vec<&'static str> {
 // --- platform paths -------------------------------------------------------------------------
 
 /// `%APPDATA%` on Windows, `~/Library/Application Support` on macOS, `~/.config` elsewhere.
-/// This is where GUI apps (Claude Desktop, VS Code, Zed) keep per-user settings.
+/// This is where GUI apps (Claude Desktop, VS Code, Zed, Trae) keep per-user settings.
 fn app_data(home: &Path) -> PathBuf {
     if cfg!(windows) {
         home.join("AppData").join("Roaming")
@@ -85,6 +94,30 @@ fn vscode_ext_dir(home: &Path, ext_id: &str) -> PathBuf {
         .join(ext_id)
         .join("settings")
 }
+
+// --- Google Antigravity ---------------------------------------------------------------------
+
+fn antigravity_dir(home: &Path) -> PathBuf {
+    home.join(".gemini").join("config")
+}
+
+/// Google Antigravity IDE & CLI: stores MCP servers in `~/.gemini/config/mcp_config.json`,
+/// global permission grants in `~/.gemini/config/config.json`, and user rules in `~/.gemini/GEMINI.md`.
+pub static ANTIGRAVITY: JsonClient = JsonClient {
+    id: "antigravity",
+    label: "Antigravity",
+    config_hint: "`mcpServers` in `~/.gemini/config/mcp_config.json`",
+    parent_path: &["mcpServers"],
+    user_config: Some(|home| antigravity_dir(home).join("mcp_config.json")),
+    project_config: Some(|root| root.join(".gemini").join("config").join("mcp_config.json")),
+    user_marker: antigravity_dir,
+    user_missing_hint: "~/.gemini/config missing",
+    context: ContextFile {
+        user: Some(|home| home.join(".gemini").join("GEMINI.md")),
+        project: Some(|root| root.join("AGENTS.md")),
+    },
+    entry: EntryStyle::Plain,
+};
 
 // --- Claude Code ----------------------------------------------------------------------------
 
@@ -148,6 +181,7 @@ pub static CODEX: TomlClient = TomlClient {
         project: Some(|root| root.join("AGENTS.md")),
     },
     cli: Some("codex"),
+    style: TomlStyle::TableMap,
 };
 
 // --- Grok Build (xAI) -----------------------------------------------------------------------
@@ -171,6 +205,30 @@ pub static GROK: TomlClient = TomlClient {
         project: Some(|root| root.join("AGENTS.md")),
     },
     cli: None,
+    style: TomlStyle::TableMap,
+};
+
+// --- Mistral Vibe ---------------------------------------------------------------------------
+
+fn vibe_dir(home: &Path) -> PathBuf {
+    home.join(".vibe")
+}
+
+pub static VIBE: TomlClient = TomlClient {
+    id: "vibe",
+    label: "Mistral Vibe",
+    config_hint: "`[[mcp_servers]]` in `~/.vibe/config.toml`",
+    parent_key: "mcp_servers",
+    user_config: |home| vibe_dir(home).join("config.toml"),
+    project_config: |root| root.join(".vibe").join("config.toml"),
+    user_marker: vibe_dir,
+    user_missing_hint: "~/.vibe missing",
+    context: ContextFile {
+        user: None,
+        project: Some(|root| root.join("AGENTS.md")),
+    },
+    cli: None,
+    style: TomlStyle::ArrayOfTables,
 };
 
 // --- Gemini CLI -----------------------------------------------------------------------------
@@ -217,6 +275,28 @@ pub static QWEN: JsonClient = JsonClient {
     entry: EntryStyle::Plain,
 };
 
+// --- GitHub Copilot CLI ---------------------------------------------------------------------
+
+fn copilot_dir(home: &Path) -> PathBuf {
+    home.join(".copilot")
+}
+
+pub static COPILOT: JsonClient = JsonClient {
+    id: "copilot",
+    label: "GitHub Copilot CLI",
+    config_hint: "`mcpServers` in `~/.copilot/mcp-config.json`",
+    parent_path: &["mcpServers"],
+    user_config: Some(|home| copilot_dir(home).join("mcp-config.json")),
+    project_config: Some(|root| root.join(".copilot").join("mcp-config.json")),
+    user_marker: copilot_dir,
+    user_missing_hint: "~/.copilot missing",
+    context: ContextFile {
+        user: None,
+        project: Some(|root| root.join("AGENTS.md")),
+    },
+    entry: EntryStyle::TypedLocalWithTools,
+};
+
 // --- OpenCode -------------------------------------------------------------------------------
 
 fn opencode_dir(home: &Path) -> PathBuf {
@@ -237,6 +317,72 @@ pub static OPENCODE: JsonClient = JsonClient {
         project: Some(|root| root.join("AGENTS.md")),
     },
     entry: EntryStyle::LocalCommandArray,
+};
+
+// --- Kilo CLI -------------------------------------------------------------------------------
+
+fn kilo_cli_dir(home: &Path) -> PathBuf {
+    home.join(".config").join("kilo")
+}
+
+pub static KILO_CLI: JsonClient = JsonClient {
+    id: "kilo",
+    label: "Kilo CLI",
+    config_hint: "`mcp.<key>` in `~/.config/kilo/kilo.jsonc`",
+    parent_path: &["mcp"],
+    user_config: Some(|home| kilo_cli_dir(home).join("kilo.jsonc")),
+    project_config: Some(|root| root.join("kilo.jsonc")),
+    user_marker: kilo_cli_dir,
+    user_missing_hint: "~/.config/kilo missing",
+    context: ContextFile {
+        user: Some(|home| kilo_cli_dir(home).join("AGENTS.md")),
+        project: Some(|root| root.join("AGENTS.md")),
+    },
+    entry: EntryStyle::LocalCommandArray,
+};
+
+// --- Augment Code (`auggie`) ----------------------------------------------------------------
+
+fn augment_dir(home: &Path) -> PathBuf {
+    home.join(".augment")
+}
+
+pub static AUGMENT: JsonClient = JsonClient {
+    id: "augment",
+    label: "Augment Code",
+    config_hint: "`mcpServers` in `~/.augment/settings.json`",
+    parent_path: &["mcpServers"],
+    user_config: Some(|home| augment_dir(home).join("settings.json")),
+    project_config: Some(|root| root.join(".augment").join("settings.json")),
+    user_marker: augment_dir,
+    user_missing_hint: "~/.augment missing",
+    context: ContextFile {
+        user: None,
+        project: Some(|root| root.join("AGENTS.md")),
+    },
+    entry: EntryStyle::Plain,
+};
+
+// --- Amazon Q Developer CLI -----------------------------------------------------------------
+
+fn amazonq_dir(home: &Path) -> PathBuf {
+    home.join(".aws").join("amazonq")
+}
+
+pub static AMAZONQ: JsonClient = JsonClient {
+    id: "amazonq",
+    label: "Amazon Q",
+    config_hint: "`mcpServers` in `~/.aws/amazonq/mcp.json`",
+    parent_path: &["mcpServers"],
+    user_config: Some(|home| amazonq_dir(home).join("mcp.json")),
+    project_config: Some(|root| root.join(".amazonq").join("mcp.json")),
+    user_marker: amazonq_dir,
+    user_missing_hint: "~/.aws/amazonq missing",
+    context: ContextFile {
+        user: None,
+        project: Some(|root| root.join("AGENTS.md")),
+    },
+    entry: EntryStyle::Plain,
 };
 
 // --- Amp (Sourcegraph) ----------------------------------------------------------------------
@@ -323,7 +469,7 @@ pub static VSCODE: JsonClient = JsonClient {
     entry: EntryStyle::TypedStdio,
 };
 
-// --- Cline / Roo Code (VS Code extensions) --------------------------------------------------
+// --- Cline / Roo Code / Kilo Code / Continue (IDE extensions) -------------------------------
 
 fn cline_dir(home: &Path) -> PathBuf {
     vscode_ext_dir(home, "saoudrizwan.claude-dev")
@@ -359,6 +505,43 @@ pub static ROO: JsonClient = JsonClient {
         user: None,
         project: Some(|root| root.join("AGENTS.md")),
     },
+    entry: EntryStyle::Plain,
+};
+
+fn kilocode_dir(home: &Path) -> PathBuf {
+    vscode_ext_dir(home, "kilocode.kilo-code")
+}
+
+pub static KILOCODE: JsonClient = JsonClient {
+    id: "kilocode",
+    label: "Kilo Code",
+    config_hint: "`mcpServers` in Kilo Code's `mcp_settings.json`",
+    parent_path: &["mcpServers"],
+    user_config: Some(|home| kilocode_dir(home).join("mcp_settings.json")),
+    project_config: Some(|root| root.join(".kilocode").join("mcp.json")),
+    user_marker: kilocode_dir,
+    user_missing_hint: "Kilo Code extension dir missing",
+    context: ContextFile {
+        user: None,
+        project: Some(|root| root.join("AGENTS.md")),
+    },
+    entry: EntryStyle::Plain,
+};
+
+fn continue_dir(home: &Path) -> PathBuf {
+    home.join(".continue")
+}
+
+pub static CONTINUE: JsonClient = JsonClient {
+    id: "continue",
+    label: "Continue",
+    config_hint: "`mcpServers` in `~/.continue/mcpServers/mcp.json`",
+    parent_path: &["mcpServers"],
+    user_config: Some(|home| continue_dir(home).join("mcpServers").join("mcp.json")),
+    project_config: Some(|root| root.join(".continue").join("mcpServers").join("mcp.json")),
+    user_marker: continue_dir,
+    user_missing_hint: "~/.continue missing",
+    context: ContextFile::NONE,
     entry: EntryStyle::Plain,
 };
 
@@ -405,6 +588,28 @@ pub static WINDSURF: JsonClient = JsonClient {
     user_marker: windsurf_dir,
     user_missing_hint: "~/.codeium/windsurf missing",
     context: ContextFile::NONE,
+    entry: EntryStyle::Plain,
+};
+
+// --- Trae (ByteDance) -----------------------------------------------------------------------
+
+fn trae_dir(home: &Path) -> PathBuf {
+    app_data(home).join("Trae").join("User")
+}
+
+pub static TRAE: JsonClient = JsonClient {
+    id: "trae",
+    label: "Trae",
+    config_hint: "`mcpServers` in Trae's `User/mcp.json`",
+    parent_path: &["mcpServers"],
+    user_config: Some(|home| trae_dir(home).join("mcp.json")),
+    project_config: Some(|root| root.join(".trae").join("mcp.json")),
+    user_marker: trae_dir,
+    user_missing_hint: "Trae User dir missing",
+    context: ContextFile {
+        user: None,
+        project: Some(|root| root.join("AGENTS.md")),
+    },
     entry: EntryStyle::Plain,
 };
 

@@ -623,15 +623,28 @@ fn cmd_has_control_flow(line: &str) -> bool {
     })
 }
 
+fn ps_has_multiline_constructs(script: &str) -> bool {
+    script.contains('{')
+        || script.contains('}')
+        || script.contains('(')
+        || script.contains(')')
+        || script.contains("@\"")
+        || script.contains("@'")
+        || script.lines().any(|l| {
+            let t = l.trim_end();
+            t.ends_with('|') || t.ends_with('`') || t.ends_with(',')
+        })
+}
+
 fn ps_fail_fast(script: &str) -> String {
     let d = '\u{24}';
     let prefix = format!(
         "{d}ErrorActionPreference='Stop'; try {{ {d}PSNativeCommandUseErrorActionPreference={d}true }} catch {{}}; "
     );
-    if script.contains('{') {
-        return format!("{prefix}{script}");
-    }
     let check = format!("\nif ({d}LASTEXITCODE) {{ exit {d}LASTEXITCODE }}");
+    if ps_has_multiline_constructs(script) {
+        return format!("{prefix}{script}{check}");
+    }
     let mut out = prefix;
     for (i, line) in script.split('\n').enumerate() {
         if i > 0 {
@@ -644,6 +657,22 @@ fn ps_fail_fast(script: &str) -> String {
         }
     }
     out
+}
+
+/// Encode a PowerShell script as UTF-16LE Base64 for `-EncodedCommand`.
+///
+/// Passing scripts via `-Command` exposes `$`, `"`, `\"`, and pipeline
+/// expressions (`$_`, `${var}`) to MSVCRT argument escaping on Windows and
+/// secondary quote stripping inside PowerShell's command-line parser.
+/// `-EncodedCommand` bypasses command-line re-parsing completely on all
+/// platforms (Windows, Linux, macOS).
+fn encode_pwsh_command(script: &str) -> String {
+    use base64::Engine as _;
+    let mut utf16le = Vec::with_capacity(script.len() * 2);
+    for unit in script.encode_utf16() {
+        utf16le.extend_from_slice(&unit.to_le_bytes());
+    }
+    base64::engine::general_purpose::STANDARD.encode(&utf16le)
 }
 
 fn apply_fail_fast(spawn: &mut ShellSpawn) {
@@ -712,6 +741,7 @@ fn resolve_shell_program(program: &str) -> Result<String> {
     if let Some(p) = find_on_path(program) {
         return Ok(p.to_string_lossy().into_owned());
     }
+    #[cfg(windows)]
     let known: &[&str] = if program == "pwsh" {
         &[
             r"C:\Program Files\PowerShell\7\pwsh.exe",
@@ -720,17 +750,34 @@ fn resolve_shell_program(program: &str) -> Result<String> {
     } else {
         &[r"C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe"]
     };
+    #[cfg(not(windows))]
+    let known: &[&str] = if program == "pwsh" {
+        &[
+            "/opt/homebrew/bin/pwsh",
+            "/usr/local/bin/pwsh",
+            "/usr/bin/pwsh",
+            "/snap/bin/pwsh",
+        ]
+    } else {
+        &[]
+    };
     for path in known {
         if std::path::Path::new(path).is_file() {
             return Ok((*path).to_string());
         }
     }
     if program == "pwsh" {
+        #[cfg(windows)]
         bail!(
             "pwsh.exe not found on PATH. This host may only have Windows PowerShell — pass shell: \"powershell\"."
         );
+        #[cfg(not(windows))]
+        bail!("pwsh not found on PATH or standard install locations.");
     }
-    bail!("powershell.exe not found on PATH")
+    #[cfg(windows)]
+    bail!("powershell.exe not found on PATH");
+    #[cfg(not(windows))]
+    bail!("powershell is Windows-only; use shell: \"pwsh\", \"bash\", or \"sh\" on Unix.")
 }
 
 // ---------------------------------------------------------------------------
@@ -1035,6 +1082,20 @@ pub async fn run_command(
     {
         apply_fail_fast(spawn);
     }
+    // Convert pwsh/powershell `-Command <script>` into `-NonInteractive -EncodedCommand <utf16le-base64>`
+    // so `$` variables, embedded double quotes, and `$_` pipelines are never
+    // mangled by MSVCRT argument escaping or PowerShell's CLI quote parser.
+    if let Some(ref mut spawn) = shell_spawn
+        && (spawn.program == "pwsh" || spawn.program == "powershell")
+        && let Some(script) = spawn.args.last().cloned()
+    {
+        spawn.args = vec![
+            "-NoProfile".to_string(),
+            "-NonInteractive".to_string(),
+            "-EncodedCommand".to_string(),
+            encode_pwsh_command(&script),
+        ];
+    }
 
     // A multi-line command under cmd.exe (`shell:"cmd"`, or `shell:true`/
     // default on Windows, which both resolve to cmd) would lose every line past
@@ -1197,13 +1258,17 @@ pub async fn run_command(
 
     let pid = child.id();
 
-    // Handle stdin
+    // Handle stdin asynchronously so payloads exceeding OS pipe buffer capacity
+    // (~64 KiB) cannot deadlock before stdout/stderr drain tasks start, and early
+    // child exit (BrokenPipe) does not abort `run_command`.
     if let Some(data) = stdin_bytes
         && let Some(mut stdin) = child.stdin.take()
     {
-        stdin.write_all(&data).await?;
-        stdin.flush().await?;
-        drop(stdin);
+        tokio::spawn(async move {
+            let _ = stdin.write_all(&data).await;
+            let _ = stdin.flush().await;
+            drop(stdin);
+        });
     }
 
     // Detached mode: return immediately
@@ -2696,5 +2761,36 @@ mod tests {
             !out0.iter().any(|l| l.contains("keep")),
             "max_lines=0 must not return content lines, got {out0:?}"
         );
+    }
+
+    #[test]
+    fn test_ps_fail_fast_preserves_multiline_pipelines_and_blocks() {
+        let pipeline = "Get-ChildItem |\n  Where-Object { $_.Name -like '*.rs' }";
+        let wrapped = ps_fail_fast(pipeline);
+        assert!(
+            wrapped.contains("Get-ChildItem |\n  Where-Object { $_.Name -like '*.rs' }"),
+            "multiline pipeline must not be split by intermediate LASTEXITCODE check: {wrapped}"
+        );
+        assert!(
+            wrapped.ends_with("if ($LASTEXITCODE) { exit $LASTEXITCODE }"),
+            "must still check LASTEXITCODE at the end: {wrapped}"
+        );
+    }
+
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn test_powershell_dollar_vars_quotes_and_pipeline() {
+        let params = RunParams {
+            shell: ShellKind::PowerShell,
+            ..Default::default()
+        };
+        let script = "$x = \"hello $env:USERNAME\"; @(1, 2, 3) | ForEach-Object { \"val=$($_ * 10)\" }; Write-Output $x";
+        let result = run_command(script, &[], params, None, None, None)
+            .await
+            .unwrap();
+        assert_eq!(result.exit_code, Some(0), "stderr: {}", result.stderr);
+        assert!(result.stdout.contains("val=10"), "stdout: {}", result.stdout);
+        assert!(result.stdout.contains("val=30"), "stdout: {}", result.stdout);
+        assert!(result.stdout.contains("hello "), "stdout: {}", result.stdout);
     }
 }

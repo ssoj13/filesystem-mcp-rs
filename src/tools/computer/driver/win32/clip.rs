@@ -4,12 +4,9 @@
 //! open the clipboard, so every access goes through the same mutex to avoid
 //! open/close races.
 
-use std::sync::Mutex;
-
 use anyhow::Context as _;
 
-/// Clipboard opens must not interleave (arboard and clipboard-win share it).
-pub static CLIP_MTX: Mutex<()> = Mutex::new(());
+pub use super::CLIP_MTX;
 
 /// Put a file list on the clipboard (paste into Explorer/apps).
 pub fn set_files(files: &[String]) -> anyhow::Result<()> {

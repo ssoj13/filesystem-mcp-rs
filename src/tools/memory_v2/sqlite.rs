@@ -298,6 +298,8 @@ impl Database {
             relations: load_relations_for_items(
                 &conn,
                 &req.scope,
+                &req.actor,
+                access_mode,
                 items.iter().map(|item| item.id),
             )?,
             items,
@@ -340,6 +342,8 @@ impl Database {
             relations: load_relations_for_items(
                 &conn,
                 &req.scope,
+                &req.actor,
+                access_mode,
                 items.iter().map(|item| item.id),
             )?,
             items,
@@ -645,15 +649,36 @@ fn read_item_by_id(conn: &Connection, scope: &ScopeRef, id: Uuid) -> Result<Opti
 fn load_relations_for_items<I>(
     conn: &Connection,
     scope: &ScopeRef,
+    actor: &ActorContext,
+    access_mode: MemoryAccessMode,
     item_ids: I,
 ) -> Result<Vec<MemoryRelation>>
 where
     I: IntoIterator<Item = Uuid>,
 {
-    let visible_item_ids: HashSet<Uuid> = item_ids.into_iter().collect();
-    if visible_item_ids.is_empty() {
+    let seed_item_ids: Vec<Uuid> = item_ids.into_iter().collect();
+    if seed_item_ids.is_empty() {
         return Ok(Vec::new());
     }
+    let mut visible_cache: HashSet<Uuid> = seed_item_ids.iter().copied().collect();
+    let mut hidden_cache: HashSet<Uuid> = HashSet::new();
+
+    let mut is_endpoint_visible = |endpoint_id: Uuid| -> Result<bool> {
+        if visible_cache.contains(&endpoint_id) {
+            return Ok(true);
+        }
+        if hidden_cache.contains(&endpoint_id) {
+            return Ok(false);
+        }
+        let visible = read_item_by_id(conn, scope, endpoint_id)?
+            .is_some_and(|item| can_read_item(&item, actor, scope, access_mode));
+        if visible {
+            visible_cache.insert(endpoint_id);
+        } else {
+            hidden_cache.insert(endpoint_id);
+        }
+        Ok(visible)
+    };
 
     let mut relations = Vec::new();
     let mut seen = HashSet::new();
@@ -670,7 +695,7 @@ where
            AND (from_item_id = ?7 OR to_item_id = ?7)",
     )?;
 
-    for item_id in &visible_item_ids {
+    for item_id in &seed_item_ids {
         let rows = stmt.query_map(
             params![
                 &scope.tenant_id,
@@ -685,8 +710,8 @@ where
         )?;
         for row in rows {
             let relation = row?;
-            let relation_is_visible = visible_item_ids.contains(&relation.from_item_id)
-                && visible_item_ids.contains(&relation.to_item_id);
+            let relation_is_visible = is_endpoint_visible(relation.from_item_id)?
+                && is_endpoint_visible(relation.to_item_id)?;
             if relation_is_visible && seen.insert(relation.id) {
                 relations.push(relation);
             }
@@ -795,6 +820,12 @@ fn can_read_item(
     request_scope: &ScopeRef,
     access_mode: MemoryAccessMode,
 ) -> bool {
+    if let Some(ref exp) = item.expires_at
+        && let Ok(exp_dt) = OffsetDateTime::parse(exp, &Rfc3339)
+        && exp_dt <= OffsetDateTime::now_utc()
+    {
+        return false;
+    }
     match access_mode {
         MemoryAccessMode::AllowAll => true,
         MemoryAccessMode::EnforcePrivateOnly => {

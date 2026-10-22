@@ -405,15 +405,17 @@ fn whitespace_tolerant_match(original: &str, target: &str) -> Option<(usize, usi
         if same {
             let start = line_starts[i];
             let last_line_idx = i + target_lines.len() - 1;
-            let end = if last_line_idx + 1 < line_starts.len() {
-                line_starts[last_line_idx + 1]
-            } else {
-                let raw_end = line_starts[last_line_idx] + original_lines[last_line_idx].len();
-                if raw_end < original.len() && original.as_bytes()[raw_end] == b'\n' {
+            let raw_end = line_starts[last_line_idx] + original_lines[last_line_idx].len();
+            let end = if target.ends_with('\n') {
+                if last_line_idx + 1 < line_starts.len() {
+                    line_starts[last_line_idx + 1]
+                } else if raw_end < original.len() && original.as_bytes()[raw_end] == b'\n' {
                     raw_end + 1
                 } else {
                     raw_end
                 }
+            } else {
+                raw_end
             };
             return Some((start, end));
         }
@@ -623,7 +625,22 @@ mod tests {
             }],
         )
         .unwrap();
-        assert!(outcome.modified.contains("HI"));
+        assert_eq!(outcome.modified, "  HI  \n  goodbye  \n");
+
+        // When exact substring match does not fire (leading indent differs on a
+        // multi-token line matched via whitespace_tolerant_match), replacing a
+        // line without trailing `\n` in `old_text` must preserve the line break.
+        let outcome2 = run(
+            "    let x = 1;\n    let y = 2;\n",
+            vec![FileEdit {
+                old_text: "      let x = 1;".into(),
+                new_text: "    let x = 42;".into(),
+                is_regex: false,
+                replace_all: false,
+            }],
+        )
+        .unwrap();
+        assert_eq!(outcome2.modified, "    let x = 42;\n    let y = 2;\n");
     }
 
     /// fancy-regex: look-ahead support.

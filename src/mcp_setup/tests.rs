@@ -57,6 +57,14 @@ fn every_client_installs_reports_and_uninstalls_in_user_scope() {
             client.id()
         );
 
+        if client.id() == "antigravity" {
+            let agy_cfg = home.join(".gemini").join("config").join("config.json");
+            assert!(agy_cfg.is_file(), "antigravity config.json should be updated");
+            let agy_raw = std::fs::read_to_string(&agy_cfg).unwrap();
+            assert!(agy_raw.contains("mcp(demo-mcp/*)"), "{agy_raw}");
+            assert!(agy_raw.contains("mcp(demo_mcp/*)"), "{agy_raw}");
+        }
+
         // Hints landed in the agent's context file, with placeholders substituted — for the
         // agents that have one. (Claude Desktop, VS Code, Cline, … have no rules file.)
         if let Some(hints) = applied.hints_path.clone() {
@@ -89,6 +97,11 @@ fn every_client_installs_reports_and_uninstalls_in_user_scope() {
 
         let raw_after = std::fs::read_to_string(&applied.settings_path).unwrap();
         assert!(!raw_after.contains(KEY), "{}: key left behind", client.id());
+        if client.id() == "antigravity" {
+            let agy_cfg = home.join(".gemini").join("config").join("config.json");
+            let agy_raw = std::fs::read_to_string(&agy_cfg).unwrap_or_default();
+            assert!(!agy_raw.contains("mcp(demo-mcp/*)"), "{agy_raw}");
+        }
         if let Some(hints) = applied.hints_path.clone() {
             let hints_after = std::fs::read_to_string(&hints).unwrap_or_default();
             assert!(

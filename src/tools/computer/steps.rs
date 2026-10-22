@@ -280,13 +280,14 @@ fn run_step(gate: &SafetyGate, step: &Step) -> anyhow::Result<serde_json::Value>
             paste,
             target,
         } => {
-            let paste = paste.unwrap_or(true);
+            let paste = super::safety::resolve_paste(*paste)?;
+            let interval_ms = super::safety::resolve_interval_ms(None, paste)?;
             let expect = match driver::require_focus(target.clone())? {
                 Some(id) => Some(id),
                 None if paste => Some(driver::focus()?.hwnd),
                 None => None,
             };
-            let r = driver::type_text(gate, text, paste, 0, expect)?;
+            let r = driver::type_text(gate, text, paste, interval_ms, expect)?;
             Ok(
                 serde_json::json!({ "mode": r.mode, "chars": r.chars, "focus": r.focus, "clipboard_restored": r.clipboard_restored }),
             )
@@ -306,14 +307,14 @@ fn run_step(gate: &SafetyGate, step: &Step) -> anyhow::Result<serde_json::Value>
             });
             let baseline = match since {
                 Some(h) => *h,
-                None => capture::capture(cap.clone())?.hash,
+                None => capture::capture_hash(cap.clone())?,
                 // No `since`: baseline = now; wait until screen differs from now.
             };
             let deadline = Duration::from_millis(timeout_ms.unwrap_or(3000) as u64);
             let poll = Duration::from_millis(poll_ms.unwrap_or(200).max(50) as u64);
             let started = Instant::now();
             loop {
-                let now = capture::capture(cap.clone())?.hash;
+                let now = capture::capture_hash(cap.clone())?;
                 if hash_dist(baseline, now) > CHANGE_EPS {
                     return Ok(serde_json::json!({ "changed": true, "hash": now }));
                 }
@@ -356,8 +357,8 @@ fn resolve_refs(value: &mut serde_json::Value, results: &[StepResult]) -> anyhow
                     anyhow::anyhow!("invalid ref ${{{token}}} (want N or N.path)")
                 })?;
                 let v = lookup_ref(results, idx, &path)?;
+                let whole_string = !replaced && start == 0 && start + end == rest.len() - 1;
                 replaced = true;
-                let whole_string = start == 0 && start + end == rest.len() - 1;
                 if whole_string {
                     *value = v;
                     return Ok(());
@@ -467,6 +468,10 @@ mod tests {
         let results = vec![res(true, serde_json::json!({ "a": 7, "b": { "c": "x" } }))];
         resolve_refs(&mut v, &results).unwrap();
         assert_eq!(v, serde_json::json!("step0=7 and x"));
+
+        let mut adjacent = serde_json::json!("${0.a}${0.b.c}");
+        resolve_refs(&mut adjacent, &results).unwrap();
+        assert_eq!(adjacent, serde_json::json!("7x"));
     }
 
     #[test]

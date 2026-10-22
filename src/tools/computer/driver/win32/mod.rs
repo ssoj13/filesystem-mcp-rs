@@ -46,6 +46,11 @@ pub mod ocr;
 #[cfg(feature = "ctl-uia")]
 pub mod uia;
 
+/// Shared clipboard mutex so `input::type_text` (arboard) and `clip` (`clipboard-win`)
+/// never interleave `OpenClipboard`/`CloseClipboard` calls across threads.
+#[cfg(any(feature = "ctl-input", feature = "ctl-clip-files"))]
+pub static CLIP_MTX: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 /// The Windows backend. Unit struct: all state lives in the OS.
 pub struct Win32;
 

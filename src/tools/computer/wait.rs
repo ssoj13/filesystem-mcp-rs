@@ -81,7 +81,7 @@ pub fn wait(
             });
             let baseline = match since {
                 Some(h) => h,
-                None => capture::capture(cap.clone())?.hash,
+                None => capture::capture_hash(cap.clone())?,
             };
             loop {
                 if started.elapsed() > deadline {
@@ -92,7 +92,7 @@ pub fn wait(
                         rgb: None,
                     });
                 }
-                let now = capture::capture(cap.clone())?.hash;
+                let now = capture::capture_hash(cap.clone())?;
                 if hash_dist(baseline, now) > CHANGE_EPS {
                     return Ok(WaitResult {
                         ok: true,

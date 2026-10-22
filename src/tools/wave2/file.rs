@@ -20,93 +20,54 @@ pub fn file_diff(path1: &Path, path2: &Path, context_lines: usize) -> Result<Val
     let mut hunks = Vec::new();
     let mut additions = 0;
     let mut deletions = 0;
-    let mut current_hunk: Vec<Value> = Vec::new();
-    let mut hunk_start_old = 0;
-    let mut hunk_start_new = 0;
 
-    for change in diff.iter_all_changes() {
-        let tag = change.tag();
-        let line_content = change.value();
+    for group in diff.grouped_ops(context_lines) {
+        let Some(first_op) = group.first() else {
+            continue;
+        };
+        let hunk_start_old = first_op.old_range().start;
+        let hunk_start_new = first_op.new_range().start;
+        let mut current_hunk: Vec<Value> = Vec::new();
 
-        match tag {
-            ChangeTag::Delete => {
-                deletions += 1;
-                if current_hunk.is_empty() {
-                    hunk_start_old = change.old_index().unwrap_or(0);
-                    hunk_start_new = change.new_index().unwrap_or(0);
-                }
-                current_hunk.push(json!({
-                    "type": "delete",
-                    "line": line_content.trim_end(),
-                    "old_line_no": change.old_index().map(|i| i + 1)
-                }));
-            }
-            ChangeTag::Insert => {
-                additions += 1;
-                if current_hunk.is_empty() {
-                    hunk_start_old = change.old_index().unwrap_or(0);
-                    hunk_start_new = change.new_index().unwrap_or(0);
-                }
-                current_hunk.push(json!({
-                    "type": "insert",
-                    "line": line_content.trim_end(),
-                    "new_line_no": change.new_index().map(|i| i + 1)
-                }));
-            }
-            ChangeTag::Equal => {
-                // Add context lines around changes
-                if !current_hunk.is_empty() {
-                    current_hunk.push(json!({
-                        "type": "context",
-                        "line": line_content.trim_end(),
-                        "old_line_no": change.old_index().map(|i| i + 1),
-                        "new_line_no": change.new_index().map(|i| i + 1)
-                    }));
-
-                    // Check if we should close hunk (context_lines equal lines in a row)
-                    let equal_count = current_hunk
-                        .iter()
-                        .rev()
-                        .take_while(|v| v.get("type").and_then(|t| t.as_str()) == Some("context"))
-                        .count();
-
-                    if equal_count > context_lines * 2 {
-                        // Close hunk, trim trailing context
-                        if !current_hunk.is_empty()
-                            && let Some(last) = current_hunk.last()
-                            && last.get("type").and_then(|t| t.as_str()) == Some("context")
-                        {
-                            // Drop trailing context beyond context_lines
-                            current_hunk.truncate(current_hunk.len().saturating_sub(context_lines));
-                            if current_hunk
-                                .iter()
-                                .any(|v| v.get("type").and_then(|t| t.as_str()) != Some("context"))
-                            {
-                                hunks.push(json!({
-                                    "old_start": hunk_start_old + 1,
-                                    "new_start": hunk_start_new + 1,
-                                    "changes": current_hunk
-                                }));
-                            }
-                            current_hunk = Vec::new();
-                        }
+        for op in group {
+            for change in diff.iter_changes(&op) {
+                let line_content = change.value().trim_end();
+                match change.tag() {
+                    ChangeTag::Delete => {
+                        deletions += 1;
+                        current_hunk.push(json!({
+                            "type": "delete",
+                            "line": line_content,
+                            "old_line_no": change.old_index().map(|i| i + 1)
+                        }));
+                    }
+                    ChangeTag::Insert => {
+                        additions += 1;
+                        current_hunk.push(json!({
+                            "type": "insert",
+                            "line": line_content,
+                            "new_line_no": change.new_index().map(|i| i + 1)
+                        }));
+                    }
+                    ChangeTag::Equal => {
+                        current_hunk.push(json!({
+                            "type": "context",
+                            "line": line_content,
+                            "old_line_no": change.old_index().map(|i| i + 1),
+                            "new_line_no": change.new_index().map(|i| i + 1)
+                        }));
                     }
                 }
             }
         }
-    }
 
-    // Add remaining hunk
-    if !current_hunk.is_empty()
-        && current_hunk
-            .iter()
-            .any(|v| v.get("type").and_then(|t| t.as_str()) != Some("context"))
-    {
-        hunks.push(json!({
-            "old_start": hunk_start_old + 1,
-            "new_start": hunk_start_new + 1,
-            "changes": current_hunk
-        }));
+        if !current_hunk.is_empty() {
+            hunks.push(json!({
+                "old_start": hunk_start_old + 1,
+                "new_start": hunk_start_new + 1,
+                "changes": current_hunk
+            }));
+        }
     }
 
     // Generate unified diff string

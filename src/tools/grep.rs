@@ -191,7 +191,11 @@ impl AnyMatcher {
                         Ok(Some(m)) => {
                             out.push((m.start(), m.end()));
                             cursor = if m.end() == m.start() {
-                                m.end() + 1
+                                m.end()
+                                    + hay
+                                        .get(m.end()..)
+                                        .and_then(|s| s.chars().next())
+                                        .map_or(1, char::len_utf8)
                             } else {
                                 m.end()
                             };
@@ -685,29 +689,34 @@ fn char_window(
     direction: NearbyDirection,
     window_chars: usize,
 ) -> Option<Vec<&str>> {
-    let total_chars = content.chars().count();
-    let start_chars = content[..match_start].chars().count();
-    let end_chars = content[..match_end].chars().count();
+    if window_chars == 0 {
+        return None;
+    }
 
     let mut windows = Vec::new();
 
-    if matches!(direction, NearbyDirection::Before | NearbyDirection::Both) && start_chars > 0 {
-        let before_start = start_chars.saturating_sub(window_chars);
-        let start_byte = char_index_to_byte(content, before_start);
-        let end_byte = char_index_to_byte(content, start_chars);
-        if start_byte < end_byte {
-            windows.push(&content[start_byte..end_byte]);
+    if matches!(direction, NearbyDirection::Before | NearbyDirection::Both) && match_start > 0 {
+        let start_byte = content[..match_start]
+            .char_indices()
+            .rev()
+            .nth(window_chars - 1)
+            .map(|(idx, _)| idx)
+            .unwrap_or(0);
+        if start_byte < match_start {
+            windows.push(&content[start_byte..match_start]);
         }
     }
 
     if matches!(direction, NearbyDirection::After | NearbyDirection::Both)
-        && end_chars < total_chars
+        && match_end < content.len()
     {
-        let after_end = (end_chars + window_chars).min(total_chars);
-        let start_byte = char_index_to_byte(content, end_chars);
-        let end_byte = char_index_to_byte(content, after_end);
-        if start_byte < end_byte {
-            windows.push(&content[start_byte..end_byte]);
+        let end_byte = content[match_end..]
+            .char_indices()
+            .nth(window_chars)
+            .map(|(idx, _)| match_end + idx)
+            .unwrap_or(content.len());
+        if match_end < end_byte {
+            windows.push(&content[match_end..end_byte]);
         }
     }
 
@@ -775,14 +784,6 @@ fn word_window<'a>(
     } else {
         Some(windows)
     }
-}
-
-fn char_index_to_byte(content: &str, char_index: usize) -> usize {
-    content
-        .char_indices()
-        .nth(char_index)
-        .map(|(idx, _)| idx)
-        .unwrap_or_else(|| content.len())
 }
 
 #[cfg(test)]

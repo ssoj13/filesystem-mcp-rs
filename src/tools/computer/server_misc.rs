@@ -35,15 +35,20 @@ impl FileSystemServer {
     ) -> Result<CallToolResult, McpError> {
         let res = tokio::task::spawn_blocking(move || -> anyhow::Result<serde_json::Value> {
             let cap = target.unwrap_or(super::capture::CapTarget::Monitor { monitor: 0 });
-            let captured = super::capture::capture(cap)?;
-            let img = image::open(&captured.path)
-                .map_err(|e| anyhow::anyhow!("open capture: {e}"))?
-                .to_rgba8();
-            let out = match engine.as_deref().unwrap_or("media") {
+            let (img, rect) = super::capture::capture_in_memory(cap)?;
+            let mut out = match engine.as_deref().unwrap_or("media") {
                 "ocrs" => super::ocrs_local::recognize(&img, find.as_deref())?,
                 "media" => super::driver::ocr_media(&img, find.as_deref())?,
                 other => anyhow::bail!("unknown engine {other:?} (media|ocrs)"),
             };
+            for line in &mut out.lines {
+                line.x += rect.x;
+                line.y += rect.y;
+            }
+            for m in &mut out.matches {
+                m.x += rect.x;
+                m.y += rect.y;
+            }
             Ok(serde_json::to_value(&out)?)
         })
         .await

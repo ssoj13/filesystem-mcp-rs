@@ -9,9 +9,10 @@ use std::path::{Path, PathBuf};
 use crate::mcp_setup::client::McpClient;
 use crate::mcp_setup::docs::HintDocs;
 use crate::mcp_setup::error::{Result, SetupError};
+use crate::mcp_setup::plugin::{self, PluginSpec};
 use crate::mcp_setup::types::{
-    ApplyReport, HintsConfig, InstallPlan, RemoveReport, Scope, SetupContext, StatusReport,
-    StdioMcpEntry,
+    ApplyReport, Channel, HintsConfig, InstallPlan, RemoveReport, Scope, SetupContext,
+    StatusReport, StdioMcpEntry,
 };
 
 /// Identity and launch recipe of the MCP server being installed.
@@ -30,6 +31,12 @@ pub struct HostSpec {
     pub docs: HintDocs,
     /// See [`InstallPlan::force`]. Off by default.
     pub force: bool,
+    /// The plugin this server ships inside, when it ships inside one.
+    ///
+    /// Set it and a host with a plugin manager installs the whole plugin
+    /// instead of a lone MCP entry - see [`crate::mcp_setup::plugin`] for why that is the
+    /// better channel, and why writing both would register the server twice.
+    pub plugin: Option<PluginSpec>,
 }
 
 impl HostSpec {
@@ -60,16 +67,24 @@ impl HostSpec {
         install_id: impl Into<String>,
         command: impl Into<String>,
     ) -> Self {
+        let raw_cmd = command.into();
         Self {
             server_key: server_key.into(),
             install_id: install_id.into(),
-            command: command.into(),
+            command: strip_verbatim(&raw_cmd),
             args: Vec::new(),
             env: BTreeMap::new(),
             hints: HintsConfig::default(),
             docs: HintDocs::default(),
             force: false,
+            plugin: None,
         }
+    }
+
+    /// Declare the plugin this server ships inside.
+    pub fn with_plugin(mut self, plugin: PluginSpec) -> Self {
+        self.plugin = Some(plugin);
+        self
     }
 
     /// Let `install` overwrite an entry under our key that carries no install-id marker of ours
@@ -277,6 +292,17 @@ pub fn install(
     spec: &HostSpec,
 ) -> Result<ApplyReport> {
     check_scope(client, scope)?;
+    if let Some(cli) = plugin::applies(client.id(), scope, spec.plugin.as_ref()) {
+        let plugin = spec.plugin.as_ref().expect("applies checked it");
+        let note = plugin::apply(&cli, plugin)?;
+        return Ok(ApplyReport {
+            channel: Channel::Plugin,
+            client: client.label(),
+            changed: true,
+            note: Some(note),
+            ..Default::default()
+        });
+    }
     client.apply(ctx, scope, &spec.plan()?)
 }
 
@@ -287,6 +313,15 @@ pub fn uninstall(
     spec: &HostSpec,
 ) -> Result<RemoveReport> {
     check_scope(client, scope)?;
+    if let Some(cli) = plugin::applies(client.id(), scope, spec.plugin.as_ref()) {
+        let plugin = spec.plugin.as_ref().expect("applies checked it");
+        return Ok(RemoveReport {
+            channel: Channel::Plugin,
+            client: client.label(),
+            removed: plugin::remove(&cli, plugin)?,
+            ..Default::default()
+        });
+    }
     client.remove(ctx, scope, &spec.plan()?)
 }
 
@@ -297,6 +332,22 @@ pub fn status(
     spec: &HostSpec,
 ) -> Result<StatusReport> {
     check_scope(client, scope)?;
+    if let Some(cli) = plugin::applies(client.id(), scope, spec.plugin.as_ref()) {
+        let plugin = spec.plugin.as_ref().expect("applies checked it");
+        // `None` means the plugin manager could not be run at all. That is not
+        // "not installed", so it is reported as an undetected host rather than
+        // as a confident negative.
+        let found = plugin::installed(&cli, plugin);
+        return Ok(StatusReport {
+            channel: Channel::Plugin,
+            client: client.label(),
+            scope: scope.name().to_string(),
+            host_detected: found.is_some(),
+            installed: found.unwrap_or(false),
+            note: Some(format!("plugin via `{} plugin`", cli.program)),
+            ..Default::default()
+        });
+    }
     client.status(ctx, scope, &spec.plan()?)
 }
 
@@ -308,9 +359,7 @@ mod resolve_tests {
     /// healthy. `status` used to have no way to tell this from a working entry.
     #[test]
     fn a_missing_path_does_not_resolve() {
-        // A fresh empty directory, so the child path is guaranteed absent without depending on
-        // what a shared OS temp directory happens to contain.
-        let dir = tempfile::TempDir::new().expect("scratch dir");
+        let dir = tempfile::TempDir::new().expect("tempdir");
         let missing = dir.path().join("mcp-setup-rs-definitely-not-here.exe");
         assert!(!missing.exists(), "test fixture must not exist");
         assert!(!command_resolves(&missing.to_string_lossy()));

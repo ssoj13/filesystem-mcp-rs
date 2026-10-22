@@ -91,11 +91,14 @@ pub fn upsert_marked_section_with_preamble(
     let (mb, me) = managed_delimiters(marker_token);
     let managed_body = body_markdown.trim_end();
 
-    if let Some((i0, i1)) = find_block(existing_content, &ob, &oe) {
+    if let Some((i0, i1, existing_tok)) = find_server_block(existing_content, marker_token) {
+        let (old_ob, old_oe) = marker_delimiters(&existing_tok);
+        let (old_mb, old_me) = managed_delimiters(&existing_tok);
         let before = &existing_content[..i0];
-        let after = &existing_content[i1..];
+        let after_cleaned = strip_all_server_blocks(&existing_content[i1..], marker_token);
+        let after = after_cleaned.as_str();
         let block = &existing_content[i0..i1];
-        let Some(inner) = outer_block_inner(block, &ob, &oe) else {
+        let Some(inner) = outer_block_inner(block, &old_ob, &old_oe) else {
             return append_new_outer(
                 existing_content,
                 &ob,
@@ -107,7 +110,7 @@ pub fn upsert_marked_section_with_preamble(
             );
         };
 
-        let new_inner = if let Some((mj0, mj1)) = find_block(inner, &mb, &me) {
+        let new_inner = if let Some((mj0, mj1)) = find_block(inner, &old_mb, &old_me) {
             let preamble = if let Some(p) = user_snippet_preamble {
                 p
             } else {
@@ -128,7 +131,15 @@ pub fn upsert_marked_section_with_preamble(
         let mut out = String::with_capacity(existing_content.len() + full_block.len());
         out.push_str(before);
         out.push_str(&full_block);
-        out.push_str(after);
+        if !after.is_empty() {
+            if !after.starts_with('\n') && !after.starts_with('\r') {
+                out.push('\n');
+            }
+            out.push_str(after.trim_start_matches(['\r', '\n']));
+            if !out.ends_with('\n') {
+                out.push('\n');
+            }
+        }
         let changed = normalized_tail(&out) != normalized_tail(existing_content);
         let out = if changed {
             out
@@ -183,15 +194,15 @@ fn outer_block_inner<'a>(block: &'a str, ob: &str, oe: &str) -> Option<&'a str> 
 }
 
 /// Returns `(new_content, changed)` where `changed` is true if anything was removed.
+///
+/// Removes the exact `marker_token` block as well as any legacy versioned blocks sharing the same
+/// `<server_key>__` prefix so version upgrades never leave unremovable orphan blocks behind.
 pub fn remove_marked_section(existing_content: &str, marker_token: &str) -> (String, bool) {
-    let (begin, end) = marker_delimiters(marker_token);
-    let Some((i0, i1)) = find_block(existing_content, &begin, &end) else {
+    let cleaned = strip_all_server_blocks(existing_content, marker_token);
+    if cleaned == existing_content {
         return (existing_content.to_string(), false);
-    };
-    let mut out = String::with_capacity(existing_content.len());
-    out.push_str(&existing_content[..i0]);
-    out.push_str(&existing_content[i1..]);
-    let out = trim_reasonable_blank_edges(&out);
+    }
+    let out = trim_reasonable_blank_edges(&cleaned);
     (out, true)
 }
 
@@ -200,6 +211,50 @@ fn find_block(s: &str, begin: &str, end: &str) -> Option<(usize, usize)> {
     let rest = &s[i0 + begin.len()..];
     let rel_end = rest.find(end)?;
     Some((i0, i0 + begin.len() + rel_end + end.len()))
+}
+
+/// Prefix `<server_key>__` when `marker_token` was produced by [`marker_token_from`].
+fn server_key_prefix(marker_token: &str) -> Option<&str> {
+    let (key, _) = marker_token.split_once("__")?;
+    (!key.is_empty()).then_some(key)
+}
+
+/// Find a block matching `marker_token` exactly, or the first block matching the same
+/// `<server_key>__*` prefix (e.g. from an earlier version of the same server).
+fn find_server_block(s: &str, marker_token: &str) -> Option<(usize, usize, String)> {
+    if let Some(key) = server_key_prefix(marker_token) {
+        let prefix = format!("<!-- mcp-setup:{key}__");
+        let suffix = ":begin -->";
+        let mut search_from = 0;
+        while let Some(rel) = s[search_from..].find(&prefix) {
+            let start = search_from + rel;
+            let after_prefix = start + "<!-- mcp-setup:".len();
+            if let Some(end_rel) = s[after_prefix..].find(suffix) {
+                let candidate_tok = &s[after_prefix..after_prefix + end_rel];
+                if !candidate_tok.contains('\n') && !candidate_tok.contains(':') {
+                    let (ob, oe) = marker_delimiters(candidate_tok);
+                    if let Some((b0, b1)) = find_block(&s[start..], &ob, &oe) {
+                        return Some((start + b0, start + b1, candidate_tok.to_string()));
+                    }
+                }
+            }
+            search_from = after_prefix;
+        }
+    }
+    let (ob, oe) = marker_delimiters(marker_token);
+    find_block(s, &ob, &oe).map(|(i0, i1)| (i0, i1, marker_token.to_string()))
+}
+
+/// Strip every block matching `marker_token` or its `<server_key>__*` prefix.
+fn strip_all_server_blocks(s: &str, marker_token: &str) -> String {
+    let mut current = s.to_string();
+    while let Some((i0, i1, _)) = find_server_block(&current, marker_token) {
+        let mut next = String::with_capacity(current.len());
+        next.push_str(&current[..i0]);
+        next.push_str(&current[i1..]);
+        current = next;
+    }
+    current
 }
 
 fn trim_reasonable_blank_edges(s: &str) -> String {
@@ -335,5 +390,22 @@ mod tests {
         assert!(new.contains("LEGACY_ONLY"));
         assert!(new.contains("MANAGED"));
         assert!(new.contains("managed:begin"));
+    }
+
+    #[test]
+    fn upsert_replaces_earlier_version_block_and_deduplicates() {
+        let tok_v1 = marker_token_from("filesystem-mcp-rs:0.2.0", "filesystem-mcp-rs");
+        let tok_v2 = marker_token_from("filesystem-mcp-rs:0.2.1", "filesystem-mcp-rs");
+        let (s1, _) = upsert_marked_section("# Header\n", &tok_v1, "OLD_V1");
+        let (s2, ch) = upsert_marked_section(&s1, &tok_v2, "NEW_V2");
+        assert!(ch);
+        assert!(!s2.contains("OLD_V1"));
+        assert!(!s2.contains(&tok_v1));
+        assert!(s2.contains("NEW_V2"));
+        assert!(s2.contains(&tok_v2));
+
+        let (removed, rch) = remove_marked_section(&s2, &tok_v1);
+        assert!(rch);
+        assert!(!removed.contains("NEW_V2"));
     }
 }

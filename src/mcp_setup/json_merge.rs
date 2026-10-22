@@ -12,11 +12,13 @@ use crate::mcp_setup::types::{INSTALL_ID_ENV_KEY, StdioMcpEntry};
 /// install-id marker lives — without it we could not tell our entries from hand-written ones.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum EntryStyle {
-    /// `{ "command": "exe", "args": [...], "env": {...} }` — Claude, Cursor, Qwen, Gemini, …
+    /// `{ "command": "exe", "args": [...], "env": {...} }` — Claude, Cursor, Qwen, Gemini, Antigravity, …
     Plain,
     /// `{ "type": "stdio", "command": "exe", "args": [...], "env": {...} }` — VS Code, Zed-style.
     TypedStdio,
-    /// `{ "type": "local", "command": ["exe", "arg"], "env": {...} }` — OpenCode.
+    /// `{ "type": "local", "command": "exe", "args": [...], "tools": ["*"], "env": {...} }` — GitHub Copilot CLI.
+    TypedLocalWithTools,
+    /// `{ "type": "local", "command": ["exe", "arg"], "env": {...} }` — OpenCode, Kilo CLI.
     LocalCommandArray,
     /// `{ "source": "custom", "command": "exe", "args": [...], "env": {...} }` — Zed.
     ZedCustom,
@@ -43,10 +45,13 @@ impl EntryStyle {
                 o.insert("type".to_string(), Value::String("local".to_string()));
                 o.insert("command".to_string(), Value::Array(cmd));
             }
-            Self::Plain | Self::TypedStdio | Self::ZedCustom => {
+            Self::Plain | Self::TypedStdio | Self::TypedLocalWithTools | Self::ZedCustom => {
                 match self {
                     Self::TypedStdio => {
                         o.insert("type".to_string(), Value::String("stdio".to_string()));
+                    }
+                    Self::TypedLocalWithTools => {
+                        o.insert("type".to_string(), Value::String("local".to_string()));
                     }
                     Self::ZedCustom => {
                         o.insert("source".to_string(), Value::String("custom".to_string()));
@@ -58,6 +63,12 @@ impl EntryStyle {
                     o.insert(
                         "args".to_string(),
                         Value::Array(stdio.args.iter().cloned().map(Value::String).collect()),
+                    );
+                }
+                if matches!(self, Self::TypedLocalWithTools) {
+                    o.insert(
+                        "tools".to_string(),
+                        Value::Array(vec![Value::String("*".to_string())]),
                     );
                 }
             }

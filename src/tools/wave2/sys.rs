@@ -17,31 +17,34 @@ pub fn disk_usage(path: Option<&Path>) -> Result<Value> {
             .canonicalize()
             .unwrap_or_else(|_| target_path.to_path_buf());
 
-        for disk in disks.list() {
+        if let Some(disk) = disks
+            .list()
+            .iter()
+            .filter(|d| target.starts_with(d.mount_point()))
+            .max_by_key(|d| d.mount_point().as_os_str().len())
+        {
             let mount = disk.mount_point();
-            if target.starts_with(mount) {
-                let total = disk.total_space();
-                let available = disk.available_space();
-                let used = total.saturating_sub(available);
-                let percent = if total > 0 {
-                    (used as f64 / total as f64) * 100.0
-                } else {
-                    0.0
-                };
+            let total = disk.total_space();
+            let available = disk.available_space();
+            let used = total.saturating_sub(available);
+            let percent = if total > 0 {
+                (used as f64 / total as f64) * 100.0
+            } else {
+                0.0
+            };
 
-                return Ok(json!({
-                    "path": target.to_string_lossy(),
-                    "mount_point": mount.to_string_lossy(),
-                    "filesystem": disk.file_system().to_string_lossy(),
-                    "total_bytes": total,
-                    "used_bytes": used,
-                    "available_bytes": available,
-                    "used_percent": format!("{:.1}", percent),
-                    "total_human": format_size(total),
-                    "used_human": format_size(used),
-                    "available_human": format_size(available)
-                }));
-            }
+            return Ok(json!({
+                "path": target.to_string_lossy(),
+                "mount_point": mount.to_string_lossy(),
+                "filesystem": disk.file_system().to_string_lossy(),
+                "total_bytes": total,
+                "used_bytes": used,
+                "available_bytes": available,
+                "used_percent": format!("{:.1}", percent),
+                "total_human": format_size(total),
+                "used_human": format_size(used),
+                "available_human": format_size(available)
+            }));
         }
         bail!("No disk found for path: {}", target_path.display());
     }

@@ -11,12 +11,28 @@ use crate::mcp_setup::json_merge::{
     EntryStyle, ensure_key_available_for_apply, find_custom_mcp_server_key, foreign_entry_at,
     is_ours, mcp_command_from_value, mcp_install_id_from_value, servers_at,
 };
-use crate::mcp_setup::jsonc::{read_root_object, remove_in_file, upsert_in_file};
+use crate::mcp_setup::jsonc::{
+    read_root_object, remove_in_file, remove_string_array_items, upsert_in_file,
+    upsert_string_array_items,
+};
 use crate::mcp_setup::manifest::{InstallManifest, MANIFEST_SCHEMA};
 use crate::mcp_setup::types::{
     ApplyReport, INSTALL_ID_ENV_KEY, InstallPlan, RemoveReport, Scope, SetupContext, StatusReport,
     StdioMcpEntry, ensure_project_root,
 };
+
+fn antigravity_permission_grants(server_key: &str) -> Vec<String> {
+    let mut grants = vec![
+        format!("mcp({server_key}/*)"),
+        format!("mcp({server_key})"),
+    ];
+    let underscored = server_key.replace('-', "_");
+    if underscored != server_key {
+        grants.push(format!("mcp({underscored}/*)"));
+        grants.push(format!("mcp({underscored})"));
+    }
+    grants
+}
 
 /// A JSON-config agent, described declaratively. See `clients/` for the registry.
 pub struct JsonClient {
@@ -166,7 +182,7 @@ impl McpClient for JsonClient {
         );
 
         // Re-running install with identical settings must not rewrite (or back up) the file.
-        let changed = servers_at(&root, self.parent_path)
+        let mut changed = servers_at(&root, self.parent_path)
             .and_then(|servers| servers.get(&plan.mcp_server_key))
             .map(|existing| existing != &new_val)
             .unwrap_or(true);
@@ -185,6 +201,19 @@ impl McpClient for JsonClient {
                 &plan.mcp_server_key,
                 &new_val,
             )?;
+        }
+
+        if self.id == "antigravity" && matches!(scope, Scope::User) {
+            let agy_cfg = home.join(".gemini").join("config").join("config.json");
+            let grants = antigravity_permission_grants(&plan.mcp_server_key);
+            if upsert_string_array_items(
+                &agy_cfg,
+                &["userSettings", "globalPermissionGrants"],
+                "allow",
+                &grants,
+            )? {
+                changed = true;
+            }
         }
 
         let mut manifest = InstallManifest {
@@ -265,6 +294,16 @@ impl McpClient for JsonClient {
                 let removed =
                     remove_in_file(&settings_path, self.parent_path, &plan.mcp_server_key)?;
                 debug_assert!(removed);
+                if self.id == "antigravity" && matches!(scope, Scope::User) {
+                    let agy_cfg = home.join(".gemini").join("config").join("config.json");
+                    let grants = antigravity_permission_grants(&plan.mcp_server_key);
+                    let _ = remove_string_array_items(
+                        &agy_cfg,
+                        &["userSettings", "globalPermissionGrants"],
+                        "allow",
+                        &grants,
+                    );
+                }
                 let mut report = RemoveReport {
                     client: self.id,
                     settings_path,
