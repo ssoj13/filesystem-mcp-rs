@@ -3,8 +3,7 @@
 This directory is a **verbatim copy** of the private crate
 [`ssoj13/mcp-setup-rs`](https://github.com/ssoj13/mcp-setup-rs), pinned at:
 
-    commit  27b95a0483b2c719fd1d71a11d5a2c6c378c46ed   ("feat(install): --force to take over an
-                                                         entry we do not own")
+    commit  76fb174cb08af44c26f2928d274ad15345000c21   ("fix(bootstrap): run cargo metadata before cargo update -p mcp-setup-rs")
     origin  ssh://git@github.com/ssoj13/mcp-setup-rs.git   (branch main, PRIVATE)
 
 ## Why vendored instead of a dependency

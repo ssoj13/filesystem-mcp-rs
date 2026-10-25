@@ -22,10 +22,7 @@ use crate::mcp_setup::types::{
 };
 
 fn antigravity_permission_grants(server_key: &str) -> Vec<String> {
-    let mut grants = vec![
-        format!("mcp({server_key}/*)"),
-        format!("mcp({server_key})"),
-    ];
+    let mut grants = vec![format!("mcp({server_key}/*)"), format!("mcp({server_key})")];
     let underscored = server_key.replace('-', "_");
     if underscored != server_key {
         grants.push(format!("mcp({underscored}/*)"));

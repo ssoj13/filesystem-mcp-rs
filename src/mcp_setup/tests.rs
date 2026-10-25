@@ -59,7 +59,10 @@ fn every_client_installs_reports_and_uninstalls_in_user_scope() {
 
         if client.id() == "antigravity" {
             let agy_cfg = home.join(".gemini").join("config").join("config.json");
-            assert!(agy_cfg.is_file(), "antigravity config.json should be updated");
+            assert!(
+                agy_cfg.is_file(),
+                "antigravity config.json should be updated"
+            );
             let agy_raw = std::fs::read_to_string(&agy_cfg).unwrap();
             assert!(agy_raw.contains("mcp(demo-mcp/*)"), "{agy_raw}");
             assert!(agy_raw.contains("mcp(demo_mcp/*)"), "{agy_raw}");

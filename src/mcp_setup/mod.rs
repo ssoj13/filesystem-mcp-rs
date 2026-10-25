@@ -40,20 +40,8 @@
 //! # Ok(()) }
 //! ```
 //!
-//! [`cli::SetupCommand`] gives this binary ready-made `install` / `uninstall` / `status`
-//! subcommands with a results table.
-//!
-//! # Vendored copy — do not edit here
-//!
-//! This module is a verbatim copy of the private `mcp-setup-rs` crate (see `VENDOR.md` for the
-//! pinned commit and the resync procedure). It is vendored rather than consumed as a git
-//! dependency because crates.io rejects git dependencies: every dependency of a published crate
-//! must itself exist on crates.io, and `mcp-setup-rs` is deliberately private. Fixes belong
-//! upstream, in the private repo; re-vendor from there.
-//!
-//! The only edit applied to the upstream sources is mechanical: `crate::` → `crate::mcp_setup::`,
-//! because the vendored files address what was their own crate root and is now this module. The
-//! upstream `cli` cargo feature is dropped — this host always builds the CLI.
+//! With the `cli` feature (on by default), [`cli::SetupCommand`] gives a host binary ready-made
+//! `install` / `uninstall` / `status` subcommands with a results table.
 
 mod agent_cli;
 mod backup;
@@ -85,7 +73,7 @@ pub use host::{HostSpec, install, status, uninstall};
 pub use json_client::JsonClient;
 pub use json_merge::EntryStyle;
 pub use plugin::{PluginCli, PluginSpec};
-pub use toml_client::{TomlClient, TomlStyle};
+pub use toml_client::TomlClient;
 pub use types::{
     ApplyReport, HintsConfig, INSTALL_ID_ENV_KEY, InstallPlan, RemoveReport, Scope, SetupContext,
     StatusReport, StdioMcpEntry,

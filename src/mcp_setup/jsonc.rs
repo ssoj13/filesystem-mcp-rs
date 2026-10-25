@@ -136,15 +136,16 @@ pub fn upsert_string_array_items(
             break;
         }
     }
-    if found_path
-        && let Some(arr) = cur.get(array_key).and_then(Value::as_array)
-    {
+    if found_path && let Some(arr) = cur.get(array_key).and_then(Value::as_array) {
         existing_vec = arr.clone();
     }
 
     let mut changed = false;
     for item in items {
-        if !existing_vec.iter().any(|v| v.as_str() == Some(item.as_str())) {
+        if !existing_vec
+            .iter()
+            .any(|v| v.as_str() == Some(item.as_str()))
+        {
             existing_vec.push(Value::String(item.clone()));
             changed = true;
         }

@@ -20,10 +20,13 @@ type CliResult<T> = std::result::Result<T, Box<dyn std::error::Error>>;
 #[derive(Subcommand, Debug)]
 pub enum SetupCommand {
     /// Register this server in the supported MCP clients.
+    #[command(visible_alias = "i")]
     Install(InstallArgs),
     /// Remove a registration created by `install` (same scope / key / install id).
+    #[command(visible_alias = "u")]
     Uninstall(TargetArgs),
     /// Show where this server is registered.
+    #[command(visible_alias = "s")]
     Status(TargetArgs),
 }
 
@@ -280,7 +283,12 @@ fn remove_row(label: &str, res: crate::mcp_setup::error::Result<RemoveReport>) -
     match res {
         Ok(r) if r.channel == Channel::Plugin => Row {
             target: label.to_string(),
-            status: if r.removed { "removed" } else { "not installed" }.to_string(),
+            status: if r.removed {
+                "removed"
+            } else {
+                "not installed"
+            }
+            .to_string(),
             ok: true,
             detail: "plugin, via the host's own plugin manager".to_string(),
         },
@@ -397,4 +405,28 @@ fn print_table(rows: &[Row]) {
         row(&r.target, &r.status, &detail);
     }
     line('└', '┴', '┘');
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use clap::Parser;
+
+    #[derive(Parser, Debug)]
+    struct DummyCli {
+        #[command(subcommand)]
+        cmd: SetupCommand,
+    }
+
+    #[test]
+    fn short_aliases_parse() {
+        let i = DummyCli::try_parse_from(["bin", "i", "--client", "antigravity"]).unwrap();
+        assert!(matches!(i.cmd, SetupCommand::Install(_)));
+
+        let u = DummyCli::try_parse_from(["bin", "u", "--client", "antigravity"]).unwrap();
+        assert!(matches!(u.cmd, SetupCommand::Uninstall(_)));
+
+        let s = DummyCli::try_parse_from(["bin", "s", "--client", "antigravity"]).unwrap();
+        assert!(matches!(s.cmd, SetupCommand::Status(_)));
+    }
 }

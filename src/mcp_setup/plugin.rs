@@ -147,10 +147,7 @@ enum Outcome {
 /// network that is not answering - would take the caller with it.
 fn run(cli: &PluginCli, args: &[&str], limit: Duration) -> Outcome {
     let stamp = std::process::id();
-    let Ok(tmp_dir) = crate::core::paths::sub_dir(crate::core::paths::SubDir::Tmp) else {
-        return Outcome::Unavailable("cannot resolve state scratch directory".to_string());
-    };
-    let out_path = tmp_dir.join(format!("mcp-setup-{stamp}-{}.out", cli.program));
+    let out_path = std::env::temp_dir().join(format!("mcp-setup-{stamp}-{}.out", cli.program));
     let err_path = out_path.with_extension("err");
 
     let (Ok(out_file), Ok(err_file)) = (File::create(&out_path), File::create(&err_path)) else {
@@ -353,7 +350,10 @@ mod tests {
         let started = Instant::now();
         let status = wait_bounded(&mut child, Duration::from_millis(300)).expect("wait succeeds");
 
-        assert!(status.is_none(), "an overrunning process must report as killed");
+        assert!(
+            status.is_none(),
+            "an overrunning process must report as killed"
+        );
         assert!(
             started.elapsed() < Duration::from_secs(5),
             "the wait returned after {:?}, so the limit did not hold",

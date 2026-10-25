@@ -312,10 +312,9 @@ fn upsert_toml(
                         client.label, client.parent_key
                     ))
                 })?;
-            if let Some(existing) = aot
-                .iter_mut()
-                .find(|t| t.get("name").and_then(Item::as_str) == Some(plan.mcp_server_key.as_str()))
-            {
+            if let Some(existing) = aot.iter_mut().find(|t| {
+                t.get("name").and_then(Item::as_str) == Some(plan.mcp_server_key.as_str())
+            }) {
                 *existing = entry;
             } else {
                 aot.push(entry);
@@ -507,7 +506,10 @@ impl McpClient for TomlClient {
             }
         }
 
-        let pre_cli_backup = if matches!(scope, Scope::User) && self.cli.is_some() && std::env::var_os(FORCE_TOML_ENV).is_none() {
+        let pre_cli_backup = if matches!(scope, Scope::User)
+            && self.cli.is_some()
+            && std::env::var_os(FORCE_TOML_ENV).is_none()
+        {
             backup_file_if_exists(&settings_path)?
         } else {
             None
