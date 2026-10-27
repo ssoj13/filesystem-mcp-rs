@@ -1,5 +1,10 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-sudo apt update
-sudo apt install -y pkg-config libpipewire-0.3-dev libspa-0.2-dev libwayland-dev libegl1-mesa-dev libglvnd-dev
+SUDO=""
+if [ "$(id -u)" -ne 0 ]; then
+    SUDO="sudo"
+fi
+
+$SUDO apt update
+$SUDO apt install -y pkg-config clang libclang-dev libgbm-dev libpipewire-0.3-dev libspa-0.2-dev libwayland-dev libegl1-mesa-dev libglvnd-dev
