@@ -1,3 +1,5 @@
+//! MCP filesystem, computer-control, locate, and memory server entry point.
+
 // Ordered maps appear in the HTTP argument structs (headers, cookies, query) and in the S3 ones
 // (object metadata), and nowhere else; gated with both so neither build carries it unused.
 #[cfg(any(feature = "http-tools", feature = "s3-tools"))]
@@ -8466,53 +8468,41 @@ async fn run_stream_mode(
 /// and no cached state, and no arm of it can panic, so nothing already poisoned is in the way.
 /// Nothing ever deletes what lands here, as with the logs; the operator clears it by hand.
 fn install_panic_hook() {
-    std::panic::set_hook(Box::new(|panic_info| {
-        let Ok(panic_log) = core::paths::run_file(core::paths::SubDir::Panics, "log") else {
-            return;
-        };
+    let _ = crashdump::init!(|cfg| {
+        cfg.spawn_dialog_on_crash = false;
+        cfg.on_crash_hooks.push(Arc::new(|report| {
+            if let Ok(panic_log) = core::paths::run_file(core::paths::SubDir::Panics, "log") {
+                let timestamp = humantime::format_rfc3339(std::time::SystemTime::now());
+                let location = report.location.as_deref().unwrap_or("unknown");
+                let backtrace = std::backtrace::Backtrace::force_capture();
 
-        let timestamp = humantime::format_rfc3339(std::time::SystemTime::now());
-        let location = panic_info
-            .location()
-            .map(|l| format!("{}:{}:{}", l.file(), l.line(), l.column()))
-            .unwrap_or_else(|| "unknown".to_string());
-        let message = panic_info
-            .payload()
-            .downcast_ref::<&str>()
-            .copied()
-            .or_else(|| {
-                panic_info
-                    .payload()
-                    .downcast_ref::<String>()
-                    .map(|s| s.as_str())
-            })
-            .unwrap_or("unknown panic");
+                let log_entry = format!(
+                    "=== PANIC at {} ===\nLocation: {}\nMessage: {}\nBacktrace:\n{}\n",
+                    timestamp, location, report.message, backtrace
+                );
 
-        let backtrace = std::backtrace::Backtrace::force_capture();
+                // Append rather than create-new: two threads panicking inside the same millisecond would
+                // otherwise lose the second report, and two reports in one file beats none.
+                if let Ok(mut file) = std::fs::OpenOptions::new()
+                    .create(true)
+                    .append(true)
+                    .open(&panic_log)
+                {
+                    use std::io::Write;
+                    let _ = file.write_all(log_entry.as_bytes());
+                }
+            }
 
-        let log_entry = format!(
-            "=== PANIC at {} ===\nLocation: {}\nMessage: {}\nBacktrace:\n{}\n",
-            timestamp, location, message, backtrace
-        );
-
-        // Append rather than create-new: two threads panicking inside the same millisecond would
-        // otherwise lose the second report, and two reports in one file beats none.
-        if let Ok(mut file) = std::fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(&panic_log)
-        {
-            use std::io::Write;
-            let _ = file.write_all(log_entry.as_bytes());
-        }
-
-        // The crash report says where it broke; this says what the server had been doing up to
-        // that point. `write` reads the table with `try_lock`, so it cannot deadlock even when
-        // this is the very thread that was holding the counter lock when it panicked.
-        if tools::stats::write(tools::stats::Ending::Panic, std::time::SystemTime::now()).is_err() {
-            // Nowhere left to report that the counters could not be filed.
-        }
-    }));
+            // The crash report says where it broke; this says what the server had been doing up to
+            // that point. `write` reads the table with `try_lock`, so it cannot deadlock even when
+            // this is the very thread that was holding the counter lock when it panicked.
+            if tools::stats::write(tools::stats::Ending::Panic, std::time::SystemTime::now())
+                .is_err()
+            {
+                // Nowhere left to report that the counters could not be filed.
+            }
+        }));
+    });
 }
 
 /// Print a startup failure the way a human reads it, and exit non-zero.
