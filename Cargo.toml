@@ -123,7 +123,7 @@ rusqlite = { version = "0.40", features = ["bundled"] }
 r2d2 = "0.8"
 dirs = "7.0"
 crashdump = { package = "crashdump-rs", git = "ssh://git@github.com/ssoj13/crashdump-rs.git", branch = "main" }
-locate-rs = { package = "filesystem-locate", git = "ssh://git@github.com/ssoj13/locate-rs.git", rev = "465c85756388641b9469e4639f2f013bdc0d0b53", optional = true }
+locate-rs = { package = "filesystem-locate", git = "ssh://git@github.com/ssoj13/locate-rs.git", rev = "0d7534537de025fc2135570041715b21ff1487d9", optional = true }
 
 # Dependencies of the vendored `src/mcp_setup/` module (agent config files are JSONC / TOML and
 # must be rewritten through a CST to preserve comments and formatting). See src/mcp_setup/VENDOR.md.

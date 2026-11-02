@@ -1951,7 +1951,7 @@ dependencies = [
 [[package]]
 name = "filesystem-locate"
 version = "0.1.0"
-source = "git+ssh://git@github.com/ssoj13/locate-rs.git?rev=465c85756388641b9469e4639f2f013bdc0d0b53#465c85756388641b9469e4639f2f013bdc0d0b53"
+source = "git+ssh://git@github.com/ssoj13/locate-rs.git?rev=0d7534537de025fc2135570041715b21ff1487d9#0d7534537de025fc2135570041715b21ff1487d9"
 dependencies = [
  "anyhow",
  "fscan-rs",
