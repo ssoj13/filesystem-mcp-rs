@@ -2597,11 +2597,11 @@ async fn run_command_spawn_failure_includes_operator_hint() -> Result<()> {
     let res = srv
         .call_tool(
             "run_command",
-            json!({ "command": "cd nonexistent_dir_xyz && echo hi" }),
+            json!({ "command": "no_such_program_xyz arg && echo hi" }),
         )
         .await?;
 
-    // Spawning the `cd` builtin fails -> a real tool-level error.
+    // Not `cd`, as this was: macOS has a real /usr/bin/cd, so spawning it succeeds there.
     assert_err(&res);
     let msg = res["error"]["message"].as_str().unwrap_or("");
     assert!(
