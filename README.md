@@ -264,7 +264,7 @@ The one thing to set up is `filesystem-mcp-rs install`, re-run after upgrading. 
 | `agent_stop` | Stop an agent you started, with everything it started. `filesystem-mcp-rs agents` shows the tree and `agents stop N` stops any run, from a terminal |
 | `chat_send` | Send to a name (`Erdos-4821`), a full address, or a mask (`myproject:*:*:*`); `replyTo` answers a message, in `text` or one `react` word |
 | `chat_read` | Read unread messages; `waitS` waits for a new one, `ack` confirms ids, `show` fetches the text of messages you received, by id, `sent` reports how far yours got |
-| `chat_join` | Set your `status`, ask for quiet with `quietMin`, set `topic`, `parent`, `project`, or take over a closed agent's `name` |
+| `chat_join` | Set your `status`, ask for quiet with `quietMin`, set `topic`, `project`, or take over a closed agent's `name` |
 
 **How a message arrives.** `chat_send` commits it to `<state>/chat.db`, and then two routes race for it; whichever gets there first shows it and the other stays quiet.
 

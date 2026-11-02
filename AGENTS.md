@@ -146,7 +146,16 @@ verified by reintroducing the defect it exists for and watching it fail, then re
 3. filesystem-mcp write_file `content` must be ContentRef object (bare string → inline tolerated
    since 0.2.1, but canonical form is ContentRef object).
 
+## Traps
+- On this machine `pwsh` on PATH can be a copy of Windows PowerShell 5.1 (`System32\WindowsPowerShell\v1.0\pwsh.exe`), which wins over the real 7. Under it `&&` is a parser error and a failed native command mid-line can exit 0. Run gates with no shell or `shell:"bash"`, and read the exit code.
+- `crates/agent-chat` names agents by list position only under `cfg!(test)`, so its unit tests never see the random number. `tests/chat.rs` runs the real path.
+- A manifest under `<state>/agents` is read when the server starts. A scripted client must be written first.
+- A message can arrive on any tool's result, so a test waiting for one asks `chat_read {show}` by id.
+- `assert_ok` in `tests/integration.rs` checks `is_error`, which MCP does not send (`isError`), and ignores a JSON-RPC `error`: it passes on a failed call.
+- `locate_parent_refresh_covers_pending_child_through_stdio` failed once on 2026-11-01 under a full run with `status` null, and did not repeat in 8 runs. Cause unknown; the assertion now prints the reply.
+
 ## Session notes (FIFO, prune when stale)
+- 2026-11-01: agent graph shipped (`e78733f`): `agent_start`, `agent_stop`, `agent_ls`, `agents` command, `src/tools/agents.rs`, design in `docs/superpowers/specs/2026-11-01-agent-graph-design.md`. Live on Codex and Claude Code. `access` is not enforced by the server: measured, see the spec.
 - 2026-09-17: `shell:"bash"` on Windows no longer trusts PATH. `resolve_shell_program` →
   `bash_candidates()` (git `--exec-path` cached in a OnceLock → `git.exe` location → install roots
   → PATH) → `pick_bash()` (pure, unit-tested) which REFUSES a System32/SysWOW64/WindowsApps
