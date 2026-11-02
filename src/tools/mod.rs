@@ -1,6 +1,8 @@
 pub mod archive;
 pub mod binary;
 pub mod bulk_edit;
+#[cfg(feature = "chat-tools")]
+pub mod chat;
 pub mod compare;
 pub mod diff;
 pub mod docx;

@@ -10,9 +10,9 @@ Build: `cargo build` / test: `cargo test` / lint: `cargo clippy --all-targets --
 Format: `cargo fmt --check` is a gate (CI runs it on Linux only). The crate was reflowed once in
 `90a3e7a`, listed in `.git-blame-ignore-revs` — never hand-wrap against rustfmt, run it.
 The test gate is **plain `cargo test`**, never `--bin filesystem-mcp-rs`. There is no lib target, so
-`--lib` cannot run; but `--bin` silently skips `tests/integration.rs` and `tests/http_transport.rs`
-(three binaries: unit + integration + http_transport). `--bin <filter>` is fine to iterate on one
-unit module; it is not the gate. The gate is 637 tests: 569 unit + 64 integration + 4 http.
+`--lib` cannot run; but `--bin` silently skips `tests/` and `crates/agent-chat`. `--bin <filter>` is
+fine to iterate on one unit module; it is not the gate. `cargo test` stops at the first failing binary,
+so use `--no-fail-fast` to see them all.
 `cargo mutants --in-diff <diff>` is how this project checks whether the tests actually test
 anything — a surviving mutant is a line no assertion pins. It builds its baseline from HEAD, so it
 needs a COMMITTED, compiling tree: commit first, then run. `mutants.out/` is gitignored.
@@ -34,6 +34,20 @@ crate is behind `#[cfg(windows)]` and a Linux-only pass never sees the driver.
   merged in `build_tool_router` under the same cfg. Never add a `#[cfg]` tool to the main block.
 - All ten feature configurations are expected to build with `--all-targets`; check before shipping a
   gating change.
+- The agent chat (`chat-tools`, default on) is `crates/agent-chat` (store, session, `chat-wait`; knows
+  nothing of MCP) plus `src/tools/chat.rs` (tools and hooks; tied to the server type by `#[tool_router]`).
+  `chat.db` is the only channel between servers; there are no sockets. It is a chat, never "mail". No
+  host pipes, no `codex queue` / `agy agentapi`, no hooks, no flags. Two routes: tool results via
+  `call_tool` (`chat_before_call`, `chat_after_call`), and the `chat-wait` command an agent keeps in the
+  background, whose exit wakes a client that starts a turn on that (Codex does not). Measured 2026-10-31
+  on Claude Code 2.1.316: with `structuredContent` present the model sees only that, so extra `content`
+  blocks are invisible there (which also means the `[MCP lock]` footer reaches the model only on tools
+  without structured output), and a subagent shares its parent's server process. Only an explicit ack
+  or reply marks a message read, for both reasons (an acknowledgement reaction is read as it goes out). Design:
+  `docs/superpowers/specs/2026-10-31-agent-chat-design.md`.
+- `crates/agent-chat` is a default workspace member, so plain `cargo test` and `cargo clippy` cover it.
+  Under `--stream` the whole process is one chat agent: a stateless HTTP client gets a new service per
+  request, so one subscriber per session would be one per call.
 - `src/env_spec.rs` is the ONE registry of `FS_MCP_*` vars. `install` writes them all into the
   client config (blank = unset), the hint block renders from it, `--list-env` prints it. Never
   hardcode an env key or its default anywhere else; readers must go through `env_spec::get`

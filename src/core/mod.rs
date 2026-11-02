@@ -18,6 +18,7 @@ pub mod paths_guard;
 pub mod run_command_args;
 pub mod schema;
 pub mod serde;
+pub mod stdin_watch;
 pub mod tool_graph;
 /// Test-only guard: asserts the tool list stays within the budgets in `docs/TOOL_STYLE.md`.
 #[cfg(test)]

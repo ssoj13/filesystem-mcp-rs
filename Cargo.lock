@@ -49,6 +49,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "agent-chat"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "rusqlite",
+ "serde",
+ "serde_json",
+ "sysinfo",
+ "tempfile",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
 name = "aho-corasick"
 version = "1.1.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1937,6 +1951,7 @@ dependencies = [
 name = "filesystem-mcp-rs"
 version = "0.2.1"
 dependencies = [
+ "agent-chat",
  "anyhow",
  "arboard",
  "async-recursion",

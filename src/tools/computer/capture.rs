@@ -214,7 +214,12 @@ fn save(img: RgbaImage, rect: Rect) -> anyhow::Result<CapResult> {
     static CAPTURE_SEQ: AtomicU64 = AtomicU64::new(0);
     let seq = CAPTURE_SEQ.fetch_add(1, Ordering::Relaxed);
     let dir = crate::core::paths::sub_dir(crate::core::paths::SubDir::Tmp)?;
-    let path = dir.join(format!("capture-{}-{}-{}.png", now_ms(), std::process::id(), seq));
+    let path = dir.join(format!(
+        "capture-{}-{}-{}.png",
+        now_ms(),
+        std::process::id(),
+        seq
+    ));
     img.save_with_format(&path, image::ImageFormat::Png)?;
     Ok(CapResult {
         path: path.display().to_string(),

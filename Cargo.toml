@@ -11,8 +11,9 @@ categories = ["command-line-utilities", "filesystem"]
 readme = "README.md"
 
 [workspace]
-members = ["."]
-default-members = ["."]
+members = [".", "crates/agent-chat"]
+# Both, so that plain `cargo test` and `cargo clippy` stay the whole gate.
+default-members = [".", "crates/agent-chat"]
 resolver = "3"
 
 # release.yml builds binaries for a pushed `v*.*.*` tag and attaches them to a GitHub
@@ -31,6 +32,7 @@ name = "filesystem-mcp-rs"
 path = "src/main.rs"
 
 [dependencies]
+agent-chat = { path = "crates/agent-chat", optional = true }
 anyhow = "1.0.104"
 base64 = "0.23.1"
 clap = { version = "4.6.7", features = ["derive"] }
@@ -107,7 +109,7 @@ docx-lite = "0.2"
 
 # LLM tools
 uuid = { version = "1.27", features = ["v4", "serde"] }
-time = { version = "0.3", features = ["formatting"] }
+time = { version = "0.3", features = ["formatting", "parsing"] }
 dotenvy = "0.15"
 toml = "1.1"
 thiserror = "2.0"
@@ -136,9 +138,11 @@ serial_test = "4.0"
 rust_xlsxwriter = "0.99"
 
 [features]
-default = ["http-tools", "s3-tools", "screenshot-tools", "computer-tools", "locate-tools"]
+default = ["http-tools", "s3-tools", "screenshot-tools", "computer-tools", "locate-tools", "chat-tools"]
 locate-tools = ["dep:locate-rs"]
 http-tools = []
+# Live chat between agents on one machine: `crates/agent-chat` behind the `chat_*` tools and `chat-wait`.
+chat-tools = ["dep:agent-chat"]
 s3-tools = ["dep:aws-config", "dep:aws-sdk-s3", "dep:aws-credential-types", "dep:aws-types"]
 screenshot-tools = ["dep:image", "dep:xcap", "dep:arboard"]
 

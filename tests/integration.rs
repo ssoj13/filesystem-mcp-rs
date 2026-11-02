@@ -104,6 +104,13 @@ struct ServerHandle {
     child: Child,
     tx_out: mpsc::Sender<serde_json::Value>,
     pending: PendingMap,
+    #[cfg_attr(
+        not(feature = "locate-tools"),
+        expect(
+            dead_code,
+            reason = "collected for every server, read only by the locate tests"
+        )
+    )]
     notifications: Arc<Mutex<Vec<serde_json::Value>>>,
     /// The child's private state root. Held to keep it on disk for the server's lifetime;
     /// dropping it early would delete the directory out from under a running process. Also read
@@ -2469,8 +2476,13 @@ async fn session_footer_interval_can_be_configured() -> Result<()> {
             .await?;
         let text = res["result"]["content"][0]["text"].as_str().unwrap_or("");
         assert_eq!(text, "probe");
+        // By its text and not by the block count: the first result also carries a chat line.
         assert_eq!(
-            res["result"]["content"].as_array().unwrap().len() == 2,
+            res["result"]["content"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|block| block["text"].as_str().unwrap_or("").contains("[MCP lock]")),
             call % 3 == 1,
             "call {call}: {res}"
         );

@@ -13,7 +13,9 @@ use crate::mcp_setup::client::McpClient;
 use crate::mcp_setup::clients;
 use crate::mcp_setup::error::SetupError;
 use crate::mcp_setup::host::{self, HostSpec};
-use crate::mcp_setup::types::{ApplyReport, Channel, RemoveReport, Scope, SetupContext, StatusReport};
+use crate::mcp_setup::types::{
+    ApplyReport, Channel, RemoveReport, Scope, SetupContext, StatusReport,
+};
 
 type CliResult<T> = std::result::Result<T, Box<dyn std::error::Error>>;
 

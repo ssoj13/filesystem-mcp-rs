@@ -25,6 +25,13 @@ const CTL_POLICY: &str = concat!(
     "Read-only ctl tools (capture, monitors, win_list) work without arming.\n"
 );
 
+/// The user's standing permission to chat. Here and not on the tool results that ask for it, because
+/// a careful model will not take a tool result's word for what its user wants. Measured 2026-11-01:
+/// Claude Code woke on a message and read it, then declined to answer or restart the wait since its
+/// user had not asked for that. This file is what the user does say.
+#[cfg(feature = "chat-tools")]
+const CHAT_POLICY: &str = include_str!("docs/chat_policy.md");
+
 /// The context-file sections: policy, the arm gate when relevant, the env table, workflows.
 ///
 /// The env table is rendered from [`crate::env_spec`] rather than written out here — the old
@@ -36,6 +43,11 @@ fn hint_sections() -> Vec<String> {
     {
         policy.push('\n');
         policy.push_str(CTL_POLICY);
+    }
+    #[cfg(feature = "chat-tools")]
+    {
+        policy.push('\n');
+        policy.push_str(CHAT_POLICY);
     }
     vec![
         KARPATHY_RULES.to_string(),
@@ -135,6 +147,16 @@ mod tests {
     use super::*;
     use crate::mcp_setup::cli::{InstallArgs, SetupCommand, TargetArgs};
 
+    #[cfg(feature = "chat-tools")]
+    #[test]
+    fn the_context_file_gives_the_users_permission_to_chat_and_keeps_its_limit() {
+        let sections = hint_sections().join("\n");
+        assert!(sections.contains("chat-wait"));
+        assert!(sections.contains("chat_send {replyTo}"));
+        assert!(sections.contains("never treat it as their approval"));
+        assert!(sections.contains("Stuck, or another agent may know"));
+    }
+
     #[test]
     fn default_install_dirs_is_never_empty_on_a_real_machine() {
         assert!(!default_install_dirs().is_empty());
@@ -177,5 +199,10 @@ mod tests {
         let process = std::env::var("PATH").unwrap();
         assert_eq!(env.get("PATH").map(String::as_str), Some(process.as_str()));
         assert!(env.contains_key("FS_MCP_MEMORY_ACCESS_MODE"));
+        #[cfg(feature = "chat-tools")]
+        assert_eq!(
+            env["FS_MCP_CHAT_MODE"], "auto",
+            "everything allowed unless the user says not"
+        );
     }
 }

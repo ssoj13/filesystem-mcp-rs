@@ -130,6 +130,9 @@ mod tests {
         ("src/mcp_setup/types.rs", &["dirs::home_dir"]),
         // Same reason: finds `~/.cargo/bin` to report where the binary was installed.
         ("src/mcp_setup/host.rs", &["dirs::home_dir"]),
+        // Vendored from mcp-setup-rs, which has no state root. It captures another CLI's output
+        // for the length of one command: nothing it writes is this server's state.
+        ("src/mcp_setup/plugin.rs", &["temp_dir("]),
     ];
 
     /// Files allowed to spell a [`DOC_STALE`] location in a `///` line, with the reason. Same

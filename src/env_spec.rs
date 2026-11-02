@@ -30,6 +30,8 @@ pub fn vars() -> Vec<EnvVar> {
     v.extend(log_vars());
     v.extend(stats_vars());
     v.extend(policy_vars());
+    #[cfg(feature = "chat-tools")]
+    v.extend(chat_vars());
     v.extend(net_vars());
     v.extend(memory_vars());
     v.extend(locate_vars());
@@ -89,6 +91,16 @@ fn policy_vars() -> Vec<EnvVar> {
         key: "FS_MCP_SESSION_FOOTER_EVERY",
         default: crate::core::agent_policy::FOOTER_EVERY_DEFAULT_STR,
         help: "MCP lock reminder: first tool result, then every N tool calls. 0 = off.",
+    }]
+}
+
+/// What a session may do about a message from another agent without asking its user.
+#[cfg(feature = "chat-tools")]
+fn chat_vars() -> Vec<EnvVar> {
+    vec![EnvVar {
+        key: "FS_MCP_CHAT_MODE",
+        default: "auto",
+        help: "When another agent writes: auto = reply, then tell the user; ask = show the user and ask before replying. Either way a message can wake an idle session.",
     }]
 }
 

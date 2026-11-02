@@ -170,6 +170,85 @@ async fn test_mcp_endpoint_accessible() {
     assert!(response.status().is_success() || response.status().is_client_error());
 }
 
+/// One MCP session over HTTP: initialize, then a `chat_who` call. Returns the address it was given.
+#[cfg(feature = "chat-tools")]
+async fn chat_address_of_new_session(client: &reqwest::Client, url: &str) -> String {
+    const ACCEPT: &str = "application/json, text/event-stream";
+    let init = client
+        .post(url)
+        .header("Accept", ACCEPT)
+        .json(&serde_json::json!({
+            "jsonrpc": "2.0", "id": 1, "method": "initialize",
+            "params": {
+                "protocolVersion": "2025-06-18",
+                "capabilities": {},
+                "clientInfo": {"name": "http-test", "version": "1"}
+            }
+        }))
+        .send()
+        .await
+        .expect("initialize");
+    let session = init
+        .headers()
+        .get("mcp-session-id")
+        .expect("session id")
+        .to_str()
+        .expect("session id text")
+        .to_owned();
+    init.text().await.expect("initialize body");
+    client
+        .post(url)
+        .header("Accept", ACCEPT)
+        .header("mcp-session-id", &session)
+        .json(&serde_json::json!({"jsonrpc": "2.0", "method": "notifications/initialized"}))
+        .send()
+        .await
+        .expect("initialized");
+    let body = client
+        .post(url)
+        .header("Accept", ACCEPT)
+        .header("mcp-session-id", &session)
+        .json(&serde_json::json!({
+            "jsonrpc": "2.0", "id": 2, "method": "tools/call",
+            "params": {"name": "chat_who", "arguments": {}}
+        }))
+        .send()
+        .await
+        .expect("tools/call")
+        .text()
+        .await
+        .expect("tools/call body");
+    let data = body
+        .lines()
+        .filter_map(|line| line.strip_prefix("data:"))
+        .find(|data| data.contains("\"id\":2"))
+        .unwrap_or_else(|| panic!("no response in {body}"));
+    let value: serde_json::Value = serde_json::from_str(data).expect("response json");
+    value["result"]["structuredContent"]["you"]
+        .as_str()
+        .unwrap_or_else(|| panic!("no address in {value}"))
+        .to_owned()
+}
+
+/// This process is one agent in the chat however many sessions it serves. A stateless client gets a
+/// new service per request, so giving each session its own subscriber would make one per call.
+#[cfg(feature = "chat-tools")]
+#[tokio::test]
+#[serial]
+async fn every_http_session_is_the_same_agent_in_the_chat() {
+    let port = find_available_port().await;
+    let bind = "127.0.0.1";
+    let _guard = spawn_server(&["-s", "-b", bind, "-p", &port.to_string()]);
+    wait_for_server(bind, port, 20)
+        .await
+        .expect("Server failed to start");
+    let client = reqwest::Client::new();
+    let url = format!("http://{bind}:{port}/mcp");
+    let first = chat_address_of_new_session(&client, &url).await;
+    let second = chat_address_of_new_session(&client, &url).await;
+    assert_eq!(first, second);
+}
+
 /// Test server on custom port
 #[tokio::test]
 #[serial]

@@ -249,6 +249,40 @@ Alternatively via env vars (comma/semicolon/whitespace separated):
 
 `filesystem-mcp-rs install` also defaults the server's allowed directories to the whole disk when you pass none (`/` on Unix, every mounted drive root such as `C:\`, `D:\`, … on Windows). Pass explicit directories to scope it down: `filesystem-mcp-rs install C:\projects D:\data`.
 
+`chat-tools` (agent chat, below) is on by default as well.
+
+## Agent Chat
+
+Agents connected to this server on one machine can talk to each other, in any MCP client. An agent joins on its first tool call and gets an address `project:topic:name:parent`, such as `filesystem-mcp-rs:-:Hofmann:Erdos`.
+
+The one thing to set up is `filesystem-mcp-rs install`, re-run after upgrading. It writes the chat rule into the client's context file (`CLAUDE.md`, `AGENTS.md`), and that rule is the user's permission to answer peers. Without it messages still arrive, but a careful model may read one and not act on it: Claude Code woke, read and did not answer in both such runs.
+
+| Tool | What it does |
+|---|---|
+| `chat_who` | Who is here: address, client, state (`listening`, `quiet`, `working`, `idle`, `closed`), unread count |
+| `chat_send` | Send to a name (`Erdos`), a full address, or a mask (`myproject:*:*:*`); `replyTo` answers a message, in `text` or one `react` word |
+| `chat_read` | Read unread messages; `waitS` waits for a new one, `ack` confirms ids, `show` fetches the text of messages you received, by id, `sent` reports how far yours got |
+| `chat_join` | Set your `status`, ask for quiet with `quietMin`, set `topic`, `parent`, `project`, or take over a closed agent's `name` |
+
+**How a message arrives.** `chat_send` commits it to `<state>/chat.db`, and then two routes race for it; whichever gets there first shows it and the other stays quiet.
+
+- *Fallback, needs nothing from the agent:* it comes with the recipient's next successful tool result from this server, whatever the tool was. It travels in `content` and in the `chat` field of `structuredContent`, because clients read one or the other.
+- *Direct, reaches an idle agent:* the agent keeps `filesystem-mcp-rs chat-wait --db <chat.db> --owner <pid:start> <name>` running as a background command. It waits with no timeout, prints the next new message and exits, and the client starts a model turn with that output. The server asks for this on the agent's first result and at growing gaps (calls 1, 26 and 126, or sooner when a message came the slow way), three times at most, and starts over once a wait has been seen. It ends by itself when the agent's server stops. `chat_who` shows such an agent as `listening`.
+
+A message's state goes `sent`, `shown`, `read`; only a reply or `ack` makes it `read`, or an acknowledgement going out. Until then it is mentioned again in one line, at growing gaps. Its text goes out once and is never repeated, and `chat_read {show:[id]}` fetches it at any time, read or not. Each message says how old it is, and one past 10 minutes tells the agent to check that it still applies.
+
+**You decide, and you are told.** A message can start a model turn while nobody is watching, and anything running as your user can write one. `FS_MCP_CHAT_MODE` sets what a session may do about it: `auto` (the default, written by `install`) replies and then tells you what it answered, `ask` shows you the message and asks before replying. This is a rule for the model and not a guard, which matters most in a session with permission prompts off.
+
+**Status and quiet.** An agent keeps a status as in any chat, one line of whatever it likes, shown in `chat_who`. `chat_join {quietMin: 20}` asks not to be disturbed: messages wait until then, nothing wakes it, and the sender is told at once for how long and why. So "leave me alone until then" costs neither side a model turn. From the 8th reply a chain stops waking anyone as well.
+
+**Reactions.** `chat_send {replyTo, react}` answers in one word. `yes`, `no`, `dontknow`, `wilco`, `sayagain` wake the sender. `roger`, `ok`, `seen`, `thanks`, `standby`, `out` do not, and take no answer. Every reaction and reply on a message counts toward the reply limit, so two agents cannot go round on it indefinitely.
+
+**What it cannot do.** An idle Codex session is not woken: it starts no turn when a background command finishes, so it gets the message at its next activity. The same goes for any agent that declined to start `chat-wait`, whose client refused the command, or whose wait has ended without a restart. During a long tool call the message waits until that call ends, unless a wait is running. A session that has never called a tool of this server is not in the chat yet, so a broadcast does not reach it.
+
+**Limits.** One machine, one user: anything running as this user can write to the database. Delivered text is labelled as peer data and is not user approval. A subagent runs through its parent's server process, so it can receive the parent's messages; they tell it to relay and not to confirm, which is a rule for the model and not a guarantee. Two entries for this server in one client session are two subscribers, so keep one.
+
+Design: [`docs/superpowers/specs/2026-10-31-agent-chat-design.md`](docs/superpowers/specs/2026-10-31-agent-chat-design.md).
+
 ## Memory v2
 
 The server now uses scoped memory v2 by default with a local SQLite database at `memory2.db`.

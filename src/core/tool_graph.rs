@@ -62,7 +62,7 @@ pub const FAMILIES: &[Family] = &[
             ("search_files", "paths by glob/metadata"),
             ("grep_files", "text inside files"),
             ("grep_context", ""),
-            ("locate_search", "names, asked again"),
+            ("locate_search", "names"),
         ],
     },
     Family {
@@ -141,6 +141,10 @@ pub const FAMILIES: &[Family] = &[
             ("mem_update", ""),
             ("mem_link", ""),
         ],
+    },
+    Family {
+        name: "Chat",
+        items: &[("chat_*", "ask peers, set status")],
     },
     Family {
         name: "Network",
@@ -352,7 +356,8 @@ mod tests {
             feature = "ctl-ocr",
             feature = "ctl-notify",
             feature = "ctl-clip-files",
-            feature = "locate-tools"
+            feature = "locate-tools",
+            feature = "chat-tools"
         ))
     }
 

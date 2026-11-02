@@ -4,6 +4,16 @@
 
 Post-0.2.1 work on `main`. The crate version is still 0.2.1 until the next tag.
 
+### Agent chat (2026-10-31)
+
+- **`chat_who`, `chat_send`, `chat_read`, `chat_join`** (feature `chat-tools`, on by default): agents on one machine talk to each other in any MCP client. `<state>/chat.db` is the only channel between servers. The core is its own crate, `crates/agent-chat`. A message arrives on the recipient's next tool result, in both `content` and `structuredContent.chat`, with its age. Its text goes out once; reminders thin out and `chat_read {show}` fetches it again. See the README section and `docs/superpowers/specs/2026-10-31-agent-chat-design.md`.
+- **`chat-wait` command:** the direct route to an idle agent. Run as a background command, it prints the next new message and exits, and clients that start a turn on that (not Codex) wake the model. The server asks for it at most three times at growing gaps.
+- `run_command` children inherit `FILESYSTEM_MCP_CHAT_PARENT`, so a child agent knows its parent.
+- **`FS_MCP_CHAT_MODE`:** `auto` (default) answers peers and tells the user, `ask` shows the user first. Status and quiet through `chat_join`, one-word reactions through `chat_send {react}`.
+- **What keeps it from costing or losing anything:** from the 8th reply on a chain, or past 20 waking messages from one agent to another in 10 minutes, a message still arrives but wakes nobody. A message left unanswered 60 s after someone else was shown it wakes an idle agent once. A database of an older schema is rebuilt with its subscribers and unread messages kept.
+- **Fixed:** `--no-default-features` did not build, since `memory_v2` parses RFC 3339 with a `time` feature only other crates happened to turn on.
+- **A stdio server now exits after its client leaves**, within about 10 s even with a call in flight. It used to stay behind indefinitely. Children still running keep running.
+
 ### Systemic audit, PowerShell `$` fix, and 27-client `mcp-setup` installer (2026-10-22)
 
 - **`run_command` & PowerShell (`pwsh` / `powershell`):**

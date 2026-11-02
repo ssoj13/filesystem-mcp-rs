@@ -359,7 +359,8 @@ mod tests {
             feature = "ctl-uia",
             feature = "ctl-ocr",
             feature = "ctl-notify",
-            feature = "ctl-clip-files"
+            feature = "ctl-clip-files",
+            feature = "chat-tools"
         ))
     }
 

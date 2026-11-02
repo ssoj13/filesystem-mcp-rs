@@ -35,7 +35,6 @@ use rmcp::{
     tool,
     tool_handler,
     tool_router,
-    transport::stdio,
 };
 use schemars::JsonSchema;
 use serde_json::{Value, json};
@@ -144,11 +143,33 @@ use std::os::unix::fs::PermissionsExt;
     subcommand_negates_reqs = true
 )]
 struct TopCli {
-    /// `install` / `uninstall` / `status`: manage this binary's registration in AI coding agents.
     #[command(subcommand)]
-    setup: Option<mcp_setup::cli::SetupCommand>,
+    command: Option<TopCommand>,
     #[command(flatten)]
     server: ServerArgs,
+}
+
+#[derive(clap::Subcommand, Debug)]
+enum TopCommand {
+    /// `install` / `uninstall` / `status`: manage this binary's registration in AI coding agents.
+    #[command(flatten)]
+    Setup(mcp_setup::cli::SetupCommand),
+    /// Wait for an agent's next chat message, print it and exit. An agent runs this as a background
+    /// command so that the message wakes it while it is idle; its first tool result gives the line.
+    #[cfg(feature = "chat-tools")]
+    ChatWait {
+        /// The chat database.
+        #[arg(long)]
+        db: PathBuf,
+        /// Process id and start time of the server this agent belongs to, as `pid:start`.
+        #[arg(long, value_parser = parse_chat_owner)]
+        owner: (i64, i64),
+        /// What the session may do about a message without asking: ask or auto.
+        #[arg(long, value_parser = agent_chat::session::ChatMode::parse, default_value = "auto")]
+        mode: agent_chat::session::ChatMode,
+        /// The agent's name in the chat.
+        name: String,
+    },
 }
 
 #[derive(Parser, Debug)]
@@ -241,6 +262,9 @@ struct FileSystemServer {
     s3_client: Arc<OnceCell<aws_sdk_s3::Client>>,
     thinking_state: Arc<ThinkingState>,
     memory_store: Option<Arc<SqliteMemoryStore>>,
+    /// This MCP session's place in the agent chat, or `None` when `chat.db` could not be opened.
+    #[cfg(feature = "chat-tools")]
+    chat: Option<Arc<agent_chat::session::ChatSession>>,
     #[cfg(feature = "locate-tools")]
     indexer: Option<Arc<Indexer>>,
     llm_server: Option<tools::llm::LlmMcpServer>,
@@ -293,6 +317,8 @@ impl FileSystemServer {
         tool_router.merge(Self::screenshot_router());
         #[cfg(feature = "locate-tools")]
         tool_router.merge(Self::locate_router());
+        #[cfg(feature = "chat-tools")]
+        tool_router.merge(Self::chat_router());
         normalize_tool_schemas(&mut tool_router);
         // Neighbours a wrong pick is likely to miss, from the one table in core/tool_graph.rs.
         crate::core::tool_graph::annotate(&mut tool_router);
@@ -352,6 +378,8 @@ impl FileSystemServer {
             s3_client: Arc::new(OnceCell::new()),
             thinking_state: Arc::new(ThinkingState::new()),
             memory_store: None,
+            #[cfg(feature = "chat-tools")]
+            chat: None,
             #[cfg(feature = "locate-tools")]
             indexer: None,
             llm_server: None,
@@ -4072,11 +4100,7 @@ impl FileSystemServer {
                 let txt = if matches.is_empty() {
                     format!("No matches for: {}", args.pattern)
                 } else {
-                    format!(
-                        "Found {} matches:\n\n{}",
-                        matches.len(),
-                        lines.join("\n")
-                    )
+                    format!("Found {} matches:\n\n{}", matches.len(), lines.join("\n"))
                 };
                 let s = json!({
                     "matches": matches.iter().map(|m| json!({
@@ -5654,9 +5678,16 @@ USE CASES: Patch executables, fix binary data, search-replace in non-text files.
             None
         };
 
+        #[cfg(feature = "chat-tools")]
+        tools::chat::refuse_chat_wait(&args.command, &args.args)?;
+        #[cfg(feature = "chat-tools")]
+        let env = self.chat_child_env(args.env).await;
+        #[cfg(not(feature = "chat-tools"))]
+        let env = args.env;
+
         let params = process::RunParams {
             cwd: args.cwd,
-            env: args.env,
+            env,
             clear_env: *args.clear_env,
             env_prepend: args.env_prepend,
             env_append: args.env_append,
@@ -8339,10 +8370,18 @@ impl ServerHandler for FileSystemServer {
             .as_ref()
             .map(|stats| (stats.intern(&request.name), Instant::now()));
 
+        #[cfg(feature = "chat-tools")]
+        let was_chat_read = request.name == "chat_read";
+        #[cfg(feature = "chat-tools")]
+        self.chat_before_call(&context).await;
+
         let ctx = rmcp::handler::server::tool::ToolCallContext::new(self, request, context);
         // Deliberately not `?`: the `Err` arm is half of what `classify` scores, and propagating
         // here would leave every rejected call and every tool that broke below the handler
         // uncounted - which is much of what an operator opens this table to find.
+        #[cfg(feature = "chat-tools")]
+        let result = self.chat_while_busy(self.tool_router.call(ctx)).await;
+        #[cfg(not(feature = "chat-tools"))]
         let result = self.tool_router.call(ctx).await;
 
         if let (Some(stats), Some((tool, timer))) = (self.stats.as_ref(), measured) {
@@ -8368,6 +8407,8 @@ impl ServerHandler for FileSystemServer {
         }
 
         let response = result?;
+        #[cfg(feature = "chat-tools")]
+        let response = self.chat_after_call(was_chat_read, response).await;
         Ok(if self.session_footer_every != 0 {
             match response {
                 CallToolResponse::Complete(result) => {
@@ -8401,8 +8442,15 @@ impl ServerHandler for FileSystemServer {
 
 /// Run server in stdio mode (default)
 async fn run_stdio_mode(server: FileSystemServer) -> Result<(), Box<dyn std::error::Error>> {
-    let transport = stdio();
-    let svc = server.serve(transport).await?;
+    let input = core::stdin_watch::OnEof::new(tokio::io::stdin(), exit_after_client_left);
+    let svc = match server.serve((input, tokio::io::stdout())).await {
+        Ok(svc) => svc,
+        Err(error) => {
+            // The way out can hang on stdin just as it can after serving.
+            exit_after_client_left();
+            return Err(error.into());
+        }
+    };
     // rmcp completes the handshake before handing back the service, so the peer is known here.
     // Taken from this one place rather than from the `call_tool` seam, which stays untouched.
     if let Some(info) = svc.peer_info() {
@@ -8411,8 +8459,33 @@ async fn run_stdio_mode(server: FileSystemServer) -> Result<(), Box<dyn std::err
             info.client_info.version.clone(),
         );
     }
-    svc.waiting().await?;
+    #[cfg(feature = "chat-tools")]
+    svc.service()
+        .chat_join_at_start(svc.peer_info().map(|info| info.client_info.name.clone()))
+        .await;
+    let ended = svc.waiting().await;
+    // However it ended, the way out can still hang: the runtime waits for blocking work on drop.
+    exit_after_client_left();
+    ended?;
     Ok(())
+}
+
+/// The stdio client has gone. Normally `run` returns well before this deadline, and the process
+/// exits with this thread still sleeping. A plain thread because a stuck runtime is the case it is for.
+/// A server left behind reads as a live agent in the chat, and its `chat-wait` would never end.
+fn exit_after_client_left() {
+    /// Above the 5 s rmcp gives handlers to finish after EOF.
+    const GRACE: Duration = Duration::from_secs(10);
+    std::thread::spawn(|| {
+        std::thread::sleep(GRACE);
+        warn!("the client left {GRACE:?} ago and shutdown has not finished: exiting");
+        if let Err(e) =
+            tools::stats::write(tools::stats::Ending::Exit, std::time::SystemTime::now())
+        {
+            warn!("Statistics: the counters could not be written: {e}");
+        }
+        std::process::exit(0);
+    });
 }
 
 /// Run server in streamable HTTP mode
@@ -8428,6 +8501,9 @@ async fn run_stream_mode(
     tracing::info!("Starting MCP HTTP server on http://{}/mcp", addr);
 
     // Create service with session management
+    //
+    // `chat` stays shared: this process is one agent in the chat however many sessions it serves.
+    // A stateless client gets a new service per request, so one per session would be one per call.
     let service = StreamableHttpService::new(
         move || {
             let mut session = server.clone();
@@ -8535,18 +8611,37 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
 
     let top = TopCli::parse();
 
-    // Setup subcommands never start the server: they only touch agent configs.
-    if let Some(cmd) = top.setup {
-        let cmd = setup::with_default_dirs(cmd);
-        match mcp_setup::cli::run(&cmd, &setup::host_spec()?) {
-            // A broken or unreachable client is already spelled out in the table; exit non-zero
-            // rather than printing an error line over it.
-            Ok(outcome) => std::process::exit(outcome.exit_code()),
-            Err(err) => {
-                eprintln!("error: {err}");
-                std::process::exit(1);
+    // Subcommands never start the server.
+    match top.command {
+        // These only touch agent configs.
+        Some(TopCommand::Setup(cmd)) => {
+            let cmd = setup::with_default_dirs(cmd);
+            match mcp_setup::cli::run(&cmd, &setup::host_spec()?) {
+                // A broken or unreachable client is already spelled out in the table; exit
+                // non-zero rather than printing an error line over it.
+                Ok(outcome) => {
+                    #[cfg(feature = "chat-tools")]
+                    if matches!(cmd, mcp_setup::cli::SetupCommand::Install(_)) {
+                        println!(
+                            "\nAgent chat: another agent's message can wake an idle session and start a model turn. FS_MCP_CHAT_MODE in the client config decides what it may do: auto (default) replies and then tells you, ask shows you and asks before replying."
+                        );
+                    }
+                    std::process::exit(outcome.exit_code())
+                }
+                Err(err) => {
+                    eprintln!("error: {err}");
+                    std::process::exit(1);
+                }
             }
         }
+        #[cfg(feature = "chat-tools")]
+        Some(TopCommand::ChatWait {
+            db,
+            owner,
+            mode,
+            name,
+        }) => return run_chat_wait(db, owner, mode, &name),
+        None => {}
     }
 
     let args = top.server;
@@ -8695,6 +8790,34 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
         }
     }
 
+    // The agent chat. Failing to open it costs the chat and nothing else, like the memory store.
+    #[cfg(feature = "chat-tools")]
+    match core::paths::db_path("chat.db")
+        .map_err(anyhow::Error::from)
+        .and_then(|path| {
+            let store = agent_chat::store::Store::open(&path, agent_chat::session::now_ms())?;
+            Ok((store, path))
+        }) {
+        Ok((store, db)) => {
+            let mode = chat_mode();
+            let program = match std::env::current_exe() {
+                Ok(exe) => agent_chat::wait::WaitProgram::new(exe, db)
+                    .map(|program| program.with_mode(mode)),
+                Err(e) => {
+                    warn!("Chat: own path unknown: {e}");
+                    None
+                }
+            };
+            if program.is_none() {
+                warn!("Chat: no command line for chat-wait, so no direct route to idle agents");
+            }
+            server.chat = Some(Arc::new(
+                agent_chat::session::ChatSession::new(Arc::new(store), program).with_mode(mode),
+            ));
+        }
+        Err(e) => warn!("Chat tools disabled: {e:#}"),
+    }
+
     // Initialize LLM server (if API keys are available)
     {
         match tools::llm::build_state().await {
@@ -8754,6 +8877,69 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
         Err(e) => warn!("Statistics: the counters could not be written: {e}"),
     }
     served
+}
+
+#[cfg(feature = "chat-tools")]
+fn parse_chat_owner(raw: &str) -> Result<(i64, i64), String> {
+    let (pid, start) = raw
+        .split_once(':')
+        .ok_or_else(|| format!("expected pid:start, got {raw}"))?;
+    let number = |text: &str| {
+        text.parse::<i64>()
+            .map_err(|error| format!("expected pid:start, got {raw}: {error}"))
+    };
+    Ok((number(pid)?, number(start)?))
+}
+
+/// What the user chose. An unreadable value means asking, and says so: someone who set this was
+/// choosing, and a typo must not let sessions answer by themselves.
+#[cfg(feature = "chat-tools")]
+fn chat_mode() -> agent_chat::session::ChatMode {
+    let Some(raw) = env_spec::get("FS_MCP_CHAT_MODE") else {
+        return agent_chat::session::ChatMode::default();
+    };
+    agent_chat::session::ChatMode::parse(&raw).unwrap_or_else(|error| {
+        warn!("FS_MCP_CHAT_MODE: {error}; asking the user");
+        agent_chat::session::ChatMode::Ask
+    })
+}
+
+/// `chat-wait`: what it prints is what the client hands to the model when this process exits.
+#[cfg(feature = "chat-tools")]
+fn run_chat_wait(
+    db: PathBuf,
+    owner: (i64, i64),
+    mode: agent_chat::session::ChatMode,
+    name: &str,
+) -> Result<(), Box<dyn std::error::Error>> {
+    use agent_chat::wait::{WaitEnd, WaitProgram, wait_for_message};
+    use std::io::Write;
+
+    let program = WaitProgram::new(std::env::current_exe()?, db)
+        .ok_or("this path has characters no shell quoting protects")?
+        .with_mode(mode);
+    let end = wait_for_message(&program, name, owner).map_err(|error| {
+        format!(
+            "{error:#}. The wait has ended. If this looks passing, start it again: {}",
+            program.command(name, owner)
+        )
+    })?;
+    let text = match end {
+        WaitEnd::Messages(text) => text,
+        WaitEnd::AlreadyWaiting => {
+            format!("[chat] Another chat-wait already covers {name}; nothing more to do.")
+        }
+        WaitEnd::OwnerGone => {
+            format!("[chat] The server that owned {name} has stopped, or the name was taken over.")
+        }
+        WaitEnd::NoSuchAgent => {
+            return Err(format!("no agent is named {name}: chat_who lists them").into());
+        }
+    };
+    let mut stdout = std::io::stdout().lock();
+    writeln!(stdout, "{text}")?;
+    stdout.flush()?;
+    Ok(())
 }
 
 // init_tracing removed - see main() comment about why we can't use stderr logging
@@ -8902,6 +9088,11 @@ fn print_features() {
     println!("  + ctl-clip-files (clipboard file lists)");
     #[cfg(not(feature = "ctl-clip-files"))]
     println!("  - ctl-clip-files");
+
+    #[cfg(feature = "chat-tools")]
+    println!("  + chat-tools (live chat between agents)");
+    #[cfg(not(feature = "chat-tools"))]
+    println!("  - chat-tools");
 
     println!("  + thinking-tools (always on)");
     println!("  + stats (always on; FS_MCP_STATS=off switches it off at runtime)");

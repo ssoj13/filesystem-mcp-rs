@@ -2789,8 +2789,20 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(result.exit_code, Some(0), "stderr: {}", result.stderr);
-        assert!(result.stdout.contains("val=10"), "stdout: {}", result.stdout);
-        assert!(result.stdout.contains("val=30"), "stdout: {}", result.stdout);
-        assert!(result.stdout.contains("hello "), "stdout: {}", result.stdout);
+        assert!(
+            result.stdout.contains("val=10"),
+            "stdout: {}",
+            result.stdout
+        );
+        assert!(
+            result.stdout.contains("val=30"),
+            "stdout: {}",
+            result.stdout
+        );
+        assert!(
+            result.stdout.contains("hello "),
+            "stdout: {}",
+            result.stdout
+        );
     }
 }
