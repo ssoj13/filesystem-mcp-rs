@@ -1,3 +1,5 @@
+#[cfg(feature = "agent-tools")]
+pub mod agents;
 pub mod archive;
 pub mod binary;
 pub mod bulk_edit;

@@ -590,7 +590,10 @@ async fn locate_parent_refresh_covers_pending_child_through_stdio() -> Result<()
         )
         .await?;
     assert_ok(&parent);
-    assert_eq!(parent["result"]["structuredContent"]["status"], "complete");
+    assert_eq!(
+        parent["result"]["structuredContent"]["status"], "complete",
+        "{parent}"
+    );
     let child_status = srv
         .call_tool(
             "locate_refresh",

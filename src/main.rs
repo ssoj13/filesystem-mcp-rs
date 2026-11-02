@@ -170,6 +170,27 @@ enum TopCommand {
         /// The agent's name in the chat.
         name: String,
     },
+    /// Show the agents on this machine as a tree, or stop a run: `agents`, `agents stop 3`.
+    #[cfg(feature = "chat-tools")]
+    #[command(visible_alias = "a")]
+    Agents {
+        #[command(subcommand)]
+        action: Option<AgentsAction>,
+    },
+}
+
+#[cfg(feature = "chat-tools")]
+#[derive(clap::Subcommand, Debug)]
+enum AgentsAction {
+    /// The agents as a tree, and what they started. Also what `agents` alone does.
+    #[command(visible_alias = "l")]
+    Ls,
+    /// Stop a run and everything it started.
+    #[command(visible_alias = "s")]
+    Stop {
+        /// The run's number, from `agents`.
+        run: i64,
+    },
 }
 
 #[derive(Parser, Debug)]
@@ -265,6 +286,9 @@ struct FileSystemServer {
     /// This MCP session's place in the agent chat, or `None` when `chat.db` could not be opened.
     #[cfg(feature = "chat-tools")]
     chat: Option<Arc<agent_chat::session::ChatSession>>,
+    /// What `agent_start` starts agents with, or `None` when the chat is off, which carries results.
+    #[cfg(feature = "agent-tools")]
+    agents: Option<Arc<tools::agents::Supervisor>>,
     #[cfg(feature = "locate-tools")]
     indexer: Option<Arc<Indexer>>,
     llm_server: Option<tools::llm::LlmMcpServer>,
@@ -319,6 +343,8 @@ impl FileSystemServer {
         tool_router.merge(Self::locate_router());
         #[cfg(feature = "chat-tools")]
         tool_router.merge(Self::chat_router());
+        #[cfg(feature = "agent-tools")]
+        tool_router.merge(Self::agents_router());
         normalize_tool_schemas(&mut tool_router);
         // Neighbours a wrong pick is likely to miss, from the one table in core/tool_graph.rs.
         crate::core::tool_graph::annotate(&mut tool_router);
@@ -380,6 +406,8 @@ impl FileSystemServer {
             memory_store: None,
             #[cfg(feature = "chat-tools")]
             chat: None,
+            #[cfg(feature = "agent-tools")]
+            agents: None,
             #[cfg(feature = "locate-tools")]
             indexer: None,
             llm_server: None,
@@ -5680,9 +5708,6 @@ USE CASES: Patch executables, fix binary data, search-replace in non-text files.
 
         #[cfg(feature = "chat-tools")]
         tools::chat::refuse_chat_wait(&args.command, &args.args)?;
-        #[cfg(feature = "chat-tools")]
-        let env = self.chat_child_env(args.env).await;
-        #[cfg(not(feature = "chat-tools"))]
         let env = args.env;
 
         let params = process::RunParams {
@@ -8463,7 +8488,17 @@ async fn run_stdio_mode(server: FileSystemServer) -> Result<(), Box<dyn std::err
     svc.service()
         .chat_join_at_start(svc.peer_info().map(|info| info.client_info.name.clone()))
         .await;
+    #[cfg(feature = "agent-tools")]
+    let leaving = svc
+        .service()
+        .chat
+        .as_deref()
+        .map(tools::agents::Leaving::new);
     let ended = svc.waiting().await;
+    #[cfg(feature = "agent-tools")]
+    if let Some(leaving) = leaving {
+        leaving.finish().await;
+    }
     // However it ended, the way out can still hang: the runtime waits for blocking work on drop.
     exit_after_client_left();
     ended?;
@@ -8474,8 +8509,9 @@ async fn run_stdio_mode(server: FileSystemServer) -> Result<(), Box<dyn std::err
 /// exits with this thread still sleeping. A plain thread because a stuck runtime is the case it is for.
 /// A server left behind reads as a live agent in the chat, and its `chat-wait` would never end.
 fn exit_after_client_left() {
-    /// Above the 5 s rmcp gives handlers to finish after EOF.
-    const GRACE: Duration = Duration::from_secs(10);
+    /// Above the 5 s rmcp gives handlers to finish after EOF, plus the 8 s started agents get to end
+    /// (`tools::agents::Leaving`).
+    const GRACE: Duration = Duration::from_secs(15);
     std::thread::spawn(|| {
         std::thread::sleep(GRACE);
         warn!("the client left {GRACE:?} ago and shutdown has not finished: exiting");
@@ -8641,6 +8677,8 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
             mode,
             name,
         }) => return run_chat_wait(db, owner, mode, &name),
+        #[cfg(feature = "chat-tools")]
+        Some(TopCommand::Agents { action }) => return run_agents(action),
         None => {}
     }
 
@@ -8814,6 +8852,13 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
             server.chat = Some(Arc::new(
                 agent_chat::session::ChatSession::new(Arc::new(store), program).with_mode(mode),
             ));
+            #[cfg(feature = "agent-tools")]
+            match core::paths::state_dir() {
+                Ok(state) => {
+                    server.agents = Some(Arc::new(tools::agents::Supervisor::new(&state)));
+                }
+                Err(e) => warn!("Agent tools disabled: {e}"),
+            }
         }
         Err(e) => warn!("Chat tools disabled: {e:#}"),
     }
@@ -8904,6 +8949,40 @@ fn chat_mode() -> agent_chat::session::ChatMode {
     })
 }
 
+/// `agents`: for a person at a terminal, who is the one party allowed to stop anything.
+#[cfg(feature = "chat-tools")]
+fn run_agents(action: Option<AgentsAction>) -> Result<(), Box<dyn std::error::Error>> {
+    use agent_chat::session::{Processes, now_ms, tree_text};
+
+    let db = core::paths::db_path("chat.db")?;
+    if !db.exists() {
+        println!("no agents: no server has opened the chat yet");
+        return Ok(());
+    }
+    let store = agent_chat::store::Store::connect(&db)?;
+    match action {
+        Some(AgentsAction::Stop { run }) => {
+            store.request_stop(run, None)?;
+            let processes = Processes::now();
+            let state = store
+                .run(run, now_ms(), &|p, s| processes.alive(p, s))?
+                .ok_or("the run has gone")?
+                .state;
+            println!("run #{run}: {}", state.stop_note());
+        }
+        Some(AgentsAction::Ls) | None => {
+            let processes = Processes::now();
+            let alive = |p: i64, s: i64| processes.alive(p, s);
+            let now = now_ms();
+            print!(
+                "{}",
+                tree_text(&store.who(now, &alive)?, &store.runs(now, &alive)?)
+            );
+        }
+    }
+    Ok(())
+}
+
 /// `chat-wait`: what it prints is what the client hands to the model when this process exits.
 #[cfg(feature = "chat-tools")]
 fn run_chat_wait(
@@ -8933,7 +9012,7 @@ fn run_chat_wait(
             format!("[chat] The server that owned {name} has stopped, or the name was taken over.")
         }
         WaitEnd::NoSuchAgent => {
-            return Err(format!("no agent is named {name}: chat_who lists them").into());
+            return Err(format!("no agent is named {name}: agent_ls lists them").into());
         }
     };
     let mut stdout = std::io::stdout().lock();

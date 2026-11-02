@@ -144,7 +144,7 @@ pub const FAMILIES: &[Family] = &[
     },
     Family {
         name: "Chat",
-        items: &[("chat_*", "ask peers, set status")],
+        items: &[("chat_*", "ask peers"), ("agent_*", "")],
     },
     Family {
         name: "Network",
@@ -357,7 +357,8 @@ mod tests {
             feature = "ctl-notify",
             feature = "ctl-clip-files",
             feature = "locate-tools",
-            feature = "chat-tools"
+            feature = "chat-tools",
+            feature = "agent-tools"
         ))
     }
 

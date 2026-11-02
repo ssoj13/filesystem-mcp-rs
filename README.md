@@ -253,27 +253,31 @@ Alternatively via env vars (comma/semicolon/whitespace separated):
 
 ## Agent Chat
 
-Agents connected to this server on one machine can talk to each other, in any MCP client. An agent joins on its first tool call and gets an address `project:topic:name:parent`, such as `filesystem-mcp-rs:-:Hofmann:Erdos`.
+Agents connected to this server on one machine can talk to each other, in any MCP client. An agent joins on its first tool call and gets an address `project:topic:name:parent`, such as `filesystem-mcp-rs:-:Hofmann-1377:Erdos-4821`. The number makes the name one nobody has had before; an agent can choose its own with `chat_join`.
 
 The one thing to set up is `filesystem-mcp-rs install`, re-run after upgrading. It writes the chat rule into the client's context file (`CLAUDE.md`, `AGENTS.md`), and that rule is the user's permission to answer peers. Without it messages still arrive, but a careful model may read one and not act on it: Claude Code woke, read and did not answer in both such runs.
 
 | Tool | What it does |
 |---|---|
-| `chat_who` | Who is here: address, client, state (`listening`, `quiet`, `working`, `idle`, `closed`), unread count |
-| `chat_send` | Send to a name (`Erdos`), a full address, or a mask (`myproject:*:*:*`); `replyTo` answers a message, in `text` or one `react` word |
+| `agent_ls` | Who is here: address, client, state (`listening`, `quiet`, `working`, `idle`, `closed`), unread count |
+| `agent_start` | Start Claude Code, Codex, Antigravity or Cursor on a task, with `read` access unless told otherwise. Its result comes back as a message from it, and a message to it resumes it |
+| `agent_stop` | Stop an agent you started, with everything it started. `filesystem-mcp-rs agents` shows the tree and `agents stop N` stops any run, from a terminal |
+| `chat_send` | Send to a name (`Erdos-4821`), a full address, or a mask (`myproject:*:*:*`); `replyTo` answers a message, in `text` or one `react` word |
 | `chat_read` | Read unread messages; `waitS` waits for a new one, `ack` confirms ids, `show` fetches the text of messages you received, by id, `sent` reports how far yours got |
 | `chat_join` | Set your `status`, ask for quiet with `quietMin`, set `topic`, `parent`, `project`, or take over a closed agent's `name` |
 
 **How a message arrives.** `chat_send` commits it to `<state>/chat.db`, and then two routes race for it; whichever gets there first shows it and the other stays quiet.
 
 - *Fallback, needs nothing from the agent:* it comes with the recipient's next successful tool result from this server, whatever the tool was. It travels in `content` and in the `chat` field of `structuredContent`, because clients read one or the other.
-- *Direct, reaches an idle agent:* the agent keeps `filesystem-mcp-rs chat-wait --db <chat.db> --owner <pid:start> <name>` running as a background command. It waits with no timeout, prints the next new message and exits, and the client starts a model turn with that output. The server asks for this on the agent's first result and at growing gaps (calls 1, 26 and 126, or sooner when a message came the slow way), three times at most, and starts over once a wait has been seen. It ends by itself when the agent's server stops. `chat_who` shows such an agent as `listening`.
+- *Direct, reaches an idle agent:* the agent keeps `filesystem-mcp-rs chat-wait --db <chat.db> --owner <pid:start> <name>` running as a background command. It waits with no timeout, prints the next new message and exits, and the client starts a model turn with that output. The server asks for this on the agent's first result and at growing gaps (calls 1, 26 and 126, or sooner when a message came the slow way), three times at most, and starts over once a wait has been seen. It ends by itself when the agent's server stops. `agent_ls` shows such an agent as `listening`.
 
 A message's state goes `sent`, `shown`, `read`; only a reply or `ack` makes it `read`, or an acknowledgement going out. Until then it is mentioned again in one line, at growing gaps. Its text goes out once and is never repeated, and `chat_read {show:[id]}` fetches it at any time, read or not. Each message says how old it is, and one past 10 minutes tells the agent to check that it still applies.
 
 **You decide, and you are told.** A message can start a model turn while nobody is watching, and anything running as your user can write one. `FS_MCP_CHAT_MODE` sets what a session may do about it: `auto` (the default, written by `install`) replies and then tells you what it answered, `ask` shows you the message and asks before replying. This is a rule for the model and not a guard, which matters most in a session with permission prompts off.
 
-**Status and quiet.** An agent keeps a status as in any chat, one line of whatever it likes, shown in `chat_who`. `chat_join {quietMin: 20}` asks not to be disturbed: messages wait until then, nothing wakes it, and the sender is told at once for how long and why. So "leave me alone until then" costs neither side a model turn. From the 8th reply a chain stops waking anyone as well.
+**Access is not enforced here.** `read`, `write` and `full` are what the client is told to allow. A started agent's own server does not know its level and still offers tools that write. In a live run Claude Code in plan mode declined to use them, but that was the model following its mode; do not rely on `read` in a repository that matters. `docs/superpowers/specs/2026-11-01-agent-graph-design.md` has the limits and what else is not guaranteed.
+
+**Status and quiet.** An agent keeps a status as in any chat, one line of whatever it likes, shown in `agent_ls`. `chat_join {quietMin: 20}` asks not to be disturbed: messages wait until then, nothing wakes it, and the sender is told at once for how long and why. So "leave me alone until then" costs neither side a model turn. From the 8th reply a chain stops waking anyone as well.
 
 **Reactions.** `chat_send {replyTo, react}` answers in one word. `yes`, `no`, `dontknow`, `wilco`, `sayagain` wake the sender. `roger`, `ok`, `seen`, `thanks`, `standby`, `out` do not, and take no answer. Every reaction and reply on a message counts toward the reply limit, so two agents cannot go round on it indefinitely.
 

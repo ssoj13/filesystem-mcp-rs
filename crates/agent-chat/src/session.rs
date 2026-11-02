@@ -29,7 +29,9 @@ use tokio::sync::Mutex;
 use tracing::warn;
 
 use crate::address::{Address, NONE, clean_segment};
-use crate::store::{AgentState, HOP_LIMIT, Join, Message, Store, Unread, duration_text};
+use crate::store::{
+    AgentState, HOP_LIMIT, Join, Message, Run, Store, Subscriber, Unread, duration_text,
+};
 use crate::wait::{WaitProgram, wakes_on_background_exit};
 
 /// What an agent may do about a message without asking its user, which is the user's to choose:
@@ -54,12 +56,20 @@ impl ChatMode {
     }
 }
 
-/// Set by `run_command` for its children, so an agent started that way knows its parent.
+/// Which run a started agent's server belongs to. Only says which row: who started it comes from the
+/// process tree, and a value that disagrees with the tree was inherited from further up and is ignored.
 ///
 /// Outside the `FS_MCP_*` registry on purpose. `install` writes every registered key into client
 /// config, a blank value included, and a client applies that block over the inherited environment:
-/// a registered key would be blanked exactly when a child agent starts its own server.
-pub const PARENT_ENV: &str = "FILESYSTEM_MCP_CHAT_PARENT";
+/// a registered key would be blanked exactly when a started agent starts its own server.
+pub const RUN_ENV: &str = "FILESYSTEM_MCP_AGENT_RUN";
+
+/// How far up the process tree to look for a server. Far beyond any real chain of launchers.
+const MAX_ANCESTORS: usize = 32;
+
+fn own_run() -> Option<i64> {
+    std::env::var(RUN_ENV).ok()?.parse().ok()
+}
 
 /// `seen_at` is a write to a file dozens of servers share, and `working` only needs a minute's
 /// precision, so a busy agent does not write on every call.
@@ -253,6 +263,29 @@ impl Processes {
         Self { system, complete }
     }
 
+    /// This process's ancestors with their start times, nearest first.
+    pub fn ancestors(&self) -> Vec<(i64, i64)> {
+        let mut found = Vec::new();
+        let mut current = Pid::from_u32(std::process::id());
+        let mut child_start = self.start_of(i64::from(current.as_u32())).unwrap_or(0);
+        for _ in 0..MAX_ANCESTORS {
+            let Some(parent) = self.system.process(current).and_then(|p| p.parent()) else {
+                break;
+            };
+            let pid = i64::from(parent.as_u32());
+            if let Some(start) = self.start_of(pid) {
+                // Windows keeps the id of a parent that has exited, and the id can be in use again.
+                if !could_be_parent(start, child_start) {
+                    break;
+                }
+                found.push((pid, start));
+                child_start = start;
+            }
+            current = parent;
+        }
+        found
+    }
+
     /// The start time as this module compares it. Zero means the process exists and its start time
     /// could not be read, which is what `sysinfo` reports when `OpenProcess` is refused.
     pub fn start_of(&self, pid: i64) -> Option<i64> {
@@ -282,16 +315,25 @@ impl Processes {
     /// Two things answer yes because wrongly calling an agent closed skips it in a broadcast and hands
     /// out its name: a failed listing, and a process whose start time cannot be read, as a server
     /// without rights to look at an elevated one would find.
+    ///
+    /// Pid 0 is no one: it is what a released name holds, and on Windows the idle process has that id
+    /// and an unreadable start time.
     pub fn alive(&self, pid: i64, start: i64) -> bool {
-        !self.complete
-            || self
-                .start_of(pid)
-                .is_some_and(|actual| same_process(actual, start))
+        pid > 0
+            && (!self.complete
+                || self
+                    .start_of(pid)
+                    .is_some_and(|actual| same_process(actual, start)))
     }
 }
 
 fn same_process(actual: i64, recorded: i64) -> bool {
     actual == 0 || actual == recorded
+}
+
+/// A process cannot have started after its child. Zero is a start time that could not be read.
+fn could_be_parent(parent_start: i64, child_start: i64) -> bool {
+    parent_start == 0 || child_start == 0 || parent_start <= child_start
 }
 
 /// Field 22 of `/proc/<pid>/stat`. Counted from the last `)`, because the command name before it can
@@ -301,6 +343,59 @@ fn start_ticks(stat: &str) -> Option<i64> {
     let (_, after_name) = stat.rsplit_once(')')?;
     // After the name come state (field 3) onward, so field 22 is the 20th of these.
     after_name.split_whitespace().nth(19)?.parse().ok()
+}
+
+/// The agent that started this process, or `-`: the nearest ancestor that is some agent's server.
+/// An agent's server is an ancestor of whatever it runs, by `agent_start` or by `run_command` alike,
+/// and a session a person opened has none. Nothing here can be claimed or forgotten.
+fn parent_in_process_tree(store: &Store) -> Result<String> {
+    for (pid, start) in Processes::now().ancestors() {
+        if let Some(name) = store.agent_of_process(pid, start)? {
+            return Ok(name);
+        }
+    }
+    Ok(NONE.to_owned())
+}
+
+/// The agents as a tree and the runs under it, for a person at a terminal.
+pub fn tree_text(agents: &[Subscriber], runs: &[Run]) -> String {
+    fn add(agents: &[Subscriber], at: &Subscriber, indent: usize, out: &mut String) {
+        let status = at.status.as_deref().unwrap_or("");
+        out.push_str(&format!(
+            "{:indent$}{} ({}) {:?} {status}\n",
+            "",
+            at.name,
+            at.client,
+            at.state,
+            indent = indent * 2
+        ));
+        // The depth a row was written with only grows, so this cannot go round.
+        for child in agents
+            .iter()
+            .filter(|child| child.parent == at.name && child.depth > at.depth)
+        {
+            add(agents, child, indent + 1, out);
+        }
+    }
+    let mut out = String::new();
+    let listed = |name: &str| agents.iter().any(|agent| agent.name == name);
+    for root in agents.iter().filter(|agent| !listed(&agent.parent)) {
+        add(agents, root, 0, &mut out);
+    }
+    if out.is_empty() {
+        out.push_str("no agents\n");
+    }
+    if !runs.is_empty() {
+        out.push_str("\nruns:\n");
+    }
+    for run in runs {
+        let first_line = run.task.lines().next().unwrap_or_default();
+        out.push_str(&format!(
+            "  #{} {} by {} {:?}, {}, {} ago: {first_line}\n",
+            run.id, run.client, run.parent, run.state, run.access, run.age
+        ));
+    }
+    out
 }
 
 /// This process's start time, to record. Zero would match anything later, so it is refused here.
@@ -344,7 +439,6 @@ impl FreshProcesses {
 pub struct Change {
     pub name: Option<String>,
     pub topic: Option<String>,
-    pub parent: Option<String>,
     pub project: Option<String>,
     pub status: Option<String>,
     /// Ask not to be disturbed for this many minutes; zero ends it.
@@ -409,7 +503,7 @@ impl ChatSession {
         Some(self.waking_program()?.command(name, self.owner()))
     }
 
-    fn owner(&self) -> (i64, i64) {
+    pub fn owner(&self) -> (i64, i64) {
         (
             i64::from(std::process::id()),
             self.own_start.load(Ordering::Relaxed),
@@ -440,8 +534,10 @@ impl ChatSession {
 
     /// A client that was unknown at startup has named itself. It decides whether a wait wakes it.
     pub async fn identify(&self, client: String) -> Result<()> {
-        self.wakes
-            .store(wakes_on_background_exit(&client), Ordering::Relaxed);
+        self.wakes.store(
+            wakes_on_background_exit(&client) && own_run().is_none(),
+            Ordering::Relaxed,
+        );
         *self.client.lock().await = client;
         self.change(Change::default()).await?;
         Ok(())
@@ -452,25 +548,42 @@ impl ChatSession {
     }
 
     /// Join as soon as this server starts, or on the first call if the client's name is what it was
-    /// waiting for. A broadcast only reaches who has joined by then. The parent comes from the
-    /// environment `run_command` set.
+    /// waiting for. A broadcast only reaches who has joined by then. A started agent is not asked to
+    /// keep a wait running: what started it resumes it when a message comes.
     pub async fn register(&self, client: String, project: String) -> Result<Address> {
         let mut me = self.me.lock().await;
         if let Some(address) = me.as_ref() {
             return Ok(address.clone());
         }
-        // Read directly rather than through `env_spec`: see `PARENT_ENV`.
-        let parent = std::env::var(PARENT_ENV)
-            .map(|raw| clean_segment(&raw))
-            .unwrap_or_else(|_| NONE.to_owned());
-        self.wakes
-            .store(wakes_on_background_exit(&client), Ordering::Relaxed);
+        // Read directly rather than through `env_spec`: see `RUN_ENV`.
+        let run = own_run();
+        self.wakes.store(
+            wakes_on_background_exit(&client) && run.is_none(),
+            Ordering::Relaxed,
+        );
         *self.client.lock().await = client.clone();
         let (address, own_start) = self
             .blocking(move |store| {
                 let pid = i64::from(std::process::id());
                 let pid_start = own_start()?;
                 let processes = FreshProcesses::default();
+                let alive = |p: i64, s: i64| processes.alive(p, s);
+                let now = now_ms();
+                let tree_parent = parent_in_process_tree(store)?;
+                // A variable inherited through `run_command` names a run this process is not: only
+                // one its own starter recorded counts, and only while it is going, since its name
+                // may be another run's by now. An empty tree cannot disagree, as when a launcher
+                // between them has exited on an OS that loses the link.
+                let run = match run {
+                    Some(id) => store.run(id, now, &alive)?.filter(|row| {
+                        row.state.is_live() && (tree_parent == NONE || tree_parent == row.parent)
+                    }),
+                    None => None,
+                };
+                let (parent, wanted) = match &run {
+                    Some(row) => (row.parent.clone(), row.agent.clone()),
+                    None => (tree_parent, None),
+                };
                 let join = Join {
                     project,
                     topic: NONE.to_owned(),
@@ -480,8 +593,17 @@ impl ChatSession {
                     pid_start,
                     status: None,
                 };
-                let address =
-                    store.join(&join, None, None, now_ms(), &|p, s| processes.alive(p, s))?;
+                // It keeps the name it was given, and with it the messages waiting there.
+                if let Some(name) = wanted.as_deref() {
+                    store.adopt_name(name, pid, pid_start, &alive)?;
+                }
+                let address = match wanted
+                    .as_deref()
+                    .map(|name| store.join(&join, None, Some(name), now, &alive))
+                {
+                    Some(Ok(address)) => address,
+                    _ => store.join(&join, None, None, now, &alive)?,
+                };
                 Ok((address, pid_start))
             })
             .await?;
@@ -514,7 +636,7 @@ impl ChatSession {
             value.map_or_else(|| current.to_owned(), |raw| clean_segment(&raw))
         };
         let topic = or_current(change.topic, &current.topic);
-        let parent = or_current(change.parent, &current.parent);
+        let parent = current.parent.clone();
         let project = or_current(change.project, &current.project);
         let status = change.status;
         let quiet_min = change.quiet_min;
@@ -837,7 +959,7 @@ pub fn render(
     if let Some((me, others)) = intro {
         let named = &others[..others.len().min(OTHERS_LIMIT)];
         let more = if others.len() > named.len() {
-            format!(" and {} more (chat_who)", others.len() - named.len())
+            format!(" and {} more (agent_ls)", others.len() - named.len())
         } else {
             String::new()
         };
@@ -1158,6 +1280,43 @@ mod tests {
         assert_eq!(store.owner(&me.name).unwrap(), Some(other), "theirs still");
     }
 
+    #[test]
+    fn the_tree_shows_who_started_whom_and_leaves_nobody_out() {
+        let agent = |name: &str, parent: &str, depth: i64| Subscriber {
+            address: format!("p:-:{name}:{parent}"),
+            name: name.to_owned(),
+            client: "t".to_owned(),
+            state: AgentState::Idle,
+            unread: 0,
+            status: None,
+            quiet_for: None,
+            depth,
+            parent: parent.to_owned(),
+            owner: (1, 1),
+        };
+        let agents = [
+            agent("Kid", "Root", 1),
+            agent("Grandkid", "Kid", 2),
+            agent("Root", NONE, 0),
+            agent("Orphan", "Gone", 1),
+        ];
+        let text = tree_text(&agents, &[]);
+        let lines: Vec<&str> = text.lines().collect();
+        assert_eq!(lines.len(), 4, "{text}");
+        assert!(text.contains("\n  Kid (t)"), "{text}");
+        assert!(text.contains("\n    Grandkid (t)"), "{text}");
+        assert!(text.contains("Orphan (t)"), "{text}");
+        assert_eq!(tree_text(&[], &[]), "no agents\n");
+    }
+
+    #[test]
+    fn this_process_finds_its_ancestors_and_none_is_itself() {
+        let own = i64::from(std::process::id());
+        let found = Processes::now().ancestors();
+        assert!(!found.is_empty(), "a test always has a parent");
+        assert!(found.iter().all(|(pid, _)| *pid != own));
+    }
+
     #[tokio::test]
     async fn work_is_ticked_while_it_runs_and_its_result_comes_back() {
         let ticks = std::cell::Cell::new(0);
@@ -1191,6 +1350,13 @@ mod tests {
 
     #[test]
     fn only_a_listing_that_worked_can_call_a_process_gone() {
+        assert!(could_be_parent(5, 5) && could_be_parent(4, 5));
+        assert!(!could_be_parent(6, 5), "a later process with the old id");
+        assert!(could_be_parent(0, 5) && could_be_parent(6, 0), "unreadable");
+        assert!(
+            !Processes::now().alive(0, 0),
+            "a released name is held by no one"
+        );
         assert!(same_process(0, 12345), "exists, start time unreadable");
         assert!(same_process(12345, 12345));
         assert!(!same_process(12346, 12345), "a reused id");
@@ -1320,7 +1486,7 @@ mod tests {
         let me = me();
         let others: Vec<String> = (0..30).map(|n| format!("fs:-:A{n}:-")).collect();
         let delivery = render(Some((&me, others.as_slice())), &Unread::default(), None).unwrap();
-        assert!(delivery.text.contains("and 20 more (chat_who)"));
+        assert!(delivery.text.contains("and 20 more (agent_ls)"));
         assert_eq!(
             delivery.json["others"].as_array().unwrap().len(),
             OTHERS_LIMIT

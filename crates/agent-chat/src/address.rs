@@ -1,6 +1,6 @@
 //! Chat addresses: `project:topic:name:parent`, and what `to` may say.
 //!
-//! The name is the only key. The other three segments describe a subscriber so that `chat_who`
+//! The name is the only key. The other three segments describe a subscriber so that `agent_ls`
 //! reads as a graph of agents and a mask can reach a group; they are not part of its identity, so
 //! an agent can change topic without becoming someone else. Used by `store` to route and by
 //! `session` to issue an address on the first tool call.
@@ -11,7 +11,7 @@ use std::path::Path;
 /// What an unset segment reads as.
 pub const NONE: &str = "-";
 
-/// The first names handed out, in order.
+/// The names handed out, each with a number the store adds so that it never comes round again.
 const NAMES: &[&str] = &[
     "Erdos",
     "Halsted",
@@ -122,7 +122,7 @@ pub fn clean_segment(raw: &str) -> String {
     }
 }
 
-/// The first name not taken: the list, then the list again with a number.
+/// The first name in use by nobody: the list, then the list again with a number.
 pub fn next_name(taken: impl Fn(&str) -> bool) -> String {
     if let Some(name) = NAMES.iter().find(|name| !taken(name)) {
         return (*name).to_owned();

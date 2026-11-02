@@ -12,8 +12,8 @@ use std::time::{Duration, Instant};
 
 use agent_chat::address::{Address, NONE, Target, clean_segment, git_project};
 use agent_chat::session::{
-    Change, ChatSession, Delivery, FreshProcesses, PARENT_ENV, Processes, READ_LABEL, advice,
-    messages_json, now_ms, read_page,
+    Change, ChatSession, Delivery, FreshProcesses, Processes, READ_LABEL, advice, messages_json,
+    now_ms, read_page,
 };
 use agent_chat::store::{AgentState, Reaction, Store};
 use agent_chat::wait::POLL;
@@ -50,11 +50,17 @@ const MAX_STATUS_BYTES: usize = 200;
 struct ChatJoinArgs {
     name: Option<String>,
     topic: Option<String>,
-    parent: Option<String>,
     project: Option<String>,
     status: Option<String>,
     #[serde(default, alias = "quiet_min")]
     quiet_min: FlexU64,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+struct AgentLsArgs {
+    #[serde(default)]
+    run: FlexU64,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -81,7 +87,7 @@ struct ChatReadArgs {
 }
 
 /// A database failure is ours; anything else the store refuses is about what the caller asked for.
-fn chat_error(error: anyhow::Error) -> McpError {
+pub(crate) fn chat_error(error: anyhow::Error) -> McpError {
     if error.chain().any(|cause| cause.is::<rusqlite::Error>()) {
         McpError::internal_error(format!("{error:#}"), None)
     } else {
@@ -89,7 +95,7 @@ fn chat_error(error: anyhow::Error) -> McpError {
     }
 }
 
-fn ok(value: Value) -> Result<CallToolResult, McpError> {
+pub(crate) fn ok(value: Value) -> Result<CallToolResult, McpError> {
     let text = serde_json::to_string(&value)
         .map_err(|error| McpError::internal_error(error.to_string(), None))?;
     Ok(CallToolResult::success(vec![ContentBlock::text(text)]).with_structured(value))
@@ -151,7 +157,7 @@ impl Drop for Listening {
 impl FileSystemServer {
     #[tool(
         name = "chat_join",
-        description = "Set your status, as in any chat. `status` says what you are up to, empty clears it. `quietMin` asks not to be disturbed for that many minutes, 0 ends it: messages wait until then and senders are told. Also `topic`, `parent`, `project`; `name` renames you or takes over a closed agent's name with its unread messages."
+        description = "Set your status, as in any chat. `status` says what you are up to, empty clears it. `quietMin` asks not to be disturbed for that many minutes, 0 ends it: messages wait until then and senders are told. Also `topic`, `project`; `name` renames you or takes over a closed agent's name with its unread messages."
     )]
     async fn chat_join(
         &self,
@@ -172,7 +178,6 @@ impl FileSystemServer {
             .change(Change {
                 name: args.name,
                 topic: args.topic,
-                parent: args.parent,
                 project: args.project,
                 status: args.status,
                 quiet_min,
@@ -188,20 +193,38 @@ impl FileSystemServer {
     }
 
     #[tool(
-        name = "chat_who",
-        description = "Agents in the chat on this machine: address project:topic:name:parent, client, state (listening, quiet, working, idle, closed), unread count, status."
+        name = "agent_ls",
+        description = "Agents on this machine: address project:topic:name:parent, client, state (listening, quiet, working, idle, closed), unread count, status, depth, and `runs`, the agents other agents started. `run` gets one run in full, with its result."
     )]
-    async fn chat_who(&self) -> Result<CallToolResult, McpError> {
+    async fn agent_ls(
+        &self,
+        Parameters(args): Parameters<AgentLsArgs>,
+    ) -> Result<CallToolResult, McpError> {
         let chat = self.chat_session()?;
         let me = chat_me(chat).await?;
-        let agents = chat
-            .blocking(|store| {
+        let wanted = args.run.get().map(|id| id as i64);
+        let (agents, runs, run) = chat
+            .blocking(move |store| {
                 let processes = Processes::now();
-                store.who(now_ms(), &|p, s| processes.alive(p, s))
+                let alive = |p: i64, s: i64| processes.alive(p, s);
+                let now = now_ms();
+                let run = match wanted {
+                    Some(id) => store.run(id, now, &alive)?,
+                    None => None,
+                };
+                Ok((store.who(now, &alive)?, store.runs(now, &alive)?, run))
             })
             .await
             .map_err(chat_error)?;
-        ok(json!({ "you": me.to_string(), "agents": agents }))
+        let mut reply = json!({ "you": me.to_string(), "agents": agents });
+        if !runs.is_empty() {
+            reply["runs"] = json!(runs);
+        }
+        if let Some(id) = wanted {
+            let run = run.ok_or_else(|| McpError::invalid_params(format!("no run #{id}"), None))?;
+            reply["run"] = json!(run);
+        }
+        ok(reply)
     }
 
     #[tool(
@@ -400,7 +423,7 @@ impl FileSystemServer {
     }
 }
 
-async fn chat_me(chat: &ChatSession) -> Result<Address, McpError> {
+pub(crate) async fn chat_me(chat: &ChatSession) -> Result<Address, McpError> {
     chat.confirm_name().await;
     chat.address().await.ok_or_else(|| {
         McpError::internal_error(
@@ -411,7 +434,7 @@ async fn chat_me(chat: &ChatSession) -> Result<Address, McpError> {
 }
 
 impl FileSystemServer {
-    fn chat_session(&self) -> Result<&ChatSession, McpError> {
+    pub(crate) fn chat_session(&self) -> Result<&ChatSession, McpError> {
         self.chat.as_deref().ok_or_else(|| {
             McpError::internal_error(
                 "the chat is off: chat.db could not be opened, see this server's log",
@@ -486,7 +509,7 @@ impl FileSystemServer {
     }
 
     /// Before every tool: join on the first call and note that this agent is active. Runs before
-    /// the tool rather than after so that a first `chat_who` or `chat_send` already has an address.
+    /// the tool rather than after so that a first `agent_ls` or `chat_send` already has an address.
     pub(crate) async fn chat_before_call(&self, context: &RequestContext<RoleServer>) {
         let Some(chat) = self.chat.as_deref() else {
             return;
@@ -564,23 +587,6 @@ impl FileSystemServer {
             }
             other => other,
         }
-    }
-
-    /// What `run_command` adds to its child's environment: the child's parent is this agent. A
-    /// value the caller set itself wins.
-    pub(crate) async fn chat_child_env(
-        &self,
-        env: Option<std::collections::HashMap<String, String>>,
-    ) -> Option<std::collections::HashMap<String, String>> {
-        let Some(chat) = self.chat.as_deref() else {
-            return env;
-        };
-        let Some(me) = chat.address().await else {
-            return env;
-        };
-        let mut env = env.unwrap_or_default();
-        env.entry(PARENT_ENV.to_owned()).or_insert(me.name);
-        Some(env)
     }
 
     /// The working directory's git root, else an allowed root's, else the directory's own name.

@@ -146,7 +146,7 @@ pub fn wait_for_message(
         Claim::NoSuchAgent => return Ok(WaitEnd::NoSuchAgent),
     };
     let end = watch(&store, program, name, owner, (pid, start));
-    // Only a courtesy to `chat_who`: once this process is gone the claim counts for nothing anyway.
+    // Only a courtesy to `agent_ls`: once this process is gone the claim counts for nothing anyway.
     // So it must not cost the result, which may hold a message already marked shown.
     // To stderr: this command has no log, and stdout is what the model reads.
     if let Err(error) = store.release_waiter(name, pid) {

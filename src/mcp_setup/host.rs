@@ -155,7 +155,7 @@ pub fn normalize_path(p: &Path) -> String {
 /// `subprocess`, Go, shells). The extended-length form is legal for `CreateProcess` but not
 /// universally understood by those wrappers, and it looks broken to anyone reading the config by
 /// hand. `\\?\UNC\server\share` folds back to `\\server\share`.
-fn strip_verbatim(s: &str) -> String {
+pub(crate) fn strip_verbatim(s: &str) -> String {
     if let Some(rest) = s.strip_prefix(r"\\?\UNC\") {
         return format!(r"\\{rest}");
     }

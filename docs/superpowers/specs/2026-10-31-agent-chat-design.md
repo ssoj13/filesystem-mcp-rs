@@ -20,7 +20,7 @@ Rooms, file claims, networking between machines, and any host-specific path: no 
 
 **Fallback: tool results.** Every later successful tool result of the recipient's server carries it, whatever the tool; a call rejected with a protocol error carries nothing. Needs nothing from the agent, and reaches a working agent within seconds because it calls tools constantly. Text goes in a `content` block and, when `structuredContent` is an object, in its `chat` field. Measured on Claude Code 2.1.316: with `structuredContent` present the model sees only that, so a `content` block alone never arrives. Other clients may read only `content`.
 
-**Direct: `chat-wait`.** The agent keeps `filesystem-mcp-rs chat-wait --db <chat.db> --owner <pid:start> <name>` running as a background command through its own shell tool. It polls the database every 250 ms, prints the next new message and exits, and the client starts a model turn with that output. No timeout, so nothing has to keep restarting it on a schedule. It also ends when its server stops, when the name is taken over or renamed, or when a newer wait replaced it. One wait per name, recorded with process id and start time, so a killed one stops counting by itself and `chat_who` shows `listening` only while it runs.
+**Direct: `chat-wait`.** The agent keeps `filesystem-mcp-rs chat-wait --db <chat.db> --owner <pid:start> <name>` running as a background command through its own shell tool. It polls the database every 250 ms, prints the next new message and exits, and the client starts a model turn with that output. No timeout, so nothing has to keep restarting it on a schedule. It also ends when its server stops, when the name is taken over or renamed, or when a newer wait replaced it. One wait per name, recorded with process id and start time, so a killed one stops counting by itself and `agent_ls` shows `listening` only while it runs.
 
 A message shown on a result does not end a wait: whoever made that call is awake and has it. Only one route can present a message as new, because the `UPDATE` that marks it shown decides. The command carries its server's process id and start time, so a model repeating a command from before a restart does not start listening for whoever has that name now.
 
@@ -53,7 +53,7 @@ The user's own word outranks either mode: told to stop or not to answer, an agen
 
 ## Status and quiet
 
-An agent keeps a status as in any chat: `chat_join {status}`, one line of whatever it likes, shown in `chat_who`. `chat_join {quietMin}` asks not to be disturbed for that long, 24 hours at most. Messages are not lost and not delivered: a running `chat-wait` does not fire, results carry nothing, an explicit `chat_read` still works, and everything arrives when quiet ends. The sender learns all this from the reply to its own `chat_send`, with how long and the status, so saying "leave me alone until then" costs the two of them no model turn at all.
+An agent keeps a status as in any chat: `chat_join {status}`, one line of whatever it likes, shown in `agent_ls`. `chat_join {quietMin}` asks not to be disturbed for that long, 24 hours at most. Messages are not lost and not delivered: a running `chat-wait` does not fire, results carry nothing, an explicit `chat_read` still works, and everything arrives when quiet ends. The sender learns all this from the reply to its own `chat_send`, with how long and the status, so saying "leave me alone until then" costs the two of them no model turn at all.
 
 ## Reactions
 
@@ -100,10 +100,10 @@ Everything the chat says lands in a model's context, so only what is new goes th
 
 `project:topic:name:parent`, for example `filesystem-mcp-rs:-:Erdos:-` and `filesystem-mcp-rs:-:Hofmann:Erdos`.
 
-- `name` is the stable unique key, issued atomically by the database. A name is not reused while its owner is alive or has unread messages waiting. Overflow is `Erdos-2`. A chosen name may hold only letters, digits, `-`, `_`, `.`, because it goes into a command line.
+- `name` is the stable unique key, issued atomically by the database. A name given out carries a random number, `Erdos-4821`, and is one this file has never held, so nothing meant for its holder reaches anyone later. A name an agent chose can recur once its owner is gone, unless messages wait under it or a live run holds it. A chosen name may hold only letters, digits, `-`, `_`, `.`, because it goes into a command line.
 - `project` comes from the git root of the server's working directory, `topic` is set by the agent (default `-`), `parent` is the direct parent only.
 - A process is one subscriber. A stdio server joins as soon as the client has spoken to it, so a broadcast reaches a session that has called no tool yet. A client on the stateless revision sends no `initialize`, so that moment is its first request, and it is `unknown` until a request names it. Over HTTP it joins on the first call.
-- A child started through `run_command` inherits `FILESYSTEM_MCP_CHAT_PARENT`. That name deliberately lies outside the `FS_MCP_*` registry: `install` writes every registered key into client config as a blank value, which would overwrite the inherited one.
+- `parent` and depth come from the process tree: the nearest ancestor that is some agent's server. A started agent is its starter's descendant whether it came through `agent_start` or `run_command`, and a session a person opened has no such ancestor. An agent cannot set them. See `2026-11-01-agent-graph-design.md`.
 - `to` accepts `Erdos`, a full address, or a mask with `*` per segment (`filesystem-mcp-rs:*:*:*`). A mask reaches live subscribers except the sender. A name reaches its owner even when closed, and the message waits. `chat_join {name}` takes over a closed name and its unread messages.
 
 ## Tools
@@ -111,15 +111,15 @@ Everything the chat says lands in a model's context, so only what is new goes th
 | Tool | Purpose |
 |---|---|
 | `chat_join` | Set topic, parent, project, your status, or take a name; returns the wait command for the new name |
-| `chat_who` | Subscribers with address, client, state, unread count, doing |
+| `agent_ls` | Subscribers with address, client, state, unread count, doing |
 | `chat_send` | Send to a name or mask, or reply through `replyTo` |
 | `chat_read` | Read unread messages, acknowledge, wait briefly, fetch any of your messages by id (`show`), see status of sent messages |
 
-States in `chat_who`: `quiet` (asked not to be disturbed), `listening` (a `chat-wait` runs or a `chat_read` wait is open), `working` (a tool call in the last 60 s), `idle`, `closed` (process gone, checked by PID plus start time).
+States in `agent_ls`: `quiet` (asked not to be disturbed), `listening` (a `chat-wait` runs or a `chat_read` wait is open), `working` (a tool call in the last 60 s), `idle`, `closed` (process gone, checked by PID plus start time).
 
 ## Safety and cost
 
-Same-user trust: anything running as this user can write to the database. Delivered text is labelled as a peer's before the text itself, in JSON too, and never counts as user approval. A peer's status, in `chat_who` and in the reply to `chat_send`, has no label. In text a peer's `[chat]` is rewritten and its further lines are indented, which makes it harder to write lines that read as this server. A plain sentence imitating an instruction still gets through, as with any text from a peer. From the 8th reply a chain wakes nobody: it arrives on the next result and tells the agent to stop answering automatically and ask its human, and the sender is told. The same goes past 20 waking messages from one agent to another in 10 minutes, which bounds two agents answering with `to`, who never form a chain. Each wake costs a model turn, and a broadcast wakes everyone waiting. Messages are deleted when a server starts, 14 days after sending if read and 30 if not, so an agent gone for a month does lose what was waiting for it. A server meeting a database of an older schema rebuilds it and carries over the subscribers and everything unread, column by column; only a table too old to fill a required column is left behind. An agent whose name went elsewhere joins again at its next activity under another. A chat tool checks that first, and a result will not carry the new holder's messages. A newer database is refused, and `chat-wait` never changes a file. Installing two versions side by side therefore leaves the older one with no chat.
+Same-user trust: anything running as this user can write to the database. Delivered text is labelled as a peer's before the text itself, in JSON too, and never counts as user approval. A peer's status, in `agent_ls` and in the reply to `chat_send`, has no label. In text a peer's `[chat]` is rewritten and its further lines are indented, which makes it harder to write lines that read as this server. A plain sentence imitating an instruction still gets through, as with any text from a peer. From the 8th reply a chain wakes nobody: it arrives on the next result and tells the agent to stop answering automatically and ask its human, and the sender is told. The same goes past 20 waking messages from one agent to another in 10 minutes, which bounds two agents answering with `to`, who never form a chain. Each wake costs a model turn, and a broadcast wakes everyone waiting. Messages are deleted when a server starts, 14 days after sending if read and 30 if not, so an agent gone for a month does lose what was waiting for it. A server meeting a database of an older schema rebuilds it and carries over the subscribers and everything unread, column by column; only a table too old to fill a required column is left behind. An agent whose name went elsewhere joins again at its next activity under another. A chat tool checks that first, and a result will not carry the new holder's messages. A newer database is refused, and `chat-wait` never changes a file. Installing two versions side by side therefore leaves the older one with no chat.
 
 ## Known limits
 
@@ -136,7 +136,7 @@ Same-user trust: anything running as this user can write to the database. Delive
 
 ## Measured on real clients (2026-11-01, Windows)
 
-The session got one prompt and no further input: call `chat_who`, follow the server's instructions, end the turn. A peer server then sent to it after 60 s idle, in Russian, and again as a broadcast. Passing means a reply through `chat_send` both times and a wait running again in between. Delays are from the final build. Every run had permission prompts switched off (`--dangerously-skip-permissions`, or `--force --sandbox disabled` on Cursor), in print or stream-json mode.
+The session got one prompt and no further input: call `agent_ls`, follow the server's instructions, end the turn. A peer server then sent to it after 60 s idle, in Russian, and again as a broadcast. Passing means a reply through `chat_send` both times and a wait running again in between. Delays are from the final build. Every run had permission prompts switched off (`--dangerously-skip-permissions`, or `--force --sandbox disabled` on Cursor), in print or stream-json mode.
 
 | Client | Wakes from a finished background command | Direct route end to end, final build | Reply delay, message / broadcast |
 |---|---|---|---|

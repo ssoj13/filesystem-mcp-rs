@@ -360,7 +360,8 @@ mod tests {
             feature = "ctl-ocr",
             feature = "ctl-notify",
             feature = "ctl-clip-files",
-            feature = "chat-tools"
+            feature = "chat-tools",
+            feature = "agent-tools"
         ))
     }
 

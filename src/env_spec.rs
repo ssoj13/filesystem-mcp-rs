@@ -32,6 +32,8 @@ pub fn vars() -> Vec<EnvVar> {
     v.extend(policy_vars());
     #[cfg(feature = "chat-tools")]
     v.extend(chat_vars());
+    #[cfg(feature = "agent-tools")]
+    v.extend(agent_vars());
     v.extend(net_vars());
     v.extend(memory_vars());
     v.extend(locate_vars());
@@ -102,6 +104,33 @@ fn chat_vars() -> Vec<EnvVar> {
         default: "auto",
         help: "When another agent writes: auto = reply, then tell the user; ask = show the user and ask before replying. Either way a message can wake an idle session.",
     }]
+}
+
+/// What agents may start. The limits are checked where a start is recorded, not by the model.
+#[cfg(feature = "agent-tools")]
+fn agent_vars() -> Vec<EnvVar> {
+    vec![
+        EnvVar {
+            key: "FS_MCP_AGENT_SPAWN",
+            default: "on",
+            help: "Let agents start other agents with agent_start: on | off.",
+        },
+        EnvVar {
+            key: "FS_MCP_AGENT_MAX_DEPTH",
+            default: "2",
+            help: "How deep agents may start agents. A session you opened is 0, what it starts is 1.",
+        },
+        EnvVar {
+            key: "FS_MCP_AGENT_MAX_TREE",
+            default: "8",
+            help: "Started agents running at once under one session you opened.",
+        },
+        EnvVar {
+            key: "FS_MCP_AGENT_MAX_ACCESS",
+            default: "write",
+            help: "The most a started agent may be given: read | write | full. full bypasses its client's permission prompts.",
+        },
+    ]
 }
 
 // `vec![]` cannot express these: an element carrying `#[cfg(...)]` is not valid inside the

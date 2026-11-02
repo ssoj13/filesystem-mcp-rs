@@ -28,7 +28,7 @@ use crate::address::{Address, Target, next_name};
 /// Bumped when the tables change. A server meeting an older file rebuilds it and carries over who is
 /// here and everything unread, because an upgrade must not lose a message: see `carry_over`. A newer
 /// file is refused, so that two installed versions cannot keep rebuilding each other's.
-const SCHEMA_VERSION: i64 = 6;
+const SCHEMA_VERSION: i64 = 7;
 
 const SCHEMA: &str = r#"
 CREATE TABLE IF NOT EXISTS subscribers (
@@ -45,7 +45,31 @@ CREATE TABLE IF NOT EXISTS subscribers (
     waiter_start INTEGER NOT NULL DEFAULT 0,
     waits_started INTEGER NOT NULL DEFAULT 0,
     quiet_until INTEGER NOT NULL DEFAULT 0,
-    status TEXT
+    status TEXT,
+    depth INTEGER NOT NULL DEFAULT 0,
+    tree TEXT NOT NULL DEFAULT '',
+    proxy INTEGER NOT NULL DEFAULT 0
+);
+CREATE TABLE IF NOT EXISTS runs (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    parent TEXT NOT NULL,
+    owner_pid INTEGER NOT NULL,
+    owner_start INTEGER NOT NULL,
+    tree TEXT NOT NULL,
+    depth INTEGER NOT NULL,
+    client TEXT NOT NULL,
+    task TEXT NOT NULL,
+    cwd TEXT NOT NULL,
+    access TEXT NOT NULL,
+    worktree TEXT,
+    agent TEXT,
+    state TEXT NOT NULL,
+    result TEXT,
+    error TEXT,
+    stop_requested INTEGER NOT NULL DEFAULT 0,
+    parent_run INTEGER,
+    started_at INTEGER NOT NULL,
+    ended_at INTEGER
 );
 CREATE TABLE IF NOT EXISTS messages (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -211,7 +235,7 @@ impl Reaction {
     }
 }
 
-/// What a sender or `chat_who` can tell about an agent right now.
+/// What a sender or `agent_ls` can tell about an agent right now.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "lowercase")]
 pub enum AgentState {
@@ -260,8 +284,107 @@ pub struct Subscriber {
     /// How much longer it asked to be left alone, in words.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub quiet_for: Option<String>,
+    /// How many agents up to the one nobody started: 0 for a session a person opened.
+    #[serde(skip_serializing_if = "is_zero")]
+    pub depth: i64,
+    #[serde(skip)]
+    pub parent: String,
     #[serde(skip)]
     pub owner: (i64, i64),
+}
+
+/// How far an agent another one started has got.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum RunState {
+    Running,
+    /// Its turn is over and it can be resumed when a message comes.
+    Idle,
+    Done,
+    Failed,
+    Stopped,
+    /// The server looking after it is gone, and with it the agent.
+    Lost,
+}
+
+impl RunState {
+    fn word(self) -> &'static str {
+        match self {
+            Self::Running => "running",
+            Self::Idle => "idle",
+            Self::Done => "done",
+            Self::Failed => "failed",
+            Self::Stopped => "stopped",
+            Self::Lost => "lost",
+        }
+    }
+
+    fn of_word(word: &str) -> Self {
+        match word {
+            "running" => Self::Running,
+            "idle" => Self::Idle,
+            "done" => Self::Done,
+            "stopped" => Self::Stopped,
+            "lost" => Self::Lost,
+            _ => Self::Failed,
+        }
+    }
+
+    /// What a request to stop a run in this state comes to.
+    pub fn stop_note(self) -> &'static str {
+        match self {
+            Self::Running | Self::Idle => "It stops within a few seconds.",
+            Self::Lost => {
+                "Its server has gone, so nothing here can stop it. On Windows it ended with that \
+                 server; elsewhere it may still be running."
+            }
+            Self::Done | Self::Failed | Self::Stopped => "It had already ended.",
+        }
+    }
+
+    /// Still occupying a place in its tree.
+    pub fn is_live(self) -> bool {
+        matches!(self, Self::Running | Self::Idle)
+    }
+}
+
+/// One agent started by another. Written only by the server that started it, so neither the parent
+/// nor the depth is anything an agent says about itself.
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Run {
+    pub id: i64,
+    pub parent: String,
+    /// Its name in the chat, once its own server has joined. A client with no such server has none.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub agent: Option<String>,
+    pub client: String,
+    pub depth: i64,
+    pub state: RunState,
+    pub access: String,
+    pub task: String,
+    pub cwd: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub worktree: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub result: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+    /// How long ago it started, in words.
+    pub age: String,
+    #[serde(skip)]
+    pub stop_requested: bool,
+}
+
+/// What `Store::start_run` records, and the limits it checks in the same transaction.
+pub struct NewRun<'a> {
+    pub owner: (i64, i64),
+    pub client: &'a str,
+    pub task: &'a str,
+    pub cwd: &'a str,
+    pub access: &'a str,
+    pub max_depth: i64,
+    pub max_tree: i64,
 }
 
 /// One message as its sender sees it right after sending.
@@ -340,6 +463,12 @@ impl Store {
         ) {
             tracing::warn!("chat: cannot sweep old messages: {error}");
         }
+        if let Err(error) = store.conn().execute(
+            "DELETE FROM runs WHERE started_at < ?1",
+            params![now - KEEP_READ_MS],
+        ) {
+            tracing::warn!("chat: cannot sweep old runs: {error}");
+        }
         Ok(store)
     }
 
@@ -404,47 +533,68 @@ impl Store {
         }
         let name = match (wanted, current) {
             (Some(wanted), _) => {
-                let owner: Option<(i64, i64)> = tx
+                let owner: Option<(i64, i64, bool)> = tx
                     .query_row(
-                        "SELECT pid, pid_start FROM subscribers WHERE name = ?1",
+                        "SELECT pid, pid_start, proxy FROM subscribers WHERE name = ?1",
                         [wanted],
-                        |row| Ok((row.get(0)?, row.get(1)?)),
+                        |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
                     )
                     .optional()?;
-                if let Some((pid, start)) = owner
+                // A starter holding a name for its child is not its owner: taking it would make the
+                // agent its own parent. The child's server takes it through `adopt_name`.
+                if let Some((pid, start, proxy)) = owner
                     && current != Some(wanted)
-                    && alive(pid, start)
+                    && ((proxy && alive(pid, start))
+                        || ((pid, start) != (join.pid, join.pid_start)
+                            && (alive(pid, start) || held_by_run(&tx, wanted, alive)?)))
                 {
                     bail!("the name {wanted} belongs to a live agent");
                 }
                 wanted.to_owned()
             }
             (None, Some(current)) => current.to_owned(),
-            (None, None) => {
-                let mut rows = Vec::new();
-                {
-                    let mut stmt = tx.prepare(
-                        "SELECT s.name, s.pid, s.pid_start, EXISTS(SELECT 1 FROM messages m \
-                         WHERE m.recipient = s.name AND m.read_at IS NULL) FROM subscribers s",
-                    )?;
-                    let mapped = stmt.query_map([], |row| {
+            (None, None) => free_name(&tx, alive)?,
+        };
+        // An agent already here stays where it is in the graph. The parent it remembers can be out of
+        // date, since a rename reaches rows and not other servers' memory, and looking that name up
+        // would make it the root of a new tree, out of reach of its limits and of its ancestors.
+        let kept = match current {
+            Some(current) => tx
+                .query_row(
+                    "SELECT parent, depth, tree FROM subscribers WHERE name = ?1 AND tree != ''",
+                    [current],
+                    |row| {
                         Ok((
                             row.get::<_, String>(0)?,
                             row.get::<_, i64>(1)?,
-                            row.get::<_, i64>(2)?,
-                            row.get::<_, bool>(3)?,
+                            row.get::<_, String>(2)?,
                         ))
-                    })?;
-                    for row in mapped {
-                        rows.push(row?);
-                    }
-                }
-                next_name(|candidate| {
-                    rows.iter().any(|(name, pid, start, unread)| {
-                        name == candidate && (*unread || alive(*pid, *start))
-                    })
-                })
-            }
+                    },
+                )
+                .optional()?,
+            None => None,
+        };
+        // Otherwise decided here, from the parent's own row, so that it is nothing an agent can claim.
+        // A session nobody started is the root of its own tree.
+        let (parent, depth, tree) = match kept {
+            Some(kept) => kept,
+            None => tx
+                .query_row(
+                    "SELECT depth, tree FROM subscribers WHERE name = ?1",
+                    [&join.parent],
+                    |row| Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?)),
+                )
+                .optional()?
+                .map_or_else(
+                    || {
+                        (
+                            join.parent.clone(),
+                            0,
+                            format!("{}:{}", join.pid, join.pid_start),
+                        )
+                    },
+                    |(parent_depth, tree)| (join.parent.clone(), parent_depth + 1, tree),
+                ),
         };
         // A rename is the same agent: what it said about itself goes with it.
         let mut carried = None;
@@ -467,13 +617,26 @@ impl Store {
                 params![name, current],
             )?;
             tx.execute("DELETE FROM subscribers WHERE name = ?1", [current])?;
+            tx.execute(
+                "UPDATE subscribers SET parent = ?1 WHERE parent = ?2",
+                params![name, current],
+            )?;
+            tx.execute(
+                "UPDATE runs SET parent = ?1 WHERE parent = ?2",
+                params![name, current],
+            )?;
+            tx.execute(
+                "UPDATE runs SET agent = ?1 WHERE agent = ?2",
+                params![name, current],
+            )?;
         }
         tx.execute(
             "INSERT INTO subscribers \
-             (name, project, topic, parent, client, pid, pid_start, seen_at, status) \
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9) \
+             (name, project, topic, parent, client, pid, pid_start, seen_at, status, depth, tree) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11) \
              ON CONFLICT(name) DO UPDATE SET project = excluded.project, topic = excluded.topic, \
-             parent = excluded.parent, client = excluded.client, pid = excluded.pid, \
+             parent = excluded.parent, depth = excluded.depth, tree = excluded.tree, proxy = 0, \
+             client = excluded.client, pid = excluded.pid, \
              pid_start = excluded.pid_start, seen_at = excluded.seen_at, \
              listening_until = 0, \
              status = CASE WHEN pid = excluded.pid AND pid_start = excluded.pid_start \
@@ -488,12 +651,14 @@ impl Store {
                 name,
                 join.project,
                 join.topic,
-                join.parent,
+                parent,
                 join.client,
                 join.pid,
                 join.pid_start,
                 now,
-                join.status
+                join.status,
+                depth,
+                tree
             ],
         )?;
         if let Some((status, quiet_until)) = carried {
@@ -516,7 +681,7 @@ impl Store {
             project: join.project.clone(),
             topic: join.topic.clone(),
             name,
-            parent: join.parent.clone(),
+            parent,
         })
     }
 
@@ -719,17 +884,18 @@ impl Store {
         let mut other_side = None;
         if let Some(id) = reply_to {
             type Owner = (i64, i64);
-            let (sender, recipient, parent_hops, sender_owner, recipient_owner, closed): (
+            let (sender, recipient, parent_hops, sender_owner, recipient_owner, closed, sent_at): (
                 String,
                 String,
                 i64,
                 Owner,
                 Owner,
                 bool,
+                i64,
             ) = tx
                 .query_row(
                     "SELECT sender, recipient, hops, sender_pid, sender_start, recipient_pid, \
-                     recipient_start, reaction IS NOT NULL AND wakes = 0 FROM messages \
+                     recipient_start, reaction IS NOT NULL AND wakes = 0, sent_at FROM messages \
                      WHERE id = ?1",
                     [id],
                     |row| {
@@ -740,6 +906,7 @@ impl Store {
                             (row.get(3)?, row.get(4)?),
                             (row.get(5)?, row.get(6)?),
                             row.get(7)?,
+                            row.get(8)?,
                         ))
                     },
                 )
@@ -767,7 +934,11 @@ impl Store {
                         |row| Ok((row.get(0)?, row.get(1)?)),
                     )
                     .optional()?;
-                if target.is_none() && now_owned != Some(owner) {
+                // A started agent has a new server each turn and is the same agent all along.
+                if target.is_none()
+                    && now_owned != Some(owner)
+                    && !held_by_run_since(&tx, name, sent_at, alive)?
+                {
                     bail!(
                         "the other agent of #{id} is gone and {name} now means someone else: send \
                          `text` with `to` if you mean them"
@@ -1078,6 +1249,369 @@ impl Store {
         subscribers(&self.conn(), now, alive, Listing::ForPeople)
     }
 
+    /// The agent whose server is this very process. How a new server learns who started it: the
+    /// process tree cannot be claimed or forgotten the way an argument can.
+    pub fn agent_of_process(&self, pid: i64, start: i64) -> Result<Option<String>> {
+        Ok(self
+            .conn()
+            .query_row(
+                "SELECT name FROM subscribers WHERE pid = ?1 AND pid_start = ?2 AND proxy = 0 \
+                 LIMIT 1",
+                params![pid, start],
+                |row| row.get(0),
+            )
+            .optional()?)
+    }
+
+    /// The ids of everything still unread for this agent.
+    pub fn unread_ids(&self, name: &str) -> Result<Vec<i64>> {
+        let conn = self.conn();
+        let mut stmt = conn
+            .prepare_cached("SELECT id FROM messages WHERE recipient = ?1 AND read_at IS NULL")?;
+        let mapped = stmt.query_map([name], |row| row.get(0))?;
+        let mut ids = Vec::new();
+        for id in mapped {
+            ids.push(id?);
+        }
+        Ok(ids)
+    }
+
+    /// A started agent's server has come: its name is now that server's. From the starter holding it,
+    /// or from its server of an earlier turn, which has ended; a second server of the same turn, in a
+    /// client configured with two, finds it taken and joins under a name of its own.
+    pub fn adopt_name(&self, name: &str, pid: i64, start: i64, alive: Alive<'_>) -> Result<()> {
+        let mut conn = self.conn();
+        let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let holder: Option<(i64, i64, bool)> = tx
+            .query_row(
+                "SELECT pid, pid_start, proxy FROM subscribers WHERE name = ?1",
+                [name],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .optional()?;
+        if holder.is_some_and(|(held, held_start, proxy)| proxy || !alive(held, held_start)) {
+            tx.execute(
+                "UPDATE subscribers SET pid = ?2, pid_start = ?3, proxy = 0 WHERE name = ?1",
+                params![name, pid, start],
+            )?;
+        }
+        tx.commit()?;
+        Ok(())
+    }
+
+    /// How far from a session a person opened. Zero for an unknown name.
+    pub fn depth_of(&self, name: &str) -> Result<i64> {
+        Ok(self
+            .conn()
+            .query_row(
+                "SELECT depth FROM subscribers WHERE name = ?1",
+                [name],
+                |row| row.get(0),
+            )
+            .optional()?
+            .unwrap_or(0))
+    }
+
+    /// This agent's address, whether or not its process is still there.
+    pub fn address_of(&self, name: &str) -> Result<Option<Address>> {
+        Ok(self
+            .conn()
+            .query_row(
+                "SELECT project, topic, name, parent FROM subscribers WHERE name = ?1",
+                [name],
+                |row| {
+                    Ok(Address {
+                        project: row.get(0)?,
+                        topic: row.get(1)?,
+                        name: row.get(2)?,
+                        parent: row.get(3)?,
+                    })
+                },
+            )
+            .optional()?)
+    }
+
+    /// Record an agent about to be started by `me`, if its limits allow: the check and the place it
+    /// takes are one transaction, or two parallel calls could both take the last one.
+    ///
+    /// It gets its name here. A client need not have this server configured, or may be unable to use
+    /// it, as Codex under `exec` is, and it should be reachable all the same. Until its own server
+    /// comes, if one does, the starter holds the name for it, marked as a proxy so that the process
+    /// tree does not take the starter's server for that agent's.
+    pub fn start_run(
+        &self,
+        me: &Address,
+        new: &NewRun<'_>,
+        now: i64,
+        alive: Alive<'_>,
+    ) -> Result<i64> {
+        let mut conn = self.conn();
+        let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let (my_depth, tree): (i64, String) = tx
+            .query_row(
+                "SELECT depth, tree FROM subscribers WHERE name = ?1",
+                [&me.name],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .optional()?
+            .ok_or_else(|| anyhow!("not in the chat yet"))?;
+        let depth = my_depth + 1;
+        if depth > new.max_depth {
+            bail!(
+                "this would be depth {depth} and the limit is {}: do it yourself, or tell whoever \
+                 started you",
+                new.max_depth
+            );
+        }
+        let mut live = 0;
+        {
+            let mut stmt = tx.prepare(
+                "SELECT owner_pid, owner_start FROM runs \
+                 WHERE tree = ?1 AND state IN ('running', 'idle')",
+            )?;
+            let owners = stmt.query_map([&tree], |row| {
+                Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?))
+            })?;
+            for owner in owners {
+                let (pid, start) = owner?;
+                live += i64::from(alive(pid, start));
+            }
+        }
+        if live >= new.max_tree {
+            bail!(
+                "{live} agents are running in this tree and the limit is {}: stop one with \
+                 agent_stop, or wait",
+                new.max_tree
+            );
+        }
+        tx.execute(
+            "INSERT INTO runs (parent, owner_pid, owner_start, tree, depth, client, task, cwd, \
+             access, state, started_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, 'running', ?10)",
+            params![
+                me.name,
+                new.owner.0,
+                new.owner.1,
+                tree,
+                depth,
+                new.client,
+                new.task,
+                new.cwd,
+                new.access,
+                now
+            ],
+        )?;
+        let id = tx.last_insert_rowid();
+        let parent_run: Option<i64> = tx
+            .query_row(
+                "SELECT id FROM runs WHERE agent = ?1 AND state IN ('running', 'idle') \
+                 ORDER BY id DESC LIMIT 1",
+                [&me.name],
+                |row| row.get(0),
+            )
+            .optional()?;
+        tx.execute(
+            "UPDATE runs SET parent_run = ?2 WHERE id = ?1",
+            params![id, parent_run],
+        )?;
+        let name = free_name(&tx, alive)?;
+        // `free_name` says nobody alive holds it, not that there is no row, and nothing of a gone
+        // holder may pass to the new agent.
+        tx.execute("DELETE FROM subscribers WHERE name = ?1", [&name])?;
+        tx.execute(
+            "INSERT INTO subscribers (name, project, topic, parent, client, pid, pid_start, seen_at, \
+             depth, tree, proxy) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, 1)",
+            params![
+                name,
+                me.project,
+                me.topic,
+                me.name,
+                new.client,
+                new.owner.0,
+                new.owner.1,
+                now,
+                depth,
+                tree
+            ],
+        )?;
+        tx.execute(
+            "UPDATE runs SET agent = ?2 WHERE id = ?1",
+            params![id, name],
+        )?;
+        tx.commit()?;
+        Ok(id)
+    }
+
+    pub fn set_run_worktree(&self, id: i64, worktree: &str) -> Result<()> {
+        self.conn().execute(
+            "UPDATE runs SET worktree = ?2 WHERE id = ?1",
+            params![id, worktree],
+        )?;
+        Ok(())
+    }
+
+    /// A turn has ended. A live state keeps the run open; any other closes it.
+    pub fn set_run_outcome(
+        &self,
+        id: i64,
+        state: RunState,
+        result: Option<&str>,
+        error: Option<&str>,
+        now: i64,
+    ) -> Result<()> {
+        let conn = self.conn();
+        conn.execute(
+            "UPDATE runs SET state = ?2, result = COALESCE(?3, result), \
+             error = COALESCE(?4, error), \
+             ended_at = CASE WHEN ?5 THEN NULL ELSE ?6 END WHERE id = ?1",
+            params![id, state.word(), result, error, state.is_live(), now],
+        )?;
+        // Nobody is holding its name any more, and a held name must not read as a live agent.
+        if !state.is_live() {
+            conn.execute(
+                "UPDATE subscribers SET pid = 0, pid_start = 0, proxy = 0 WHERE proxy = 1 AND \
+                 name = (SELECT agent FROM runs WHERE id = ?1)",
+                [id],
+            )?;
+        }
+        Ok(())
+    }
+
+    /// Ask the servers looking after a run and everything under it to stop them. An agent may stop
+    /// only what it started, itself or through the ones it started; `None` is a person, at the command
+    /// line. All of it is flagged here: a killed client takes its server with it, and on Unix what that
+    /// server started would otherwise run on with nobody looking.
+    pub fn request_stop(&self, id: i64, by: Option<&Address>) -> Result<()> {
+        let mut conn = self.conn();
+        let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let (mut at, tree): (String, String) = tx
+            .query_row("SELECT parent, tree FROM runs WHERE id = ?1", [id], |row| {
+                Ok((row.get(0)?, row.get(1)?))
+            })
+            .optional()?
+            .ok_or_else(|| anyhow!("no run #{id}"))?;
+        if let Some(me) = by {
+            // In its tree first: a stranger may have the name of an ancestor that has gone.
+            let my_tree: Option<String> = tx
+                .query_row(
+                    "SELECT tree FROM subscribers WHERE name = ?1",
+                    [&me.name],
+                    |row| row.get(0),
+                )
+                .optional()?;
+            let mut mine = false;
+            for _ in 0..if my_tree.as_ref() == Some(&tree) {
+                MAX_GRAPH_STEPS
+            } else {
+                0
+            } {
+                if at == me.name {
+                    mine = true;
+                    break;
+                }
+                let above: Option<String> = tx
+                    .query_row(
+                        "SELECT parent FROM subscribers WHERE name = ?1",
+                        [&at],
+                        |row| row.get(0),
+                    )
+                    .optional()?;
+                match above {
+                    Some(above) => at = above,
+                    None => break,
+                }
+            }
+            if !mine {
+                bail!(
+                    "run #{id} was not started by {} or anyone it started",
+                    me.name
+                );
+            }
+        }
+        tx.execute(
+            &format!(
+                "{RUNS_BELOW} UPDATE runs SET stop_requested = 1 \
+                 WHERE id = ?1 OR (id IN (SELECT id FROM below) AND state IN ('running', 'idle'))"
+            ),
+            [id],
+        )?;
+        tx.commit()?;
+        Ok(())
+    }
+
+    /// How many runs under this one still have a server looking after them.
+    pub fn live_below(&self, id: i64, alive: Alive<'_>) -> Result<usize> {
+        let conn = self.conn();
+        let mut stmt = conn.prepare(&format!(
+            "{RUNS_BELOW} SELECT owner_pid, owner_start FROM runs WHERE id != ?1 \
+             AND id IN (SELECT id FROM below) AND state IN ('running', 'idle')"
+        ))?;
+        let owners = stmt.query_map([id], |row| {
+            Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?))
+        })?;
+        let mut live = 0;
+        for owner in owners {
+            let (pid, start) = owner?;
+            live += usize::from(alive(pid, start));
+        }
+        Ok(live)
+    }
+
+    /// A server is leaving: stop what it looks after, while it can still tidy up after them. Returns
+    /// how many are left to end.
+    pub fn stop_owned(&self, owner: (i64, i64)) -> Result<usize> {
+        let conn = self.conn();
+        conn.execute(
+            "UPDATE runs SET stop_requested = 1 WHERE owner_pid = ?1 AND owner_start = ?2 \
+             AND state IN ('running', 'idle')",
+            params![owner.0, owner.1],
+        )?;
+        Ok(conn.query_row(
+            "SELECT COUNT(*) FROM runs WHERE owner_pid = ?1 AND owner_start = ?2 \
+             AND state IN ('running', 'idle')",
+            params![owner.0, owner.1],
+            |row| row.get::<_, i64>(0),
+        )? as usize)
+    }
+
+    pub fn run(&self, id: i64, now: i64, alive: Alive<'_>) -> Result<Option<Run>> {
+        let conn = self.conn();
+        let mut stmt = conn.prepare(&format!("{RUN_COLUMNS} WHERE id = ?1"))?;
+        Ok(stmt
+            .query_row([id], |row| run_of_row(row, now, alive))
+            .optional()?)
+    }
+
+    /// The run this agent is, if another agent started it. Only one still going: names come round
+    /// again, and a later holder of this one is nothing to that run.
+    pub fn run_of_agent(&self, name: &str, now: i64, alive: Alive<'_>) -> Result<Option<Run>> {
+        let conn = self.conn();
+        let mut stmt = conn.prepare(&format!(
+            "{RUN_COLUMNS} WHERE agent = ?1 AND state IN ('running', 'idle') \
+             ORDER BY id DESC LIMIT 1"
+        ))?;
+        Ok(stmt
+            .query_row([name], |row| run_of_row(row, now, alive))
+            .optional()?)
+    }
+
+    /// What is running, and what ended lately, newest first. No result text: `run` has it.
+    pub fn runs(&self, now: i64, alive: Alive<'_>) -> Result<Vec<Run>> {
+        let conn = self.conn();
+        let mut stmt = conn.prepare(&format!(
+            "{RUN_COLUMNS} WHERE ended_at IS NULL OR ended_at > ?1 ORDER BY id DESC LIMIT 50"
+        ))?;
+        let mapped = stmt.query_map([now - KEEP_CLOSED_LISTED_MS], |row| {
+            run_of_row(row, now, alive)
+        })?;
+        let mut runs = Vec::new();
+        for run in mapped {
+            let mut run = run?;
+            run.result = None;
+            runs.push(run);
+        }
+        Ok(runs)
+    }
+
     /// The last `limit` messages this subscriber sent, newest first, and how far each got.
     pub fn sent_status(&self, name: &str, limit: i64) -> Result<Vec<SentStatus>> {
         let conn = self.conn();
@@ -1108,6 +1642,45 @@ impl Store {
         }
         Ok(statuses)
     }
+}
+
+/// A run and everything started under it, as `below`, for ?1. By run and not by name: names come round
+/// again, and a stop must not reach a stranger who has one now.
+const RUNS_BELOW: &str = "WITH RECURSIVE below(id) AS (SELECT ?1 \
+     UNION SELECT r.id FROM runs r JOIN below b ON r.parent_run = b.id)";
+
+/// Tries at a free number out of 9000 before giving up: a file holding that many agents is not this.
+const NAME_TRIES: usize = 64;
+
+/// More than any depth allowed, and a stop on a walk through rows that could in theory form a loop.
+const MAX_GRAPH_STEPS: usize = 64;
+
+const RUN_COLUMNS: &str = "SELECT id, parent, agent, client, depth, state, access, task, cwd, \
+     worktree, result, error, started_at, stop_requested, owner_pid, owner_start FROM runs";
+
+/// In `RUN_COLUMNS` order. A run whose server has gone did not get to say how it ended.
+fn run_of_row(row: &rusqlite::Row<'_>, now: i64, alive: Alive<'_>) -> rusqlite::Result<Run> {
+    let mut state = RunState::of_word(row.get::<_, String>(5)?.as_str());
+    if state.is_live() && !alive(row.get(14)?, row.get(15)?) {
+        state = RunState::Lost;
+    }
+    let started_at: i64 = row.get(12)?;
+    Ok(Run {
+        id: row.get(0)?,
+        parent: row.get(1)?,
+        agent: row.get(2)?,
+        client: row.get(3)?,
+        depth: row.get(4)?,
+        state,
+        access: row.get(6)?,
+        task: row.get(7)?,
+        cwd: row.get(8)?,
+        worktree: row.get(9)?,
+        result: row.get(10)?,
+        error: row.get(11)?,
+        age: duration_text(now - started_at),
+        stop_requested: row.get(13)?,
+    })
 }
 
 /// The columns `take_unread` and `show` select, in that order.
@@ -1141,11 +1714,13 @@ fn prepare_with_retries(conn: &Connection) -> Result<()> {
         let version: i64 = tx.query_row("PRAGMA user_version", [], |row| row.get(0))?;
         if version < SCHEMA_VERSION {
             tx.execute_batch(
-                "DROP TABLE IF EXISTS old_messages; DROP TABLE IF EXISTS old_subscribers;",
+                "DROP TABLE IF EXISTS old_messages; DROP TABLE IF EXISTS old_subscribers; \
+                 DROP TABLE IF EXISTS old_runs;",
             )?;
             for (table, old) in [
                 ("messages", "old_messages"),
                 ("subscribers", "old_subscribers"),
+                ("runs", "old_runs"),
             ] {
                 if table_exists(&tx, table)? {
                     tx.execute_batch(&format!("ALTER TABLE {table} RENAME TO {old}"))?;
@@ -1158,6 +1733,7 @@ fn prepare_with_retries(conn: &Connection) -> Result<()> {
             tx.execute_batch(SCHEMA)?;
             carry_over(&tx, "messages", "old_messages", "WHERE read_at IS NULL")?;
             carry_over(&tx, "subscribers", "old_subscribers", "")?;
+            carry_over(&tx, "runs", "old_runs", "")?;
             // Ids must not come round again: a stale `replyTo` would mark a stranger's message read.
             // The counter went with the renamed table, and only the read rows knew its highest.
             tx.execute_batch(
@@ -1166,7 +1742,8 @@ fn prepare_with_retries(conn: &Connection) -> Result<()> {
                  SELECT 'messages', seq FROM sqlite_sequence WHERE name = 'old_messages';",
             )?;
             tx.execute_batch(
-                "DROP TABLE IF EXISTS old_messages; DROP TABLE IF EXISTS old_subscribers;",
+                "DROP TABLE IF EXISTS old_messages; DROP TABLE IF EXISTS old_subscribers; \
+                 DROP TABLE IF EXISTS old_runs;",
             )?;
             tx.execute_batch(&format!("PRAGMA user_version = {SCHEMA_VERSION}"))?;
         }
@@ -1191,6 +1768,115 @@ fn prepare_with_retries(conn: &Connection) -> Result<()> {
             }
         }
     }
+}
+
+/// The next name free to issue: nobody alive holds it and nothing unread waits under it.
+fn free_name(conn: &Connection, alive: Alive<'_>) -> Result<String> {
+    let held = names_held_by_runs(conn, alive)?;
+    let mut rows = Vec::new();
+    {
+        let mut stmt = conn.prepare(
+            "SELECT s.name, s.pid, s.pid_start, EXISTS(SELECT 1 FROM messages m \
+             WHERE m.recipient = s.name AND m.read_at IS NULL) FROM subscribers s",
+        )?;
+        let mapped = stmt.query_map([], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, i64>(1)?,
+                row.get::<_, i64>(2)?,
+                row.get::<_, bool>(3)?,
+            ))
+        })?;
+        for row in mapped {
+            rows.push(row?);
+        }
+    }
+    // With its number or without: agents around at once should be told apart by more than that.
+    let same = |name: &str, listed: &str| {
+        name.strip_prefix(listed)
+            .is_some_and(|rest| rest.is_empty() || rest.starts_with('-'))
+    };
+    let base = next_name(|candidate| {
+        held.iter().any(|name| same(name, candidate))
+            || rows.iter().any(|(name, pid, start, unread)| {
+                same(name, candidate) && (*unread || alive(*pid, *start))
+            })
+    });
+    // This crate's own tests name agents by their place in the list. `tests/chat.rs` runs this path.
+    if cfg!(test) {
+        return Ok(base);
+    }
+    numbered_name(conn, &base)
+}
+
+/// A name nobody has had in this file: one that came round again would get what was meant for its
+/// last holder, and every check that guards against that is one more place to get it wrong. A name
+/// an agent chooses for itself with `chat_join` can still recur, so those checks stay.
+fn numbered_name(conn: &Connection, base: &str) -> Result<String> {
+    for _ in 0..NAME_TRIES {
+        let number: i64 =
+            conn.query_row("SELECT abs(random() % 9000) + 1000", [], |row| row.get(0))?;
+        let name = format!("{base}-{number}");
+        let used: bool = conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM subscribers WHERE name = ?1) \
+             OR EXISTS(SELECT 1 FROM runs WHERE agent = ?1 OR parent = ?1) \
+             OR EXISTS(SELECT 1 FROM messages WHERE sender = ?1 OR recipient = ?1)",
+            [&name],
+            |row| row.get(0),
+        )?;
+        if !used {
+            return Ok(name);
+        }
+    }
+    bail!("no unused number for the name {base}")
+}
+
+/// The names of runs still looked after. Between turns a started client has no process, so its row
+/// reads as gone, and a stranger under its name would have its messages answered by that client.
+fn names_held_by_runs(conn: &Connection, alive: Alive<'_>) -> Result<Vec<String>> {
+    let mut stmt = conn.prepare(
+        "SELECT agent, owner_pid, owner_start FROM runs \
+         WHERE agent IS NOT NULL AND state IN ('running', 'idle')",
+    )?;
+    let rows = stmt.query_map([], |row| {
+        Ok((
+            row.get::<_, String>(0)?,
+            row.get::<_, i64>(1)?,
+            row.get::<_, i64>(2)?,
+        ))
+    })?;
+    let mut names = Vec::new();
+    for row in rows {
+        let (name, pid, start) = row?;
+        if alive(pid, start) {
+            names.push(name);
+        }
+    }
+    Ok(names)
+}
+
+/// Has a run still looked after held this name since `since`? Then whoever holds it now is that agent.
+fn held_by_run_since(conn: &Connection, name: &str, since: i64, alive: Alive<'_>) -> Result<bool> {
+    let mut stmt = conn.prepare(
+        "SELECT owner_pid, owner_start FROM runs WHERE agent = ?1 \
+         AND state IN ('running', 'idle') AND started_at <= ?2",
+    )?;
+    let owners = stmt.query_map(params![name, since], |row| {
+        Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?))
+    })?;
+    for owner in owners {
+        let (pid, start) = owner?;
+        if alive(pid, start) {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
+fn held_by_run(conn: &Connection, name: &str, alive: Alive<'_>) -> Result<bool> {
+    Ok(names_held_by_runs(conn, alive)?
+        .iter()
+        .any(|held| held == name))
 }
 
 fn table_exists(conn: &Connection, table: &str) -> rusqlite::Result<bool> {
@@ -1250,7 +1936,7 @@ pub fn duration_text(ms: i64) -> String {
     }
 }
 
-fn parse_address(raw: &str) -> Option<Address> {
+pub fn parse_address(raw: &str) -> Option<Address> {
     let mut parts = raw.split(':');
     Some(Address {
         project: parts.next()?.to_owned(),
@@ -1277,7 +1963,7 @@ fn subscribers(
         "SELECT s.project, s.topic, s.name, s.parent, s.client, s.pid, s.pid_start, s.seen_at, \
          s.listening_until, s.status, (SELECT COUNT(*) FROM messages m \
          WHERE m.recipient = s.name AND m.read_at IS NULL), s.waiter_pid, s.waiter_start, \
-         s.quiet_until FROM subscribers s ORDER BY s.name",
+         s.quiet_until, s.depth FROM subscribers s ORDER BY s.name",
     )?;
     let mapped = stmt.query_map([], |row| {
         let address = Address {
@@ -1296,6 +1982,7 @@ fn subscribers(
         let waiter_pid: i64 = row.get(11)?;
         let waiter_start: i64 = row.get(12)?;
         let quiet_until: i64 = row.get(13)?;
+        let depth: i64 = row.get(14)?;
         let state = if !alive(pid, start) {
             AgentState::Closed
         } else if quiet_until > now {
@@ -1318,12 +2005,13 @@ fn subscribers(
             status,
             unread,
             quiet_for,
-            (pid, start),
+            (pid, start, depth),
         ))
     })?;
     let mut out = Vec::new();
     for row in mapped {
-        let (address, client, state, seen_at, status, unread, quiet_for, owner) = row?;
+        let (address, client, state, seen_at, status, unread, quiet_for, (pid, start, depth)) =
+            row?;
         // Without this the list grows by one line per session for as long as the file lives.
         if listing == Listing::ForPeople
             && state == AgentState::Closed
@@ -1334,13 +2022,15 @@ fn subscribers(
         }
         out.push(Subscriber {
             address: address.to_string(),
+            parent: address.parent,
             name: address.name,
             client,
             state,
             unread,
             status,
             quiet_for,
-            owner,
+            depth,
+            owner: (pid, start),
         });
     }
     Ok(out)
@@ -2060,11 +2750,435 @@ mod tests {
         );
     }
 
-    /// As a version 5 server left it: no `woken_at`.
+    /// As a version 5 server left it: no `woken_at`, no tree, no runs.
     fn downgrade(path: &Path) {
         let conn = Connection::open(path).unwrap();
-        conn.execute_batch("ALTER TABLE messages DROP COLUMN woken_at; PRAGMA user_version = 5;")
+        conn.execute_batch(
+            "ALTER TABLE messages DROP COLUMN woken_at; ALTER TABLE subscribers DROP COLUMN depth; \
+             ALTER TABLE subscribers DROP COLUMN tree; DROP TABLE runs; PRAGMA user_version = 5;",
+        )
+        .unwrap();
+    }
+
+    fn joined(store: &Store, pid: i64, parent: &str) -> Address {
+        let mut join = join_of(pid);
+        join.parent = parent.to_owned();
+        store.join(&join, None, None, NOW, &everyone_alive).unwrap()
+    }
+
+    fn new_run(max_depth: i64, max_tree: i64) -> NewRun<'static> {
+        NewRun {
+            owner: (1, 1),
+            client: "codex",
+            task: "review",
+            cwd: "/w",
+            access: "read",
+            max_depth,
+            max_tree,
+        }
+    }
+
+    #[test]
+    fn depth_and_tree_come_from_the_parents_row_and_not_from_anything_claimed() {
+        let (_dir, store) = store();
+        let root = joined(&store, 1, "-");
+        let child = joined(&store, 2, &root.name);
+        let grandchild = joined(&store, 3, &child.name);
+        let orphan = joined(&store, 4, "NoSuchAgent");
+        let listed = store.who(NOW, &everyone_alive).unwrap();
+        let of = |name: &str| listed.iter().find(|agent| agent.name == name).unwrap();
+        assert_eq!(of(&root.name).depth, 0);
+        assert_eq!(of(&child.name).depth, 1);
+        assert_eq!(of(&grandchild.name).depth, 2);
+        assert_eq!(
+            of(&orphan.name).depth,
+            0,
+            "a name nobody holds gives no depth"
+        );
+    }
+
+    #[test]
+    fn the_depth_limit_stops_a_run_and_the_tree_limit_counts_live_ones_only() {
+        let (_dir, store) = store();
+        let root = joined(&store, 1, "-");
+        let child = joined(&store, 2, &root.name);
+        let grandchild = joined(&store, 3, &child.name);
+        store
+            .start_run(&child, &new_run(2, 8), NOW, &everyone_alive)
             .unwrap();
+        let too_deep = store
+            .start_run(&grandchild, &new_run(2, 8), NOW, &everyone_alive)
+            .unwrap_err();
+        assert!(too_deep.to_string().contains("depth 3"), "{too_deep}");
+
+        let other = joined(&store, 5, "-");
+        let first = store
+            .start_run(&other, &new_run(2, 2), NOW, &everyone_alive)
+            .unwrap();
+        store
+            .start_run(&other, &new_run(2, 2), NOW, &everyone_alive)
+            .unwrap();
+        let full = store
+            .start_run(&other, &new_run(2, 2), NOW, &everyone_alive)
+            .unwrap_err();
+        assert!(full.to_string().contains("limit is 2"), "{full}");
+        store
+            .set_run_outcome(first, RunState::Done, Some("ok"), None, NOW)
+            .unwrap();
+        store
+            .start_run(&other, &new_run(2, 2), NOW, &everyone_alive)
+            .unwrap();
+    }
+
+    #[test]
+    fn a_run_whose_server_is_gone_reads_as_lost_and_takes_no_place_in_its_tree() {
+        let (_dir, store) = store();
+        // The starter is alive; the server that owned the run, pid 1 in `new_run`, is not.
+        let root = joined(&store, 7, "-");
+        let only_root = |pid: i64, _: i64| pid == 7;
+        let id = store
+            .start_run(&root, &new_run(2, 1), NOW, &everyone_alive)
+            .unwrap();
+        let gone = store.run(id, NOW, &only_root).unwrap().unwrap();
+        assert_eq!(gone.state, RunState::Lost);
+        let next = store
+            .start_run(&root, &new_run(2, 1), NOW, &only_root)
+            .unwrap();
+        // The gone agent's name is free again, and the row it left must not stop the new one.
+        let next = store.run(next, NOW, &everyone_alive).unwrap().unwrap();
+        assert_eq!(next.agent, gone.agent);
+        assert!(store.address_of(&root.name).unwrap().is_some());
+    }
+
+    #[test]
+    fn only_an_ancestor_or_a_person_can_stop_a_run() {
+        let (_dir, store) = store();
+        let root = joined(&store, 1, "-");
+        let child = joined(&store, 2, &root.name);
+        let stranger = joined(&store, 3, "-");
+        let id = store
+            .start_run(&child, &new_run(2, 8), NOW, &everyone_alive)
+            .unwrap();
+        assert!(store.request_stop(id, Some(&stranger)).is_err());
+        let not_yet = store.run(id, NOW, &everyone_alive).unwrap().unwrap();
+        assert!(!not_yet.stop_requested);
+        store.request_stop(id, Some(&root)).unwrap();
+        assert!(
+            store
+                .run(id, NOW, &everyone_alive)
+                .unwrap()
+                .unwrap()
+                .stop_requested
+        );
+        store.request_stop(id, None).unwrap();
+        assert!(store.request_stop(999, None).is_err());
+    }
+
+    /// `start_run` for an agent that then has a server of its own, as a client with this server does.
+    fn started(store: &Store, by: &Address, server: i64) -> (i64, Address) {
+        let id = store
+            .start_run(by, &new_run(8, 8), NOW, &everyone_alive)
+            .unwrap();
+        let name = store
+            .run(id, NOW, &everyone_alive)
+            .unwrap()
+            .unwrap()
+            .agent
+            .unwrap();
+        store.adopt_name(&name, server, 1, &everyone_alive).unwrap();
+        (id, store.address_of(&name).unwrap().unwrap())
+    }
+
+    #[test]
+    fn a_stop_reaches_down_and_only_an_ancestor_can_send_it() {
+        let (_dir, store) = store();
+        let root = joined(&store, 1, "-");
+        let (left, left_agent) = started(&store, &root, 2);
+        let (_right, right_agent) = started(&store, &root, 3);
+        let (below_left, below_left_agent) = started(&store, &left_agent, 4);
+        let (below_that, _) = started(&store, &below_left_agent, 5);
+
+        // Same tree and a smaller depth are not enough: that is a sibling's child.
+        assert!(store.request_stop(below_left, Some(&right_agent)).is_err());
+        let flagged = |id| {
+            store
+                .run(id, NOW, &everyone_alive)
+                .unwrap()
+                .unwrap()
+                .stop_requested
+        };
+        assert!(!flagged(below_left));
+
+        assert_eq!(store.live_below(left, &everyone_alive).unwrap(), 2);
+        store.request_stop(left, Some(&root)).unwrap();
+        assert!(flagged(left) && flagged(below_left) && flagged(below_that));
+        // A grandparent counts too, and what has no server left no longer holds a stop up.
+        store.request_stop(below_that, Some(&root)).unwrap();
+        assert_eq!(store.live_below(left, &nobody_alive).unwrap(), 0);
+    }
+
+    #[test]
+    fn a_stop_does_not_reach_a_stranger_with_a_name_that_came_round_again() {
+        let (_dir, store) = store();
+        let root = joined(&store, 1, "-");
+        let (mid, mid_agent) = started(&store, &root, 2);
+        let (ended, ended_agent) = started(&store, &mid_agent, 3);
+        store
+            .set_run_outcome(ended, RunState::Done, None, None, NOW)
+            .unwrap();
+        // Its server is gone and someone unrelated has the name now.
+        let not_3 = |pid: i64, _: i64| pid != 3;
+        let stranger = store
+            .join(&join_of(9), None, Some(&ended_agent.name), NOW, &not_3)
+            .unwrap();
+        assert_eq!(stranger.name, ended_agent.name);
+        let theirs = store
+            .start_run(&stranger, &new_run(8, 8), NOW, &everyone_alive)
+            .unwrap();
+        store.request_stop(mid, Some(&root)).unwrap();
+        let run = store.run(theirs, NOW, &everyone_alive).unwrap().unwrap();
+        assert!(!run.stop_requested);
+        // Nor does having the name make it someone who may stop what its holder started.
+        let (old_kid, _) = {
+            let id = store
+                .start_run(&mid_agent, &new_run(8, 8), NOW, &everyone_alive)
+                .unwrap();
+            (id, ())
+        };
+        assert!(store.request_stop(old_kid, Some(&stranger)).is_err());
+    }
+
+    #[test]
+    fn a_starter_cannot_take_the_name_it_holds_for_its_child() {
+        let (_dir, store) = store();
+        let root = joined(&store, 1, "-");
+        let id = store
+            .start_run(&root, &new_run(8, 8), NOW, &everyone_alive)
+            .unwrap();
+        let name = store
+            .run(id, NOW, &everyone_alive)
+            .unwrap()
+            .unwrap()
+            .agent
+            .unwrap();
+        let taken = store.join(
+            &join_of(1),
+            Some(&root.name),
+            Some(&name),
+            NOW,
+            &everyone_alive,
+        );
+        assert!(taken.is_err(), "{taken:?}");
+    }
+
+    #[test]
+    fn an_answer_reaches_a_started_agent_after_its_server_changed() {
+        let (_dir, store) = store();
+        let root = joined(&store, 1, "-");
+        let peer = joined(&store, 5, "-");
+        let (_id, agent) = started(&store, &root, 2);
+        let sent = store
+            .send(
+                &agent,
+                Some(&to(&peer.name)),
+                "q",
+                None,
+                NOW,
+                &everyone_alive,
+            )
+            .unwrap();
+        // Its next turn has a new server.
+        let not_2 = |pid: i64, _: i64| pid != 2;
+        store.adopt_name(&agent.name, 3, 1, &not_2).unwrap();
+        store
+            .send(&peer, None, "a", Some(sent[0].id), NOW, &not_2)
+            .unwrap();
+        assert!(store.has_unread(&agent.name).unwrap());
+    }
+
+    #[test]
+    fn the_name_of_an_idle_run_is_nobody_elses_while_its_client_has_no_process() {
+        let (_dir, store) = store();
+        let root = joined(&store, 1, "-");
+        let (id, agent) = started(&store, &root, 2);
+        store
+            .set_run_outcome(id, RunState::Idle, None, None, NOW)
+            .unwrap();
+        // Between turns its client and that client's server are gone; the server of the run is not.
+        let only_starter = |pid: i64, _: i64| pid == 1;
+        let stranger = join_of(9);
+        let asked = store.join(&stranger, None, Some(&agent.name), NOW, &only_starter);
+        assert!(asked.is_err(), "{asked:?}");
+        let given = store
+            .join(&stranger, None, None, NOW, &only_starter)
+            .unwrap();
+        assert_ne!(given.name, agent.name);
+
+        // The next turn's server gets it back, and a second server of that turn does not take it.
+        store.adopt_name(&agent.name, 3, 1, &only_starter).unwrap();
+        assert_eq!(store.owner(&agent.name).unwrap(), Some((3, 1)));
+        store
+            .adopt_name(&agent.name, 4, 1, &everyone_alive)
+            .unwrap();
+        assert_eq!(store.owner(&agent.name).unwrap(), Some((3, 1)));
+
+        // Once it has ended the name is free, and what it could do does not pass on with it.
+        store
+            .set_run_outcome(id, RunState::Done, None, None, NOW)
+            .unwrap();
+        assert!(
+            store
+                .run_of_agent(&agent.name, NOW, &only_starter)
+                .unwrap()
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn an_agent_keeps_its_place_in_the_graph_when_its_parent_was_renamed() {
+        let (_dir, store) = store();
+        let root = joined(&store, 1, "-");
+        let child = joined(&store, 2, &root.name);
+        store
+            .join(
+                &join_of(1),
+                Some(&root.name),
+                Some("Renamed"),
+                NOW,
+                &everyone_alive,
+            )
+            .unwrap();
+        // Its server still remembers the old name, and sets a topic.
+        let mut remembered = join_of(2);
+        remembered.parent = root.name.clone();
+        let again = store
+            .join(&remembered, Some(&child.name), None, NOW, &everyone_alive)
+            .unwrap();
+        assert_eq!(again.parent, "Renamed");
+        assert_eq!(store.depth_of(&child.name).unwrap(), 1);
+        let id = store
+            .start_run(&again, &new_run(2, 8), NOW, &everyone_alive)
+            .unwrap();
+        let run = store.run(id, NOW, &everyone_alive).unwrap().unwrap();
+        assert_eq!(run.depth, 2);
+    }
+
+    #[test]
+    fn a_list_of_runs_leaves_out_the_text_and_what_ended_long_ago() {
+        let (_dir, store) = store();
+        let root = joined(&store, 1, "-");
+        let id = store
+            .start_run(&root, &new_run(2, 8), NOW, &everyone_alive)
+            .unwrap();
+        store
+            .set_run_outcome(id, RunState::Done, Some("long answer"), None, NOW)
+            .unwrap();
+        let listed = store.runs(NOW, &everyone_alive).unwrap();
+        assert_eq!(listed.len(), 1);
+        assert!(listed[0].result.is_none());
+        let one = store.run(id, NOW, &everyone_alive).unwrap().unwrap();
+        assert_eq!(one.result.as_deref(), Some("long answer"));
+        let later = NOW + KEEP_CLOSED_LISTED_MS + 1;
+        assert!(store.runs(later, &everyone_alive).unwrap().is_empty());
+    }
+
+    #[test]
+    fn a_started_agent_is_reachable_before_any_server_of_its_own_and_can_take_its_name() {
+        let (_dir, store) = store();
+        let root = joined(&store, 1, "-");
+        let id = store
+            .start_run(&root, &new_run(2, 8), NOW, &everyone_alive)
+            .unwrap();
+        let name = store
+            .run(id, NOW, &everyone_alive)
+            .unwrap()
+            .unwrap()
+            .agent
+            .unwrap();
+        // Reachable at once, and the starter's server is still only the starter.
+        store
+            .send(&root, Some(&to(&name)), "hi", None, NOW, &everyone_alive)
+            .unwrap();
+        assert!(store.has_wakeful(&name, NOW).unwrap());
+        assert_eq!(
+            store.agent_of_process(1, 1).unwrap().as_deref(),
+            Some(root.name.as_str())
+        );
+        let at = store.address_of(&name).unwrap().unwrap();
+        assert_eq!(at.parent, root.name);
+
+        // Its own server comes, takes the name and what waits there.
+        store.adopt_name(&name, 9, 1, &everyone_alive).unwrap();
+        let mut own = join_of(9);
+        own.parent = root.name.clone();
+        let joined_as = store
+            .join(&own, None, Some(&name), NOW, &everyone_alive)
+            .unwrap();
+        assert_eq!(joined_as.name, name);
+        assert_eq!(store.agent_of_process(9, 1).unwrap(), Some(name.clone()));
+        assert!(store.has_unread(&name).unwrap());
+    }
+
+    #[test]
+    fn when_a_run_ends_nobody_holds_its_name_any_more() {
+        let (_dir, store) = store();
+        let root = joined(&store, 1, "-");
+        let id = store
+            .start_run(&root, &new_run(2, 8), NOW, &everyone_alive)
+            .unwrap();
+        let run = store.run(id, NOW, &everyone_alive).unwrap().unwrap();
+        let name = run.agent.unwrap();
+        store
+            .set_run_outcome(id, RunState::Idle, None, None, NOW)
+            .unwrap();
+        assert_eq!(store.owner(&name).unwrap(), Some((1, 1)), "still resumable");
+        store
+            .set_run_outcome(id, RunState::Done, None, None, NOW)
+            .unwrap();
+        assert_eq!(store.owner(&name).unwrap(), Some((0, 0)));
+    }
+
+    #[test]
+    fn renaming_an_agent_keeps_the_graph_together() {
+        let (_dir, store) = store();
+        let root = joined(&store, 1, "-");
+        let id = store
+            .start_run(&root, &new_run(2, 8), NOW, &everyone_alive)
+            .unwrap();
+        let agent = store
+            .run(id, NOW, &everyone_alive)
+            .unwrap()
+            .unwrap()
+            .agent
+            .unwrap();
+        store.adopt_name(&agent, 2, 1, &everyone_alive).unwrap();
+        let child = store.address_of(&agent).unwrap().unwrap();
+        store
+            .join(
+                &join_of(1),
+                Some(&root.name),
+                Some("Renamed"),
+                NOW,
+                &everyone_alive,
+            )
+            .unwrap();
+        let listed = store.who(NOW, &everyone_alive).unwrap();
+        let kid = listed
+            .iter()
+            .find(|agent| agent.name == child.name)
+            .unwrap();
+        assert_eq!(kid.parent, "Renamed");
+        let run = store.run(id, NOW, &everyone_alive).unwrap().unwrap();
+        assert_eq!(run.parent, "Renamed");
+        let found = store
+            .run_of_agent(&child.name, NOW, &everyone_alive)
+            .unwrap();
+        assert_eq!(found.unwrap().id, id);
+        assert_eq!(
+            store.agent_of_process(2, 1).unwrap().as_deref(),
+            Some(child.name.as_str())
+        );
+        assert_eq!(store.agent_of_process(2, 9).unwrap(), None, "a reused id");
     }
 
     #[test]

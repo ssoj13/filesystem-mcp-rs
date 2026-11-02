@@ -170,7 +170,7 @@ async fn test_mcp_endpoint_accessible() {
     assert!(response.status().is_success() || response.status().is_client_error());
 }
 
-/// One MCP session over HTTP: initialize, then a `chat_who` call. Returns the address it was given.
+/// One MCP session over HTTP: initialize, then a `agent_ls` call. Returns the address it was given.
 #[cfg(feature = "chat-tools")]
 async fn chat_address_of_new_session(client: &reqwest::Client, url: &str) -> String {
     const ACCEPT: &str = "application/json, text/event-stream";
@@ -210,7 +210,7 @@ async fn chat_address_of_new_session(client: &reqwest::Client, url: &str) -> Str
         .header("mcp-session-id", &session)
         .json(&serde_json::json!({
             "jsonrpc": "2.0", "id": 2, "method": "tools/call",
-            "params": {"name": "chat_who", "arguments": {}}
+            "params": {"name": "agent_ls", "arguments": {}}
         }))
         .send()
         .await
