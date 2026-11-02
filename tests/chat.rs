@@ -15,14 +15,7 @@ use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader, Lines};
 use tokio::process::{Child, ChildStdin, ChildStdout, Command};
 
 fn binary() -> PathBuf {
-    let mut path = std::env::current_exe().unwrap();
-    path.pop();
-    path.pop();
-    path.push("filesystem-mcp-rs");
-    if cfg!(windows) {
-        path.set_extension("exe");
-    }
-    path
+    PathBuf::from(env!("CARGO_BIN_EXE_filesystem-mcp-rs"))
 }
 
 struct Agent {

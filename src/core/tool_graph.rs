@@ -384,6 +384,9 @@ mod tests {
         let served = served_names();
         let missing: Vec<&str> = every_declared_name()
             .into_iter()
+            // UI Automation exists only on Windows, whatever the features say. The map itself shows
+            // only what is served, so nothing claims these elsewhere.
+            .filter(|name| cfg!(windows) || !matches!(*name, "ui" | "ui_*"))
             .filter(|name| match name.strip_suffix('*') {
                 Some(prefix) => !served.iter().any(|tool| tool.starts_with(prefix)),
                 None => !served.iter().any(|tool| tool == name),

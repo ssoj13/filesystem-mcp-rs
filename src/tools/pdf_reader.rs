@@ -401,10 +401,7 @@ fn is_suspicious_token(token: &str) -> bool {
     let weird = t
         .chars()
         .any(|c| matches!(c, ']' | '[' | '{' | '}' | '|' | '<' | '>'));
-    if weird && alpha as f64 / t.len() as f64 >= 0.5 {
-        return true;
-    }
-    false
+    weird && alpha as f64 / t.len() as f64 >= 0.5
 }
 
 /// Extract the text of the `selected` (1-indexed) pages from pdf-extract output.

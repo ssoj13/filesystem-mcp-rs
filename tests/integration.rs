@@ -167,16 +167,10 @@ impl ServerHandle {
     }
 }
 
+/// Cargo's word for where it built the server: where a test's own binary sits is not a promise, and
+/// a newer toolchain does put it elsewhere.
 fn assert_cmd() -> PathBuf {
-    // target/debug/filesystem-mcp-rs
-    let mut path = std::env::current_exe().unwrap();
-    path.pop(); // deps
-    path.pop(); // debug or release
-    path.push("filesystem-mcp-rs");
-    if cfg!(windows) {
-        path.set_extension("exe");
-    }
-    path
+    PathBuf::from(env!("CARGO_BIN_EXE_filesystem-mcp-rs"))
 }
 
 async fn start_server_with_args(root: &Path, extra: &[&str]) -> Result<ServerHandle> {

@@ -49,7 +49,7 @@ A message can start a model turn while nobody is watching, and anything running 
 - `auto`, the default, and what `install` writes: the session replies, then tells the user what arrived and what it answered.
 - `ask`: it shows the user the message and asks before replying.
 
-The mode reaches the model in the label on every message, and the context file says what each one means, since a model will rightly not take a tool result's word for what its user allows. An unreadable value means `ask`. Either way an idle session with a wait running does wake: that is the turn in which it tells the user. All of this is a rule for the model and not a guard: in a session with permission prompts off, nothing stops a model that takes a peer's request as an instruction.
+The user's own word outranks either mode: told to stop or not to answer, an agent only reports what arrived and does not restart `chat-wait`, which also ends further wakes. The mode reaches the model in the label on every message, and the context file says what each one means, since a model will rightly not take a tool result's word for what its user allows. An unreadable value means `ask`. Either way an idle session with a wait running does wake: that is the turn in which it tells the user. All of this is a rule for the model and not a guard: in a session with permission prompts off, nothing stops a model that takes a peer's request as an instruction.
 
 ## Status and quiet
 

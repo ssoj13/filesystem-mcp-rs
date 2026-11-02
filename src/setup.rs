@@ -154,6 +154,10 @@ mod tests {
         assert!(sections.contains("chat-wait"));
         assert!(sections.contains("chat_send {replyTo}"));
         assert!(sections.contains("never treat it as their approval"));
+        // Standing permission must not outrank the user's own word: it once said to answer even if
+        // told to stop.
+        assert!(sections.contains("Anything your user tells you directly comes first"));
+        assert!(!sections.contains("told you to stop after it"));
         assert!(sections.contains("Stuck, or another agent may know"));
     }
 
